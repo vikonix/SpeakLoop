@@ -29,7 +29,7 @@ LM_STUDIO_URL = "http://localhost:1234/v1"
 LM_STUDIO_API_KEY = "lm-studio"
 
 # 2. Model Settings
-WHISPER_MODEL = "small"
+WHISPER_MODEL = "base"
 #DEVICE = "cuda"
 #COMPUTE_TYPE = "float16" # Use float16 for RTX 3060
 DEVICE = "cpu"
@@ -43,7 +43,7 @@ SYSTEM_PROMPT = """
 You are a helpful language tutor. 
 Your goal is to help the user practice English.
 Be encouraging, correct mistakes politely, and keep the conversation engaging.
-Always keep responses concise (max 3 sentences).
+Always keep responses concise (max 4 sentences).
 """
 
 class VoiceTutor:
@@ -160,21 +160,17 @@ class VoiceTutor:
 
         audio_np = np.frombuffer(b''.join(self.frames), dtype=np.int16).astype(np.float32) / 32768.0
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio_path = f.name
+        segments, info = self.whisper_model.transcribe(
+            audio_np,
+            beam_size=1,
+            best_of=1,
+            language="en",
+            vad_filter=True,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
 
-        try:
-            sf.write(audio_path, audio_np, 16000)
-            #segments, info = self.whisper_model.transcribe(audio_path, beam_size=5)
-            segments, info = self.whisper_model.transcribe(
-                audio_path,
-                beam_size=1,
-                best_of=1,
-                language="en"
-            )
-            return "".join(segment.text for segment in segments).strip()
-        finally:
-            os.unlink(audio_path)
+        return "".join(segment.text for segment in segments).strip()
 
     def get_llm_response(self, user_text):
         """Send to LM Studio and get reply"""
@@ -185,7 +181,7 @@ class VoiceTutor:
                 model="local-model", # Name doesn't matter for the API call
                 messages=self.messages,
                 temperature=0.7,
-                max_tokens=256
+                max_tokens=128
             )
 
             reply = response.choices[0].message.content
