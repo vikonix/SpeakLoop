@@ -1,0 +1,13 @@
+# Core dependencies for AI and Audio
+faster-whisper
+openai
+kokoro
+numpy
+soundfile
+sounddevice
+
+# Audio recording
+pyaudio
+
+# Global keyboard listener (for Spacebar trigger)
+keyboard
