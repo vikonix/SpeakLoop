@@ -233,19 +233,31 @@ class VoiceTutor:
                 self.is_recording = False
 
     def normalize_audio(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Normalize audio to a stable peak level.
+        Avoid amplifying near-silence to prevent noise boosting.
+        """
+
         peak = np.max(np.abs(audio))
-        if peak > 0:
-            audio = audio / peak * 0.9
-        return audio.astype(np.float32)
+
+        # Ignore almost silent recordings
+        if peak < 0.01:
+            return audio.astype(np.float32)
+
+        # Normalize to 90% peak amplitude
+        audio = audio / peak * 0.9
+
+        return np.nan_to_num(audio).astype(np.float32)
 
     def process_audio(self):
         try:
             audio = self.get_recorded_audio()
-            audio = self.normalize_audio(audio)
 
             if audio is None or len(audio) < WHISPER_SAMPLE_RATE * 0.2:
                 print("No useful audio captured.")
                 return
+
+            audio = self.normalize_audio(audio)
 
             stt_start = time.perf_counter()
             user_text = self.transcribe_audio(audio)

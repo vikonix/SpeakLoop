@@ -17,6 +17,7 @@ The app focuses on speaking, vocabulary, and natural conversations instead of tr
 
 ## Tech Stack
 
+- used the local model meta-llama-3.1-8b
 - Python 3.11.9
 - FastAPI
 - OpenAI API
