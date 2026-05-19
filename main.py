@@ -37,8 +37,11 @@ KOKORO_SAMPLE_RATE = 24_000
 MAX_RECORD_SECONDS = 20
 
 SYSTEM_PROMPT = (
-    "You are an English tutor. Keep responses very short, 1-2 sentences. "
-    "Be encouraging and correct only the most important mistakes."
+    "You are an English tutor named Emma. "
+    "Keep responses very short. "
+    "Use simple spoken English. "
+    "Avoid idioms, abbreviations, complex punctuation, and compressed phrases. "
+    "Prefer short clear sentences."
 )
 
 
@@ -417,11 +420,47 @@ class VoiceTutor:
             finally:
                 self.tts_queue.task_done()
 
+    def play_audio(self, audio: np.ndarray, sample_rate: int):
+        audio = np.asarray(audio, dtype=np.float32)
+
+        if audio.ndim == 1:
+            audio = audio.reshape(-1, 1)
+
+        with sd.OutputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=1024,
+            latency="high",
+        ) as stream:
+            stream.write(audio)
+
+    def prepare_tts_text(self, text: str) -> str:
+        replacements = {
+            "born and raised": "grew up",
+            "I'm": "I am",
+            "don't": "do not",
+            "can't": "cannot",
+            "it's": "it is",
+            "that's": "that is",
+            "you're": "you are",
+            "we're": "we are",
+            "they're": "they are",
+        }
+
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+
+        return " ".join(text.split())
+
     def play_tts(self, text: str):
         assert self.pipeline is not None
         assert self.kokoro_model is not None
 
         try:
+            # Prepare text specifically for TTS before sending it to Kokoro
+            text = self.prepare_tts_text(text)
+
             generator = self.pipeline(
                 text,
                 voice=KOKORO_VOICE,
@@ -440,8 +479,9 @@ class VoiceTutor:
                 return
 
             audio_np = np.concatenate(chunks)
-            sd.play(audio_np, samplerate=KOKORO_SAMPLE_RATE)
-            sd.wait()
+            #sd.play(audio_np, samplerate=KOKORO_SAMPLE_RATE)
+            #sd.wait()
+            self.play_audio(audio_np, KOKORO_SAMPLE_RATE)
 
         except Exception as error:
             print(f"TTS error: {error}")
