@@ -28,7 +28,7 @@ LM_STUDIO_URL = "http://localhost:1234/v1"
 LM_STUDIO_API_KEY = "lm-studio"
 LM_STUDIO_MODEL = "local-model"
 
-WHISPER_MODEL = "tiny"
+WHISPER_MODEL = "base.en"
 WHISPER_SAMPLE_RATE = 16_000
 
 KOKORO_VOICE = "af_heart"
@@ -232,9 +232,16 @@ class VoiceTutor:
             with self.record_lock:
                 self.is_recording = False
 
+    def normalize_audio(self, audio: np.ndarray) -> np.ndarray:
+        peak = np.max(np.abs(audio))
+        if peak > 0:
+            audio = audio / peak * 0.9
+        return audio.astype(np.float32)
+
     def process_audio(self):
         try:
             audio = self.get_recorded_audio()
+            audio = self.normalize_audio(audio)
 
             if audio is None or len(audio) < WHISPER_SAMPLE_RATE * 0.2:
                 print("No useful audio captured.")
@@ -290,15 +297,25 @@ class VoiceTutor:
         segments, _info = self.whisper_model.transcribe(
             audio,
             language="en",
-            beam_size=1,
-            best_of=1,
+            task="transcribe",
+            beam_size=3,
+            best_of=3,
             vad_filter=True,
-            no_speech_threshold=0.6,
+            vad_parameters={
+                "min_speech_duration_ms": 250,
+                "min_silence_duration_ms": 500,
+                "speech_pad_ms": 300,
+            },
+            no_speech_threshold=0.45,
             condition_on_previous_text=False,
             without_timestamps=True,
             temperature=0.0,
+            initial_prompt=(
+                "This is a conversation with an English tutor. "
+                "The speaker is practicing simple English phrases."
+            ),
         )
-
+        
         text = " ".join(segment.text.strip() for segment in segments).strip()
         return self.clean_transcript(text)
 
