@@ -34,6 +34,7 @@ WHISPER_SAMPLE_RATE = 16_000  # Whisper expects 16kHz audio input
 KOKORO_LANG_CODE = "a" 
 KOKORO_VOICE = "af_heart"
 KOKORO_SAMPLE_RATE = 24_000  # Kokoro outputs 24kHz audio
+KOKORO_WARMUP_WORD = "Hi."
 
 # =====================================================================
 # UI & Hardware Settings
