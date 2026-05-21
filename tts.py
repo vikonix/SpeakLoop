@@ -16,15 +16,15 @@ KOKORO_SAMPLE_RATE = 24_000   # Kokoro synthesizes native 24kHz audio outputs
 KOKORO_WARMUP_WORDS = {
     "a": "Hi.",        # English (American)
     "b": "Hi.",        # English (British)
-    "j": "こんにちは", # Japanese
-    "z": "你好",       # Chinese
     "e": "Hola.",      # Spanish
     "f": "Salut.",     # French
+    "g": "Hallo.",     # German
     "h": "नमस्ते",     # Hindi
     "i": "Ciao.",      # Italian
+    "j": "こんにちは", # Japanese
     "p": "Olá.",       # Portuguese
     "r": "Привет.",    # Russian
-    "g": "Hallo.",     # German
+    "z": "你好",       # Chinese
 }
 AUDIO_BLOCKSIZE = 1024
 AUDIO_LATENCY = "low"
