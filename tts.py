@@ -1,4 +1,3 @@
-import time
 from threading import Event
 import numpy as np
 import torch
@@ -86,4 +85,3 @@ class TTSManager:
 
         except Exception as error:
             print(f"\nTTS Stream Play error: {error}")
-			

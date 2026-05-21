@@ -72,11 +72,11 @@ class LLMManager:
 
                 parts = sentence_end.split(sentence_buffer)
                 if len(parts) > 1:
-                    for i in range(len(parts) - 1):
-                        text_to_speak = parts[i].strip()
+                    sentence_buffer = parts.pop()
+                    for item in parts:
+                        text_to_speak = item.strip()
                         if text_to_speak:
                             tts_queue.put(text_to_speak)
-                    sentence_buffer = parts[-1]
 
             # Flush any residual text remaining inside the buffer
             remaining_text = sentence_buffer.strip()
@@ -102,4 +102,3 @@ class LLMManager:
         max_messages = max_pairs * 2
         conversation = conversation[-max_messages:]
         self.messages = [system_message] + conversation
-		

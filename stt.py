@@ -67,4 +67,3 @@ class STTManager:
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
         return text
-		
