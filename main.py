@@ -2,14 +2,34 @@ import time
 import queue
 import threading
 from typing import Optional
+import os
+import warnings
 import numpy as np
 import sounddevice as sd
 import keyboard
 
+# Disable Hugging Face hub symlinks warning for a cleaner console output
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# Ignore specific deprecation and model warnings from underlying libraries
+warnings.filterwarnings("ignore", message="dropout option adds dropout.*")
+warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
+
 import config
-from stt import STTManager
+from stt import STTManager, DEVICE, COMPUTE_TYPE, WHISPER_SAMPLE_RATE
 from llm import LLMManager
 from tts import TTSManager
+
+# Technical recording & signal processing parameters
+AUDIO_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
+AUDIO_LATENCY = "low"   # Optimizes underlying sound card capture profiles
+AUDIO_CHANNELS = 1      # Mono recording/playback mode
+AUDIO_INPUT_DEVICE = None   # None defaults to OS system default microphone
+
+# Signal gain normalization parameters
+AUDIO_MIN_PEAK_THRESHOLD = 0.01      # Prevents boosting pure background noise floor during silence
+AUDIO_NORMALIZATION_CEILING = 0.9    # Scales the peak target output level directly to 90%
+
 
 class VoiceTutorApp:
     def __init__(self):
@@ -37,7 +57,7 @@ class VoiceTutorApp:
         print(f"Voice Tutor MVP ({config.NATIVE_LANGUAGE} -> {config.TARGET_LANGUAGE})")
         print("=" * 50)
         print(f"Audio backend: sounddevice")
-        print(f"Device: {config.DEVICE}, compute type: {config.COMPUTE_TYPE}")
+        print(f"Device: {DEVICE}, compute type: {COMPUTE_TYPE}")
 
         # Core initialization blocks
         print("Loading components...")
@@ -58,11 +78,11 @@ class VoiceTutorApp:
         self.tts_thread.start()
 
         # Register global hotkeys
-        keyboard.on_press_key("space", self.on_space_press)
-        keyboard.on_release_key("space", self.on_space_release)
-        keyboard.on_press_key("esc", lambda _: self.shutdown_event.set())
+        keyboard.on_press_key(config.HOTKEY_RECORD, self.on_space_press)
+        keyboard.on_release_key(config.HOTKEY_RECORD, self.on_space_release)
+        keyboard.on_press_key(config.HOTKEY_QUIT, lambda _: self.shutdown_event.set())
 
-        print("\nReady. Hold SPACE to speak. Press ESC to quit.\n")
+        print(f"\nReady. Hold {config.HOTKEY_RECORD.upper()} to speak. Press {config.HOTKEY_QUIT.upper()} to quit.\n")
 
         try:
             while not self.shutdown_event.is_set():
@@ -109,11 +129,12 @@ class VoiceTutorApp:
 
         try:
             with sd.InputStream(
-                    samplerate=config.WHISPER_SAMPLE_RATE,
-                    channels=1,
+                    samplerate=WHISPER_SAMPLE_RATE,
+                    channels=AUDIO_CHANNELS,
                     dtype="float32",
-                    blocksize=1024,
-                    latency="low",
+                    blocksize=AUDIO_BLOCKSIZE,
+                    latency=AUDIO_LATENCY,
+                    device=AUDIO_INPUT_DEVICE,
                     callback=callback,
             ):
                 while True:
@@ -138,15 +159,15 @@ class VoiceTutorApp:
 
     def normalize_audio(self, audio: np.ndarray) -> np.ndarray:
         peak = np.max(np.abs(audio))
-        if peak < 0.01:
+        if peak < AUDIO_MIN_PEAK_THRESHOLD:
             return audio.astype(np.float32)
-        audio = audio / peak * 0.9
+        audio = audio / peak * AUDIO_NORMALIZATION_CEILING
         return np.nan_to_num(audio).astype(np.float32)
 
     def process_audio(self):
         try:
             audio = self.get_recorded_audio()
-            if audio is None or len(audio) < config.WHISPER_SAMPLE_RATE * 0.2:
+            if audio is None or len(audio) < WHISPER_SAMPLE_RATE * 0.2:
                 print("No useful audio captured.")
                 return
 

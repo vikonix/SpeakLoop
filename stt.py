@@ -1,6 +1,18 @@
 import numpy as np
+import torch
 from faster_whisper import WhisperModel
 import config
+
+# Hardware Acceleration setup
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
+
+# Technical transcription configuration
+WHISPER_SAMPLE_RATE = 16_000   # Whisper architecture requires strict 16kHz audio layouts
+WHISPER_VAD_MIN_SPEECH_MS = 250   # Shortest duration considered as valid spoken word segments
+WHISPER_VAD_MIN_SILENCE_MS = 500  # Silence gap thickness required before triggering split boundaries
+WHISPER_VAD_SPEECH_PAD_MS = 300   # Padding attached around text fragments to avoid chopping words
+
 
 class STTManager:
     def __init__(self):
@@ -10,8 +22,8 @@ class STTManager:
         """Instantiates the Whisper AI engine into memory."""
         self.model = WhisperModel(
             config.WHISPER_MODEL,
-            device=config.DEVICE,
-            compute_type=config.COMPUTE_TYPE,
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE,
             cpu_threads=4,
             num_workers=1,
         )
@@ -19,8 +31,8 @@ class STTManager:
     def warm_up(self):
         """Runs a mock inference pass to eliminate initial latency."""
         assert self.model is not None
-        dummy_audio = np.zeros(config.WHISPER_SAMPLE_RATE, dtype=np.float32)
-        list(self.model.transcribe(dummy_audio, language=config.TARGET_LANG_CODE, beam_size=1, vad_filter=True)[0])
+        dummy_audio = np.zeros(WHISPER_SAMPLE_RATE, dtype=np.float32)
+        list(self.model.transcribe(dummy_audio, language=config.TARGET_LANG_CODE, beam_size=config.WHISPER_BEAM_SIZE, vad_filter=True)[0])
 
     def transcribe(self, audio: np.ndarray) -> str:
         """Passes the audio waveform data into Whisper for text extraction."""
@@ -30,21 +42,18 @@ class STTManager:
             audio,
             language=config.TARGET_LANG_CODE,
             task="transcribe",
-            beam_size=1,
+            beam_size=config.WHISPER_BEAM_SIZE,
             vad_filter=True,
             vad_parameters={
-                "min_speech_duration_ms": 250,
-                "min_silence_duration_ms": 500,
-                "speech_pad_ms": 300,
+                "min_speech_duration_ms": WHISPER_VAD_MIN_SPEECH_MS,
+                "min_silence_duration_ms": WHISPER_VAD_MIN_SILENCE_MS,
+                "speech_pad_ms": WHISPER_VAD_SPEECH_PAD_MS,
             },
-            no_speech_threshold=0.45,
+            no_speech_threshold=config.WHISPER_NO_SPEECH_THRESHOLD,
             condition_on_previous_text=False,
             without_timestamps=True,
             temperature=0.0,
-            initial_prompt=(
-                f"This is a conversation with a {config.TARGET_LANGUAGE} tutor. "
-                f"The speaker is practicing simple phrases."
-            ),
+            initial_prompt=config.WHISPER_INITIAL_PROMPT,
         )
 
         text = " ".join(segment.text.strip() for segment in segments).strip()

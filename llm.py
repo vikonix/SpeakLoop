@@ -4,6 +4,10 @@ from threading import Event
 from openai import OpenAI
 import config
 
+# Technical configuration parameters
+LLM_TIMEOUT = 5.0
+
+
 class LLMManager:
     def __init__(self):
         self.client = None
@@ -15,7 +19,7 @@ class LLMManager:
         self.client = OpenAI(
             base_url=config.LM_STUDIO_URL,
             api_key=config.LM_STUDIO_API_KEY,
-            timeout=5.0,
+            timeout=LLM_TIMEOUT,
         )
 
     def check_connection(self) -> bool:
@@ -36,17 +40,17 @@ class LLMManager:
         assert self.client is not None
 
         self.messages.append({"role": "user", "content": user_text})
-        self._trim_history(max_pairs=4)
+        self._trim_history()
 
         try:
             stream_response = self.client.chat.completions.create(
                 model=config.LM_STUDIO_MODEL,
                 messages=self.messages,
-                temperature=0.3,
-                max_tokens=50,
-                top_p=0.9,
+                temperature=config.LLM_TEMPERATURE,
+                max_tokens=config.LLM_MAX_TOKENS,
+                top_p=config.LLM_TOP_P,
                 stream=True,
-                timeout=5.0,
+                timeout=LLM_TIMEOUT,
             )
 
             full_reply = ""
@@ -81,7 +85,7 @@ class LLMManager:
 
             final_reply = full_reply.strip() if full_reply.strip() else "Sorry, I did not get a response."
             self.messages.append({"role": "assistant", "content": final_reply})
-            self._trim_history(max_pairs=4)
+            self._trim_history()
 
             return final_reply
 
@@ -89,8 +93,10 @@ class LLMManager:
             print(f"\nLLM Stream error: {error}")
             return "Sorry, please try again."
 
-    def _trim_history(self, max_pairs: int):
+    def _trim_history(self, max_pairs: int = None):
         """Prunes conversation state list sizes to conserve system context window bounds."""
+        if max_pairs is None:
+            max_pairs = config.LLM_HISTORY_MAX_PAIRS
         system_message = self.messages[0]
         conversation = self.messages[1:]
         max_messages = max_pairs * 2
