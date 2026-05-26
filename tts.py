@@ -5,8 +5,6 @@ import sounddevice as sd
 from kokoro import KModel, KPipeline
 import config
 
-# Hardware Acceleration setup
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Technical synthesizer & audio configurations
 KOKORO_SAMPLE_RATE = 24_000   # Kokoro synthesizes native 24kHz audio outputs
@@ -38,7 +36,7 @@ class TTSManager:
 
     def load_model(self):
         """Instantiates Kokoro TTS network into memory."""
-        self.model = KModel(repo_id="hexgrad/Kokoro-82M").to(DEVICE)
+        self.model = KModel(repo_id="hexgrad/Kokoro-82M").to(config.DEVICE)
         self.pipeline = KPipeline(lang_code=config.KOKORO_LANG_CODE)
 
     def warm_up(self):

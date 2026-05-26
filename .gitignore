@@ -1,2 +1,33 @@
-.idea
-__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Audio
+*.wav
+*.mp3
+*.flac
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

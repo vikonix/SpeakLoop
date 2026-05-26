@@ -3,9 +3,8 @@ import torch
 from faster_whisper import WhisperModel
 import config
 
-# Hardware Acceleration setup
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
+
+COMPUTE_TYPE = "float16" if config.DEVICE == "cuda" else "int8"
 
 # Technical transcription configuration
 WHISPER_SAMPLE_RATE = 16_000   # Whisper architecture requires strict 16kHz audio layouts
@@ -22,7 +21,7 @@ class STTManager:
         """Instantiates the Whisper AI engine into memory."""
         self.model = WhisperModel(
             config.WHISPER_MODEL,
-            device=DEVICE,
+            device=config.DEVICE,
             compute_type=COMPUTE_TYPE,
             cpu_threads=4,
             num_workers=1,

@@ -1,3 +1,5 @@
+import torch
+
 # =====================================================================
 # Language Pair & Persona Configuration
 # =====================================================================
@@ -27,6 +29,9 @@ MAX_RECORD_SECONDS = 20
 # =====================================================================
 # LLM (LM Studio) Settings
 # =====================================================================
+# Hardware Acceleration setup
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 # Local server backend endpoint connections
 LM_STUDIO_URL = "http://localhost:1234/v1"
 LM_STUDIO_API_KEY = "lm-studio"

@@ -5,7 +5,7 @@ from openai import OpenAI
 import config
 
 # Technical configuration parameters
-LLM_TIMEOUT = 5.0
+LLM_TIMEOUT = 30.0
 
 
 class LLMManager:
