@@ -1,4 +1,5 @@
 import re
+import logging
 from queue import Queue
 from threading import Event
 from openai import OpenAI
@@ -16,6 +17,7 @@ class LLMManager:
 
     def init_client(self):
         """Configure OpenAI compatible client mapped to look at local LM Studio instance."""
+        logging.info("Initializing LM Studio client...")
         self.client = OpenAI(
             base_url=config.LM_STUDIO_URL,
             api_key=config.LM_STUDIO_API_KEY,
@@ -27,18 +29,20 @@ class LLMManager:
         try:
             assert self.client is not None
             self.client.models.list()
+            logging.info("Successfully connected to LM Studio.")
             return True
         except Exception as error:
-            print(f"LM Studio not available: {error}")
+            logging.error(f"LM Studio not available: {error}")
             return False
 
-    def stream_and_queue_tts(self, user_text: str, tts_queue: Queue, stop_event: Event) -> str:
+    def stream_and_queue_tts(self, user_text: str, tts_queue: Queue, stop_event: Event, token_callback=None) -> str:
         """
         Streams text from the LLM, parses sentences using regex on-the-fly,
         and pushes completed strings into the TTS queue.
         """
         assert self.client is not None
 
+        logging.info(f"LLM request started for user input: {user_text!r}")
         self.messages.append({"role": "user", "content": user_text})
         self._trim_history()
 
@@ -60,13 +64,17 @@ class LLMManager:
 
             for chunk in stream_response:
                 if stop_event.is_set():
+                    logging.info("LLM streaming interrupted by user stop event.")
                     break
 
                 token = chunk.choices[0].delta.content or ""
                 if not token:
                     continue
 
-                print(token, end="", flush=True)
+                if token_callback:
+                    token_callback(token)
+                else:
+                    print(token, end="", flush=True)
                 full_reply += token
                 sentence_buffer += token
 
@@ -76,21 +84,24 @@ class LLMManager:
                     for item in parts:
                         text_to_speak = item.strip()
                         if text_to_speak:
+                            logging.info(f"Queued sentence to TTS: {text_to_speak!r}")
                             tts_queue.put(text_to_speak)
 
             # Flush any residual text remaining inside the buffer
             remaining_text = sentence_buffer.strip()
             if remaining_text and not stop_event.is_set():
+                logging.info(f"Queued final sentence segment to TTS: {remaining_text!r}")
                 tts_queue.put(remaining_text)
 
             final_reply = full_reply.strip() if full_reply.strip() else "Sorry, I did not get a response."
             self.messages.append({"role": "assistant", "content": final_reply})
             self._trim_history()
 
+            logging.info(f"LLM full response: {final_reply!r}")
             return final_reply
 
         except Exception as error:
-            print(f"\nLLM Stream error: {error}")
+            logging.error(f"LLM Stream error: {error}")
             return "Sorry, please try again."
 
     def _trim_history(self, max_pairs: int = None):

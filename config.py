@@ -65,3 +65,9 @@ WHISPER_INITIAL_PROMPT = (
 # Voice synthesis operational parameters
 KOKORO_LANG_CODE = "a"        # 'a' stands for American English voice pipelines, 'b' for British
 KOKORO_VOICE = "af_heart"     # Chosen voice model matrix file
+
+# =====================================================================
+# Logging Settings
+# =====================================================================
+LOG_FILE = "voice_tutor.log"
+

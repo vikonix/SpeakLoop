@@ -1,3 +1,4 @@
+import logging
 from threading import Event
 import numpy as np
 import torch
@@ -82,4 +83,4 @@ class TTSManager:
                     stream.write(audio_chunk)
 
         except Exception as error:
-            print(f"\nTTS Stream Play error: {error}")
+            logging.error(f"TTS Stream Play error: {error}")

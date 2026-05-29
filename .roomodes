@@ -1,0 +1,13 @@
+{
+  "allowedTools": ["read", "edit", "terminal"],
+  "terminalAllowlist": [
+    "cmake", "make", "ninja", "ctest",
+    "python", "pytest", "mypy", "black", "isort",
+    "clang-tidy", "clang-format", "git"
+  ],
+  "denyCommands": ["rm -rf", "sudo", "apt", "pip install --user"],
+  "editPaths": ["src/", "include/", "tests/", "*.py", "*.cpp", "*.h"],
+  "readPaths": ["**/*"],
+  "maxConsecutiveEdits": 15,
+  "autoApprove": false
+}
