@@ -45,16 +45,17 @@ AUDIO_INPUT_DEVICE = None   # None defaults to OS system default microphone
 AUDIO_MIN_PEAK_THRESHOLD = 0.01      # Prevents boosting pure background noise floor during silence
 AUDIO_NORMALIZATION_CEILING = 0.9    # Scales the peak target output level directly to 90%
 
+
 class VoiceTutorGUI:
     def __init__(self):
         logging.info("Starting Voice Tutor GUI Application...")
-        
+
         # Core Tkinter setup
         self.root = tk.Tk()
         self.root.title("Emma - Voice Tutor")
         self.root.geometry("500x700")
         self.root.configure(bg="#121214")
-        
+
         # Thread management events
         self.shutdown_event = threading.Event()
         self.tts_stop_event = threading.Event()
@@ -65,6 +66,14 @@ class VoiceTutorGUI:
         self.record_lock = threading.Lock()
         self.recorded_chunks: list[np.ndarray] = []
         self.record_thread: Optional[threading.Thread] = None
+
+        # Audio processing guard — prevents concurrent process_audio() calls (T3 fix)
+        self.is_processing_audio = False
+        self.processing_lock = threading.Lock()
+
+        # TTS state tracking — avoids reading Tkinter widget from background thread (B3 fix)
+        self._tts_is_speaking = False
+        self.tts_state_lock = threading.Lock()
 
         # Text-to-Speech background queue and thread
         self.tts_queue: queue.Queue[str] = queue.Queue()
@@ -88,7 +97,7 @@ class VoiceTutorGUI:
     def setup_styles(self):
         self.style = ttk.Style()
         self.style.theme_use("clam")
-        
+
         # Configure scrollbar styling
         self.style.configure("Vertical.TScrollbar",
                              gripcount=0,
@@ -101,16 +110,16 @@ class VoiceTutorGUI:
         # 1. Header Area (Top)
         header_frame = tk.Frame(self.root, bg="#121214", height=60)
         header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=10)
-        
+
         title_label = tk.Label(header_frame, text="EMMA • Voice Tutor", font=("Segoe UI", 16, "bold"), fg="#8a2be2", bg="#121214")
         title_label.pack(side=tk.LEFT)
-        
-        lang_label = tk.Label(header_frame, 
-                             text=f"{config.NATIVE_LANGUAGE} ➔ {config.TARGET_LANGUAGE}", 
-                             font=("Segoe UI", 9, "bold"), 
-                             fg="#a0a0a5", 
-                             bg="#1a1a1e", 
-                             padx=10, 
+
+        lang_label = tk.Label(header_frame,
+                             text=f"{config.NATIVE_LANGUAGE} ➔ {config.TARGET_LANGUAGE}",
+                             font=("Segoe UI", 9, "bold"),
+                             fg="#a0a0a5",
+                             bg="#1a1a1e",
+                             padx=10,
                              pady=4,
                              bd=0)
         lang_label.pack(side=tk.RIGHT)
@@ -118,21 +127,21 @@ class VoiceTutorGUI:
         # 2. Status & Stats Bar (Absolute Bottom)
         self.status_bar = tk.Frame(self.root, bg="#1a1a1e", height=30)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        
+
         self.status_label = tk.Label(
-            self.status_bar, 
-            text="Status: Starting...", 
-            font=("Segoe UI", 9), 
-            fg="#00e676", 
+            self.status_bar,
+            text="Status: Starting...",
+            font=("Segoe UI", 9),
+            fg="#00e676",
             bg="#1a1a1e"
         )
         self.status_label.pack(side=tk.LEFT, padx=15, pady=4)
 
         self.stats_label = tk.Label(
-            self.status_bar, 
-            text="STT: --ms | LLM: --ms", 
-            font=("Segoe UI", 9), 
-            fg="#a0a0a5", 
+            self.status_bar,
+            text="STT: --ms | LLM: --ms",
+            font=("Segoe UI", 9),
+            fg="#a0a0a5",
             bg="#1a1a1e"
         )
         self.stats_label.pack(side=tk.RIGHT, padx=15, pady=4)
@@ -146,15 +155,15 @@ class VoiceTutorGUI:
         self.btn_canvas.pack(pady=5)
         self.btn_canvas.bind("<ButtonPress-1>", lambda e: self.on_gui_btn_press())
         self.btn_canvas.bind("<ButtonRelease-1>", lambda e: self.on_gui_btn_release())
-        
+
         self.draw_mic_button("loading")
 
         # Instruction Text
         self.instruction_label = tk.Label(
-            control_frame, 
-            text="Loading components...", 
-            font=("Segoe UI", 10), 
-            fg="#a0a0a5", 
+            control_frame,
+            text="Loading components...",
+            font=("Segoe UI", 10),
+            fg="#a0a0a5",
             bg="#121214"
         )
         self.instruction_label.pack(pady=5)
@@ -164,9 +173,9 @@ class VoiceTutorGUI:
         chat_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=20, pady=5)
 
         self.chat_display = scrolledtext.ScrolledText(
-            chat_frame, 
-            bg="#1a1a1e", 
-            fg="#f8f8f2", 
+            chat_frame,
+            bg="#1a1a1e",
+            fg="#f8f8f2",
             insertbackground="#ffffff",
             font=("Segoe UI", 11),
             wrap=tk.WORD,
@@ -191,11 +200,11 @@ class VoiceTutorGUI:
 
     def draw_mic_button(self, state):
         self.btn_canvas.delete("all")
-        
+
         # Center coordinates
         cx, cy = 50, 50
         r_outer, r_inner = 42, 34
-        
+
         if state == "loading":
             bg_color = "#1e1e24"
             outline_color = "#44475a"
@@ -232,7 +241,7 @@ class VoiceTutorGUI:
         # Keyboard Push-to-Talk bindings
         self.root.bind("<KeyPress-space>", self.on_keyboard_press)
         self.root.bind("<KeyRelease-space>", self.on_keyboard_release)
-        
+
         # Escape bindings to shut down gracefully
         self.root.bind("<Escape>", lambda _: self.quit_app())
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
@@ -287,10 +296,10 @@ class VoiceTutorGUI:
         try:
             self.stt_mgr.load_model()
             logging.info("STT Model loaded successfully.")
-            
+
             self.tts_mgr.load_model()
             logging.info("TTS Model loaded successfully.")
-            
+
             self.llm_mgr.init_client()
             if not self.llm_mgr.check_connection():
                 self.root.after(0, self.append_system_msg, "Warning: LM Studio is offline. Start it to use voice tutor!")
@@ -316,6 +325,8 @@ class VoiceTutorGUI:
             self.root.after(0, self.update_status, "Initialization Failed", "#ff5555")
 
     def make_app_ready(self):
+        with self.tts_state_lock:
+            self._tts_is_speaking = False
         self.draw_mic_button("idle")
         self.update_status("Ready", "#00e676")
         self.update_instruction(f"Hold SPACE or click Button to speak. Press ESC to quit.")
@@ -348,16 +359,17 @@ class VoiceTutorGUI:
         with self.record_lock:
             if self.is_recording:
                 return  # Safety guard
-            
+
             logging.info("Starting audio recording...")
             self.stop_current_tts()
             self.is_recording = True
             self.recorded_chunks = []
-            
-            self.draw_mic_button("recording")
-            self.update_status("Recording...", "#ff5555")
-            self.update_instruction("Release key or click button when finished speaking.")
-            
+
+            # All GUI updates scheduled on main thread via root.after (B1 fix)
+            self.root.after(0, self.draw_mic_button, "recording")
+            self.root.after(0, self.update_status, "Recording...", "#ff5555")
+            self.root.after(0, self.update_instruction, "Release key or click button when finished speaking.")
+
             self.record_thread = threading.Thread(target=self.record_loop, daemon=True)
             self.record_thread.start()
 
@@ -368,13 +380,29 @@ class VoiceTutorGUI:
             logging.info("Stopping audio recording...")
             self.is_recording = False
 
-        self.draw_mic_button("processing")
-        self.update_status("Processing Speech (STT)...", "#ffb86c")
-        
+        # GUI updates after releasing lock, but record_loop is joined first (B1 fix)
+        self.root.after(0, self.draw_mic_button, "processing")
+        self.root.after(0, self.update_status, "Processing Speech (STT)...", "#ffb86c")
+
         if self.record_thread:
             self.record_thread.join(timeout=1.5)
 
-        threading.Thread(target=self.process_audio, daemon=True).start()
+        # Guard against concurrent process_audio() calls (T3 fix)
+        with self.processing_lock:
+            if self.is_processing_audio:
+                logging.warning("process_audio already running, skipping duplicate.")
+                return
+            self.is_processing_audio = True
+
+        threading.Thread(target=self._process_audio_safe, daemon=True).start()
+
+    def _process_audio_safe(self):
+        """Wrapper that ensures process_audio runs exactly once and releases the guard."""
+        try:
+            self.process_audio()
+        finally:
+            with self.processing_lock:
+                self.is_processing_audio = False
 
     def record_loop(self):
         start_time = time.time()
@@ -456,31 +484,33 @@ class VoiceTutorGUI:
             # Update User Speech to GUI
             self.root.after(0, self.append_user_msg, user_text)
             self.root.after(0, self.update_status, "Thinking (LLM)...", "#8be9fd")
-            
+
             # Start LLM stream feeding the TTS queue
             llm_start = time.perf_counter()
             self.clear_tts_queue()
             self.tts_stop_event.clear()
-            
+
             self.root.after(0, self.append_emma_start)
-            
+
             # Streaming callback to append tokens live
             def token_cb(token):
                 self.root.after(0, self.append_emma_token, token)
-            
+
             _full_response = self.llm_mgr.stream_and_queue_tts(
-                user_text, 
-                self.tts_queue, 
-                self.tts_stop_event, 
+                user_text,
+                self.tts_queue,
+                self.tts_stop_event,
                 token_callback=token_cb
             )
-            
+
             llm_ms = (time.perf_counter() - llm_start) * 1000
             logging.info(f"LLM complete streaming and queuing. Duration: {llm_ms:.0f}ms")
 
             self.root.after(0, self.append_emma_end)
             self.root.after(0, self.update_stats, stt_ms, llm_ms)
-            
+
+            with self.tts_state_lock:
+                self._tts_is_speaking = True
             self.root.after(0, self.draw_mic_button, "speaking")
             self.root.after(0, self.update_status, "Emma is speaking...", "#ff79c6")
 
@@ -500,6 +530,8 @@ class VoiceTutorGUI:
 
     def stop_current_tts(self):
         logging.info("Stopping active text-to-speech output...")
+        with self.tts_state_lock:
+            self._tts_is_speaking = False
         self.tts_stop_event.set()
         self.clear_tts_queue()
         sd.stop()
@@ -519,11 +551,16 @@ class VoiceTutorGUI:
             except queue.Empty:
                 # If we are done speaking and no new items in queue, transition status back to ready
                 if not self.is_recording and not self.tts_stop_event.is_set() and self.tts_queue.empty():
-                    # Only change status if current state was 'speaking'
-                    if self.status_label.cget("text") == "Status: Emma is speaking...":
+                    # Use internal state variable instead of reading Tkinter widget (B3 fix)
+                    with self.tts_state_lock:
+                        tts_speaking = self._tts_is_speaking
+
+                    if tts_speaking:
                         self.root.after(0, self.draw_mic_button, "idle")
                         self.root.after(0, self.update_status, "Ready", "#00e676")
                         self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                        with self.tts_state_lock:
+                            self._tts_is_speaking = False
                 continue
 
             try:
@@ -539,6 +576,11 @@ class VoiceTutorGUI:
         logging.info("Shutting down VoiceTutor App...")
         self.shutdown_event.set()
         self.stop_current_tts()
+        # Explicitly close log handlers (R1 fix)
+        for handler in logging.root.handlers[:]:
+            handler.close()
+            logging.root.removeHandler(handler)
+        logging.shutdown()
         self.root.destroy()
 
     def run(self):
