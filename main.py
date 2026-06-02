@@ -30,7 +30,7 @@ logging.basicConfig(
     level=logging.INFO,
     format=log_format,
     handlers=[
-        logging.FileHandler(config.LOG_FILE, encoding="utf-8"),
+        logging.FileHandler(config.LOG_FILE, mode="w", encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
