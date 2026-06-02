@@ -1,10 +1,22 @@
 import logging
-from threading import Event
+from threading import Event, Lock
 import numpy as np
 import torch
 import sounddevice as sd
 from kokoro import KModel, KPipeline
 import config
+import io
+import wave
+import time
+
+try:
+    import winsound
+    WINSOUND_AVAILABLE = True
+except ImportError:
+    WINSOUND_AVAILABLE = False
+
+# Global thread-safety lock for PortAudio/sounddevice operations on Windows
+sound_lock = Lock()
 
 
 # Technical synthesizer & audio configurations
@@ -24,8 +36,8 @@ KOKORO_WARMUP_WORDS = {
     "r": "Привет.",    # Russian
     "z": "你好",       # Chinese
 }
-AUDIO_BLOCKSIZE = 1024
-AUDIO_LATENCY = "low"
+AUDIO_BLOCKSIZE = 0
+AUDIO_LATENCY = None
 AUDIO_CHANNELS = 1
 AUDIO_OUTPUT_DEVICE = None
 
@@ -63,24 +75,90 @@ class TTSManager:
                 model=self.model,
             )
 
-            with sd.OutputStream(
-                    samplerate=KOKORO_SAMPLE_RATE,
-                    channels=AUDIO_CHANNELS,
-                    dtype="float32",
-                    blocksize=AUDIO_BLOCKSIZE,
-                    latency=AUDIO_LATENCY,
-                    device=AUDIO_OUTPUT_DEVICE,
-            ) as stream:
+            # 1. Synthesize all audio chunks first to avoid keeping the audio stream open and idle
+            # during VRAM/GPU contention between llama_cpp and Kokoro
+            audio_chunks = []
+            for _, _, audio in generator:
+                if stop_event.is_set() or shutdown_event.is_set():
+                    return
+                if audio is not None and len(audio) > 0:
+                    audio_chunks.append(np.asarray(audio, dtype=np.float32))
 
-                for _, _, audio in generator:
+            if not audio_chunks:
+                return
+
+            # Combine all synthesized chunks into a single array
+            full_audio = np.concatenate(audio_chunks)
+
+            # Windows-only robust winsound implementation (completely bypasses PortAudio MME error 6)
+            if WINSOUND_AVAILABLE:
+                # Normalise audio peak just in case to avoid clipping
+                peak = np.max(np.abs(full_audio))
+                if peak > 0:
+                    full_audio = full_audio / peak * 0.9
+
+                # Convert float32 array (-1.0 to 1.0) to 16-bit PCM (-32768 to 32767)
+                pcm_data = (full_audio * 32767).astype(np.int16)
+
+                # Create an in-memory WAV byte stream
+                wav_io = io.BytesIO()
+                with wave.open(wav_io, 'wb') as wav_file:
+                    wav_file.setnchannels(1)  # Mono
+                    wav_file.setsampwidth(2)   # 16-bit PCM
+                    wav_file.setframerate(KOKORO_SAMPLE_RATE)
+                    wav_file.writeframes(pcm_data.tobytes())
+
+                wav_bytes = wav_io.getvalue()
+
+                # Play synchronously (we are in the background TTS thread).
+                # Interruption is handled by stop_current_tts calling
+                # winsound.PlaySound(None, 0) from the GUI thread, which
+                # immediately aborts this blocking call.
+                if stop_event.is_set() or shutdown_event.is_set():
+                    return
+                winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+
+                return  # Playback completed successfully!
+
+            # Fallback to sounddevice for non-Windows platforms
+            if full_audio.ndim == 1:
+                full_audio = full_audio.reshape(-1, 1)
+
+            # 2. Open the audio output stream only when we are fully ready to play,
+            # using sound_lock and a full PortAudio reset to heal any HDMI/NVIDIA driver disconnects
+            # caused by CUDA power state transitions on Windows
+            with sound_lock:
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception as init_err:
+                    logging.debug(f"PortAudio reinitialization error: {init_err}")
+
+                stream = sd.OutputStream(
+                        samplerate=KOKORO_SAMPLE_RATE,
+                        channels=AUDIO_CHANNELS,
+                        dtype="float32",
+                        blocksize=AUDIO_BLOCKSIZE,
+                        latency=AUDIO_LATENCY,
+                        device=AUDIO_OUTPUT_DEVICE,
+                )
+                stream.start()
+
+            try:
+                # Write in smaller blocks to allow rapid stop_event checking during playback
+                chunk_size = 1024
+                for i in range(0, len(full_audio), chunk_size):
                     if stop_event.is_set() or shutdown_event.is_set():
                         return
-
-                    audio_chunk = np.asarray(audio, dtype=np.float32)
-                    if audio_chunk.ndim == 1:
-                        audio_chunk = audio_chunk.reshape(-1, 1)
-
-                    stream.write(audio_chunk)
+                    chunk = full_audio[i:i+chunk_size]
+                    stream.write(chunk)
+            finally:
+                with sound_lock:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception as close_error:
+                        logging.debug(f"Error during sound output stream close: {close_error}")
 
         except Exception as error:
             logging.error(f"TTS Stream Play error: {error}")

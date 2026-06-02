@@ -26,23 +26,37 @@ HOTKEY_QUIT = "esc"
 # Safety threshold to prevent infinite recording loops if a key gets physically stuck
 MAX_RECORD_SECONDS = 20
 
-# =====================================================================
-# LLM (LM Studio) Settings
-# =====================================================================
 # Hardware Acceleration setup
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Local server backend endpoint connections
+# =====================================================================
+# LLM Backend Settings
+# =====================================================================
+# Backend selection: "lm-studio" (runs via LM Studio local server) or "local_gguf" (runs directly via llama_cpp)
+#LLM_BACKEND = "lm-studio"
+LLM_BACKEND = "local_gguf"
+
+# =====================================================================
+# Local server backend endpoint connections (for "lm-studio" backend)
+# =====================================================================
 LM_STUDIO_URL = "http://localhost:1234/v1"
 LM_STUDIO_API_KEY = "lm-studio"
 LM_STUDIO_MODEL = "local-model"
 
-# Generation tuning variables controlling response creativity and lengths
+# =====================================================================
+# External LLM Settings (for GGUF models)
+# =====================================================================
+# External model parameters
+EXTERNAL_MODEL_PATH = "models/llama-3.2-3b-instruct-q4_k_m.gguf"  # Path to your GGUF model file
+EXTERNAL_N_GPU_LAYERS = 20  # Number of layers to load on GPU (10, 20, 25...)
+EXTERNAL_N_CTX = 2048       # Context window size
+
+# Generation tuning variables controlling response creativity and lengths (used by both backends)
 LLM_TEMPERATURE = 0.3
 LLM_MAX_TOKENS = 50
 LLM_TOP_P = 0.9
 
-# Context buffer constraints
+# Context buffer constraints (used by both backends)
 LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept inside short-term memory
 
 # =====================================================================

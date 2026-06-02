@@ -21,8 +21,8 @@ warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
 
 import config
 from stt import STTManager, COMPUTE_TYPE, WHISPER_SAMPLE_RATE
-from llm import LLMManager
-from tts import TTSManager
+from llm import LLMManager, ExternalLLMManager, LLAMA_CPP_AVAILABLE
+from tts import TTSManager, sound_lock
 
 # Configure comprehensive events logging (console + file)
 log_format = "%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s"
@@ -37,7 +37,7 @@ logging.basicConfig(
 
 # Technical recording & signal processing parameters
 AUDIO_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
-AUDIO_LATENCY = "low"   # Optimizes underlying sound card capture profiles
+AUDIO_LATENCY = None    # Use default shared-mode latency to prevent low-latency driver conflicts
 AUDIO_CHANNELS = 1      # Mono recording/playback mode
 AUDIO_INPUT_DEVICE = None   # None defaults to OS system default microphone
 
@@ -81,8 +81,24 @@ class VoiceTutorGUI:
 
         # Initialize core modular sub-managers
         self.stt_mgr = STTManager()
-        self.llm_mgr = LLMManager()
         self.tts_mgr = TTSManager()
+
+        # Select LLM backend
+        self.llm_backend = config.LLM_BACKEND
+        self.llm_fallback_warning = None
+
+        if self.llm_backend == "local_gguf":
+            if LLAMA_CPP_AVAILABLE:
+                logging.info("Using local GGUF LLM backend (ExternalLLMManager).")
+                self.llm_mgr = ExternalLLMManager()
+            else:
+                logging.warning("local_gguf requested but llama_cpp is not installed. Falling back to lm-studio.")
+                self.llm_backend = "lm-studio"
+                self.llm_fallback_warning = "llama_cpp not installed. Falling back to LM Studio."
+                self.llm_mgr = LLMManager()
+        else:
+            logging.info("Using LM Studio LLM backend (LLMManager).")
+            self.llm_mgr = LLMManager()
 
         # Setup custom dark styles for UI elements
         self.setup_styles()
@@ -300,10 +316,31 @@ class VoiceTutorGUI:
             self.tts_mgr.load_model()
             logging.info("TTS Model loaded successfully.")
 
-            self.llm_mgr.init_client()
-            if not self.llm_mgr.check_connection():
-                self.root.after(0, self.append_system_msg, "Warning: LM Studio is offline. Start it to use voice tutor!")
-                logging.warning("LM Studio is offline during initialization.")
+            # If a fallback warning occurred during init, display it in the chat
+            if self.llm_fallback_warning:
+                self.root.after(0, self.append_system_msg, f"Warning: {self.llm_fallback_warning}")
+
+            if self.llm_backend == "local_gguf":
+                model_path = config.EXTERNAL_MODEL_PATH
+                if not model_path:
+                    self.root.after(0, self.append_system_msg, "Warning: EXTERNAL_MODEL_PATH is empty in config.py! Configure it to use GGUF model.")
+                    logging.warning("EXTERNAL_MODEL_PATH is empty during initialization.")
+                else:
+                    self.root.after(0, self.append_system_msg, f"Loading GGUF model: {os.path.basename(model_path)}...")
+                    success = self.llm_mgr.load_external_model(
+                        model_path=model_path,
+                        n_gpu_layers=config.EXTERNAL_N_GPU_LAYERS,
+                        n_ctx=config.EXTERNAL_N_CTX
+                    )
+                    if success:
+                        self.root.after(0, self.append_system_msg, "GGUF Model loaded successfully.")
+                    else:
+                        self.root.after(0, self.append_system_msg, "Error: Failed to load GGUF model. Check paths/GPU memory.")
+            else:
+                self.llm_mgr.init_client()
+                if not self.llm_mgr.check_connection():
+                    self.root.after(0, self.append_system_msg, "Warning: LM Studio is offline. Start it to use voice tutor!")
+                    logging.warning("LM Studio is offline during initialization.")
 
             self.root.after(0, self.update_status, "Warming up models...", "#ffb86c")
             self.stt_mgr.warm_up()
@@ -416,15 +453,25 @@ class VoiceTutorGUI:
                     self.recorded_chunks.append(indata.copy())
 
         try:
-            with sd.InputStream(
-                    samplerate=WHISPER_SAMPLE_RATE,
-                    channels=AUDIO_CHANNELS,
-                    dtype="float32",
-                    blocksize=AUDIO_BLOCKSIZE,
-                    latency=AUDIO_LATENCY,
-                    device=AUDIO_INPUT_DEVICE,
-                    callback=callback,
-            ):
+            with sound_lock:
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception as init_err:
+                    logging.debug(f"PortAudio reinitialization error: {init_err}")
+
+                stream = sd.InputStream(
+                        samplerate=WHISPER_SAMPLE_RATE,
+                        channels=AUDIO_CHANNELS,
+                        dtype="float32",
+                        blocksize=AUDIO_BLOCKSIZE,
+                        latency=AUDIO_LATENCY,
+                        device=AUDIO_INPUT_DEVICE,
+                        callback=callback,
+                )
+                stream.start()
+
+            try:
                 while True:
                     with self.record_lock:
                         still_recording = self.is_recording
@@ -440,6 +487,13 @@ class VoiceTutorGUI:
                         break
 
                     time.sleep(0.01)
+            finally:
+                with sound_lock:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception as close_error:
+                        logging.debug(f"Error during sound input stream close: {close_error}")
 
         except Exception as error:
             logging.error(f"Recording InputStream error: {error}")
@@ -534,7 +588,11 @@ class VoiceTutorGUI:
             self._tts_is_speaking = False
         self.tts_stop_event.set()
         self.clear_tts_queue()
-        sd.stop()
+        try:
+            import winsound
+            winsound.PlaySound(None, 0)
+        except Exception:
+            pass
 
     def clear_tts_queue(self):
         while True:

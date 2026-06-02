@@ -6,3 +6,4 @@ kokoro>=0.3.0
 openai>=1.0.0
 keyboard>=0.13.5
 torch>=2.0.0
+llama-cpp-python>=0.2.0
