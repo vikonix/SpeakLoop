@@ -27,7 +27,8 @@ class LLMManager:
     def check_connection(self) -> bool:
         """Validates connectivity to the local LLM server."""
         try:
-            assert self.client is not None
+            if self.client is None:
+                raise RuntimeError("LLM client not initialized. Call init_client() first.")
             self.client.models.list()
             logging.info("Successfully connected to LM Studio.")
             return True
@@ -42,11 +43,15 @@ class LLMManager:
         """
         assert self.client is not None
 
+        if self.client is None:
+            raise RuntimeError("LLM client not initialized. Call init_client() first.")
+
         logging.info(f"LLM request started for user input: {user_text!r}")
-        self.messages.append({"role": "user", "content": user_text})
-        self._trim_history()
 
         try:
+            # Append user message only inside try — so we can roll back if streaming fails
+            self.messages.append({"role": "user", "content": user_text})
+
             stream_response = self.client.chat.completions.create(
                 model=config.LM_STUDIO_MODEL,
                 messages=self.messages,
@@ -101,6 +106,9 @@ class LLMManager:
             return final_reply
 
         except Exception as error:
+            # Roll back the user message so history stays consistent (user/assistant pairs)
+            if self.messages and self.messages[-1].get("role") == "user":
+                self.messages.pop()
             logging.error(f"LLM Stream error: {error}")
             return "Sorry, please try again."
 
@@ -166,10 +174,11 @@ try:
                 return "Sorry, please wait for the local model to finish loading."
 
             logging.info(f"Local GGUF LLM request started for user input: {user_text!r}")
-            self.messages.append({"role": "user", "content": user_text})
-            self._trim_history()
 
             try:
+                # Append user message only inside try — so we can roll back if streaming fails
+                self.messages.append({"role": "user", "content": user_text})
+
                 # Use llama_cpp's create_chat_completion which formats prompts using model templates
                 stream_response = self.external_model.create_chat_completion(
                     messages=self.messages,
@@ -233,6 +242,9 @@ try:
                 return final_reply
 
             except Exception as error:
+                # Roll back the user message so history stays consistent (user/assistant pairs)
+                if self.messages and self.messages[-1].get("role") == "user":
+                    self.messages.pop()
                 logging.error(f"Local GGUF LLM Stream error: {error}")
                 return "Sorry, please try again."
 
@@ -267,4 +279,3 @@ try:
 
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
-    logging.warning("llama_cpp not installed. External model loading will be disabled.")

@@ -35,15 +35,23 @@ logging.basicConfig(
     ]
 )
 
+# Warn about optional llama_cpp dependency now that the logger is configured
+if not LLAMA_CPP_AVAILABLE:
+    logging.warning("llama_cpp not installed. External GGUF model loading will be disabled.")
+
 # Technical recording & signal processing parameters
-AUDIO_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
-AUDIO_LATENCY = None    # Use default shared-mode latency to prevent low-latency driver conflicts
+RECORDING_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
+AUDIO_LATENCY = None        # Use default shared-mode latency to prevent low-latency driver conflicts
 AUDIO_CHANNELS = 1      # Mono recording/playback mode
 AUDIO_INPUT_DEVICE = None   # None defaults to OS system default microphone
 
 # Signal gain normalization parameters
 AUDIO_MIN_PEAK_THRESHOLD = 0.01      # Prevents boosting pure background noise floor during silence
 AUDIO_NORMALIZATION_CEILING = 0.9    # Scales the peak target output level directly to 90%
+
+# How long to wait for the recording thread to finish after stopping.
+# Covers the last InputStream callback flush; should be well under 1 second in normal use.
+RECORD_THREAD_JOIN_TIMEOUT_SEC = 1.5
 
 
 class VoiceTutorGUI:
@@ -422,7 +430,7 @@ class VoiceTutorGUI:
         self.root.after(0, self.update_status, "Processing Speech (STT)...", "#ffb86c")
 
         if self.record_thread:
-            self.record_thread.join(timeout=1.5)
+            self.record_thread.join(timeout=RECORD_THREAD_JOIN_TIMEOUT_SEC)
 
         # Guard against concurrent process_audio() calls (T3 fix)
         with self.processing_lock:
@@ -464,7 +472,7 @@ class VoiceTutorGUI:
                         samplerate=WHISPER_SAMPLE_RATE,
                         channels=AUDIO_CHANNELS,
                         dtype="float32",
-                        blocksize=AUDIO_BLOCKSIZE,
+                        blocksize=RECORDING_BLOCKSIZE,
                         latency=AUDIO_LATENCY,
                         device=AUDIO_INPUT_DEVICE,
                         callback=callback,
@@ -588,11 +596,7 @@ class VoiceTutorGUI:
             self._tts_is_speaking = False
         self.tts_stop_event.set()
         self.clear_tts_queue()
-        try:
-            import winsound
-            winsound.PlaySound(None, 0)
-        except Exception:
-            pass
+        self.tts_mgr.stop_playback()
 
     def clear_tts_queue(self):
         while True:
@@ -608,7 +612,9 @@ class VoiceTutorGUI:
                 text = self.tts_queue.get(timeout=0.1)
             except queue.Empty:
                 # If we are done speaking and no new items in queue, transition status back to ready
-                if not self.is_recording and not self.tts_stop_event.is_set() and self.tts_queue.empty():
+                with self.record_lock:
+                    currently_recording = self.is_recording
+                if not currently_recording and not self.tts_stop_event.is_set() and self.tts_queue.empty():
                     # Use internal state variable instead of reading Tkinter widget (B3 fix)
                     with self.tts_state_lock:
                         tts_speaking = self._tts_is_speaking
