@@ -32,23 +32,36 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # =====================================================================
 # LLM Backend Settings
 # =====================================================================
-# Backend selection: "lm-studio" (runs via LM Studio local server) or "local_gguf" (runs directly via llama_cpp)
-#LLM_BACKEND = "lm-studio"
-LLM_BACKEND = "local_gguf"
+# Backend selection:
+#   "lm-studio"    — external LM Studio app (must be running separately)
+#   "local_server" — llm_server.py started automatically as a subprocess
+#   "local_gguf"   — llama_cpp loaded directly in-process (legacy, GPU contention risk)
+LLM_BACKEND = "local_server"
 
 # =====================================================================
-# Local server backend endpoint connections (for "lm-studio" backend)
+# LM Studio backend (for "lm-studio" backend)
 # =====================================================================
 LM_STUDIO_URL = "http://localhost:1234/v1"
 LM_STUDIO_API_KEY = "lm-studio"
 LM_STUDIO_MODEL = "local-model"
 
 # =====================================================================
-# External LLM Settings (for GGUF models)
+# Local LLM Server (for "local_server" backend)
 # =====================================================================
-# External model parameters
+LOCAL_SERVER_HOST = "127.0.0.1"
+LOCAL_SERVER_PORT = 8765
+LOCAL_SERVER_URL = f"http://{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}/v1"
+LOCAL_SERVER_API_KEY = "local"
+LOCAL_SERVER_MODEL = "local-model"
+
+# How long (seconds) to wait for the server to become ready after launching
+LOCAL_SERVER_STARTUP_TIMEOUT = 60
+
+# =====================================================================
+# GGUF Model Settings (shared by "local_server" and "local_gguf" backends)
+# =====================================================================
 EXTERNAL_MODEL_PATH = "models/llama-3.2-3b-instruct-q4_k_m.gguf"  # Path to your GGUF model file
-EXTERNAL_N_GPU_LAYERS = 20  # Number of layers to load on GPU (10, 20, 25...)
+EXTERNAL_N_GPU_LAYERS = 20  # Number of layers to offload to GPU (10, 20, 25...)
 EXTERNAL_N_CTX = 2048       # Context window size
 
 # Generation tuning variables controlling response creativity and lengths (used by both backends)

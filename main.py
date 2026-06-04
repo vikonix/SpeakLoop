@@ -1,5 +1,6 @@
 import time
 import queue
+import subprocess
 import threading
 from typing import Optional
 import os
@@ -21,7 +22,7 @@ warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
 
 import config
 from stt import STTManager, COMPUTE_TYPE, WHISPER_SAMPLE_RATE
-from llm import LLMManager, ExternalLLMManager, LLAMA_CPP_AVAILABLE
+from llm import LLMManager
 from tts import TTSManager, sound_lock
 
 # Configure comprehensive events logging (console + file)
@@ -35,9 +36,10 @@ logging.basicConfig(
     ]
 )
 
-# Warn about optional llama_cpp dependency now that the logger is configured
-if not LLAMA_CPP_AVAILABLE:
-    logging.warning("llama_cpp not installed. External GGUF model loading will be disabled.")
+# Sentinel object pushed to the TTS queue after LLM finishes streaming.
+# The TTS thread buffers sentences and only starts playback when it sees this object,
+# ensuring the LLM has released the GPU before Kokoro synthesis begins.
+_TTS_START_SENTINEL = object()
 
 # Technical recording & signal processing parameters
 RECORDING_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
@@ -94,17 +96,17 @@ class VoiceTutorGUI:
         # Select LLM backend
         self.llm_backend = config.LLM_BACKEND
         self.llm_fallback_warning = None
+        # Holds the subprocess.Popen handle when local_server is auto-started
+        self._llm_server_process: Optional[subprocess.Popen] = None
 
-        if self.llm_backend == "local_gguf":
-            if LLAMA_CPP_AVAILABLE:
-                logging.info("Using local GGUF LLM backend (ExternalLLMManager).")
-                self.llm_mgr = ExternalLLMManager()
-            else:
-                logging.warning("local_gguf requested but llama_cpp is not installed. Falling back to lm-studio.")
-                self.llm_backend = "lm-studio"
-                self.llm_fallback_warning = "llama_cpp not installed. Falling back to LM Studio."
-                self.llm_mgr = LLMManager()
+        if self.llm_backend == "local_server":
+            logging.info("Using local_server LLM backend (llm_server/server.py subprocess).")
+            self.llm_mgr = LLMManager(model=config.LOCAL_SERVER_MODEL)
         else:
+            # Covers "lm-studio" and any unknown values
+            if self.llm_backend != "lm-studio":
+                logging.warning(f"Unknown LLM_BACKEND '{self.llm_backend}', falling back to lm-studio.")
+                self.llm_backend = "lm-studio"
             logging.info("Using LM Studio LLM backend (LLMManager).")
             self.llm_mgr = LLMManager()
 
@@ -312,6 +314,43 @@ class VoiceTutorGUI:
     def update_stats(self, stt_ms: float, llm_ms: float):
         self.stats_label.configure(text=f"STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms")
 
+    def _start_llm_server(self) -> bool:
+        """
+        Launch llm_server.py as a subprocess and wait until it responds.
+        Returns True if the server became ready within the timeout, False otherwise.
+        """
+        model_path = config.EXTERNAL_MODEL_PATH
+        if not model_path:
+            logging.error("EXTERNAL_MODEL_PATH is empty — cannot start local server.")
+            return False
+
+        cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "llm_server", "server.py"),
+            "--model", model_path,
+            "--host", config.LOCAL_SERVER_HOST,
+            "--port", str(config.LOCAL_SERVER_PORT),
+            "--n-gpu-layers", str(config.EXTERNAL_N_GPU_LAYERS),
+            "--n-ctx", str(config.EXTERNAL_N_CTX),
+        ]
+        logging.info(f"Starting LLM server: {' '.join(cmd)}")
+        self._llm_server_process = subprocess.Popen(cmd)
+
+        # Poll until server is ready or timeout expires
+        deadline = time.time() + config.LOCAL_SERVER_STARTUP_TIMEOUT
+        self.llm_mgr.init_client(
+            base_url=config.LOCAL_SERVER_URL,
+            api_key=config.LOCAL_SERVER_API_KEY,
+        )
+        while time.time() < deadline:
+            if self.llm_mgr.check_connection():
+                logging.info("LLM server is ready.")
+                return True
+            time.sleep(1.0)
+
+        logging.error("LLM server did not become ready in time.")
+        return False
+
     def load_components(self):
         logging.info("Starting model loading thread...")
         self.root.after(0, self.update_status, "Loading models...", "#ffb86c")
@@ -328,22 +367,15 @@ class VoiceTutorGUI:
             if self.llm_fallback_warning:
                 self.root.after(0, self.append_system_msg, f"Warning: {self.llm_fallback_warning}")
 
-            if self.llm_backend == "local_gguf":
-                model_path = config.EXTERNAL_MODEL_PATH
-                if not model_path:
-                    self.root.after(0, self.append_system_msg, "Warning: EXTERNAL_MODEL_PATH is empty in config.py! Configure it to use GGUF model.")
-                    logging.warning("EXTERNAL_MODEL_PATH is empty during initialization.")
+            if self.llm_backend == "local_server":
+                model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
+                self.root.after(0, self.append_system_msg, f"Starting LLM server with {model_name}...")
+                self.root.after(0, self.update_status, "Starting LLM server...", "#ffb86c")
+                ready = self._start_llm_server()
+                if ready:
+                    self.root.after(0, self.append_system_msg, "LLM server is ready.")
                 else:
-                    self.root.after(0, self.append_system_msg, f"Loading GGUF model: {os.path.basename(model_path)}...")
-                    success = self.llm_mgr.load_external_model(
-                        model_path=model_path,
-                        n_gpu_layers=config.EXTERNAL_N_GPU_LAYERS,
-                        n_ctx=config.EXTERNAL_N_CTX
-                    )
-                    if success:
-                        self.root.after(0, self.append_system_msg, "GGUF Model loaded successfully.")
-                    else:
-                        self.root.after(0, self.append_system_msg, "Error: Failed to load GGUF model. Check paths/GPU memory.")
+                    self.root.after(0, self.append_system_msg, "Error: LLM server failed to start. Check model path and GPU memory.")
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
@@ -571,10 +603,15 @@ class VoiceTutorGUI:
             self.root.after(0, self.append_emma_end)
             self.root.after(0, self.update_stats, stt_ms, llm_ms)
 
-            with self.tts_state_lock:
-                self._tts_is_speaking = True
-            self.root.after(0, self.draw_mic_button, "speaking")
-            self.root.after(0, self.update_status, "Emma is speaking...", "#ff79c6")
+            # Signal TTS thread that LLM has finished and GPU is free.
+            # The TTS thread buffers sentences until it receives this sentinel,
+            # preventing GPU contention between llama_cpp and Kokoro.
+            if not self.tts_stop_event.is_set():
+                self.tts_queue.put(_TTS_START_SENTINEL)
+                with self.tts_state_lock:
+                    self._tts_is_speaking = True
+                self.root.after(0, self.draw_mic_button, "speaking")
+                self.root.after(0, self.update_status, "Emma is speaking...", "#ff79c6")
 
         except Exception as error:
             logging.error(f"Error in process_audio: {error}")
@@ -607,32 +644,50 @@ class VoiceTutorGUI:
                 break
 
     def process_tts_queue(self):
+        # Sentences are buffered here while LLM is still running on the GPU.
+        # Playback starts only after _TTS_START_SENTINEL arrives (LLM done, GPU free).
+        pending_sentences: list[str] = []
+
         while not self.shutdown_event.is_set():
             try:
-                text = self.tts_queue.get(timeout=0.1)
+                item = self.tts_queue.get(timeout=0.1)
             except queue.Empty:
-                # If we are done speaking and no new items in queue, transition status back to ready
-                with self.record_lock:
-                    currently_recording = self.is_recording
-                if not currently_recording and not self.tts_stop_event.is_set() and self.tts_queue.empty():
-                    # Use internal state variable instead of reading Tkinter widget (B3 fix)
-                    with self.tts_state_lock:
-                        tts_speaking = self._tts_is_speaking
-
-                    if tts_speaking:
-                        self.root.after(0, self.draw_mic_button, "idle")
-                        self.root.after(0, self.update_status, "Ready", "#00e676")
-                        self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                # Transition to idle only when truly done: sentinel was received (pending
+                # is empty) and there are no more items waiting in the queue.
+                if not pending_sentences:
+                    with self.record_lock:
+                        currently_recording = self.is_recording
+                    if not currently_recording and not self.tts_stop_event.is_set() and self.tts_queue.empty():
                         with self.tts_state_lock:
-                            self._tts_is_speaking = False
+                            tts_speaking = self._tts_is_speaking
+                        if tts_speaking:
+                            self.root.after(0, self.draw_mic_button, "idle")
+                            self.root.after(0, self.update_status, "Ready", "#00e676")
+                            self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                            with self.tts_state_lock:
+                                self._tts_is_speaking = False
                 continue
 
             try:
-                if not self.tts_stop_event.is_set():
-                    logging.info(f"TTS playing synthesized block: {text!r}")
-                    self.tts_mgr.play_stream(text, self.tts_stop_event, self.shutdown_event)
+                if item is _TTS_START_SENTINEL:
+                    # LLM has finished — GPU is now free. Play all buffered sentences.
+                    logging.info(f"TTS sentinel received. Playing {len(pending_sentences)} buffered sentence(s).")
+                    for sentence in pending_sentences:
+                        if self.tts_stop_event.is_set() or self.shutdown_event.is_set():
+                            break
+                        logging.info(f"TTS playing synthesized block: {sentence!r}")
+                        self.tts_mgr.play_stream(sentence, self.tts_stop_event, self.shutdown_event)
+                    pending_sentences.clear()
+                elif self.tts_stop_event.is_set():
+                    # Stop was requested — discard buffered sentences and this one
+                    pending_sentences.clear()
+                else:
+                    # LLM still running — buffer the sentence, do not synthesize yet
+                    logging.info(f"TTS buffering sentence (waiting for LLM): {item!r}")
+                    pending_sentences.append(item)
             except Exception as e:
                 logging.error(f"Error in TTS queue thread: {e}")
+                pending_sentences.clear()
             finally:
                 self.tts_queue.task_done()
 
@@ -640,6 +695,17 @@ class VoiceTutorGUI:
         logging.info("Shutting down VoiceTutor App...")
         self.shutdown_event.set()
         self.stop_current_tts()
+
+        # Terminate the LLM server subprocess if we started it
+        if self._llm_server_process is not None:
+            logging.info("Terminating LLM server subprocess...")
+            self._llm_server_process.terminate()
+            try:
+                self._llm_server_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.warning("LLM server did not exit cleanly — killing it.")
+                self._llm_server_process.kill()
+
         # Explicitly close log handlers (R1 fix)
         for handler in logging.root.handlers[:]:
             handler.close()
