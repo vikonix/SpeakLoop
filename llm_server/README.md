@@ -1,25 +1,25 @@
 # LLM Server
 
-Отдельный HTTP-сервер для запуска локальных GGUF моделей. Работает как самостоятельный процесс, благодаря чему llama_cpp и Kokoro TTS используют независимые CUDA-контексты — без конкуренции за GPU.
+A standalone HTTP server for running local GGUF models. Runs as a separate process so that llama_cpp and Kokoro TTS operate in independent CUDA contexts — no GPU contention.
 
-Совместим с OpenAI Chat Completions API, поэтому основное приложение общается с ним через стандартный `openai` клиент.
+Fully compatible with the OpenAI Chat Completions API, so the main application communicates with it through the standard `openai` client.
 
-## Установка зависимостей
+## Installing Dependencies
 
 ```bash
 cd llm_server
 pip install -r requirements.txt
 ```
 
-### llama-cpp-python с поддержкой CUDA (рекомендуется)
+### llama-cpp-python with CUDA Support (Recommended)
 
-По умолчанию `pip install llama-cpp-python` собирает CPU-версию. Для GPU нужна сборка с CUDA.
+The default `pip install llama-cpp-python` builds a CPU-only version. For GPU support you need a CUDA build.
 
-**Предварительные требования (Windows):**
-- Visual Studio Community с компонентом **"Desktop development with C++"**
-- CUDA Toolkit, совместимый с вашей GPU (12.x или 11.x)
+**Prerequisites (Windows):**
+- Visual Studio Community with the **"Desktop development with C++"** workload
+- CUDA Toolkit compatible with your GPU (12.x or 11.x)
 
-**Установка:**
+**Installation:**
 ```powershell
 # PowerShell
 $env:CMAKE_ARGS="-DGGML_CUDA=on"
@@ -32,36 +32,36 @@ set CMAKE_ARGS=-DGGML_CUDA=on
 pip install llama-cpp-python --force-reinstall --upgrade --no-cache-dir
 ```
 
-## Запуск сервера вручную
+## Starting the Server Manually
 
 ```bash
 python server.py --model ../models/llama-3.2-3b-instruct-q4_k_m.gguf
 ```
 
-Все параметры:
+All parameters:
 
-| Параметр | По умолчанию | Описание |
+| Parameter | Default | Description |
 |---|---|---|
-| `--model` | — | Путь к GGUF файлу (можно не указывать при старте) |
-| `--host` | `127.0.0.1` | Адрес для прослушивания |
-| `--port` | `8765` | Порт |
-| `--n-gpu-layers` | `20` | Количество слоёв на GPU |
-| `--n-ctx` | `2048` | Размер контекстного окна |
+| `--model` | — | Path to the GGUF file (can be omitted at startup) |
+| `--host` | `127.0.0.1` | Bind address |
+| `--port` | `8765` | Port |
+| `--n-gpu-layers` | `20` | Number of layers to offload to GPU |
+| `--n-ctx` | `2048` | Context window size in tokens |
 
-## Автоматический запуск из приложения
+## Automatic Startup from the App
 
-При `LLM_BACKEND = "local_server"` в `config.py` основное приложение запускает сервер автоматически и ждёт его готовности (до `LOCAL_SERVER_STARTUP_TIMEOUT` секунд).
+When `LLM_BACKEND = "local_server"` is set in `config.py`, the main application launches the server automatically and waits for it to become ready (up to `LOCAL_SERVER_STARTUP_TIMEOUT` seconds).
 
-## Эндпоинты
+## Endpoints
 
-| Метод | Путь | Описание |
+| Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Статус модели и параметры загрузки |
-| `GET` | `/v1/models` | Список моделей (OpenAI-совместимый) |
-| `POST` | `/v1/chat/completions` | Генерация ответа (streaming и обычный режим) |
-| `POST` | `/v1/model/load` | Горячая замена модели без перезапуска сервера |
+| `GET` | `/health` | Model status and load parameters |
+| `GET` | `/v1/models` | Model list (OpenAI-compatible) |
+| `POST` | `/v1/chat/completions` | Chat completion (streaming and non-streaming) |
+| `POST` | `/v1/model/load` | Hot-swap model without restarting the server |
 
-### Горячая замена модели
+### Hot-Swapping the Model
 
 ```bash
 curl -X POST http://127.0.0.1:8765/v1/model/load \
@@ -73,20 +73,20 @@ curl -X POST http://127.0.0.1:8765/v1/model/load \
   }'
 ```
 
-## Подбор параметров GPU
+## Choosing `n_gpu_layers`
 
-`n_gpu_layers` — количество слоёв модели, выгружаемых на GPU. Чем больше, тем быстрее генерация, но больше VRAM.
+`n_gpu_layers` controls how many model layers are offloaded to the GPU. More layers = faster generation, but more VRAM required.
 
-| VRAM | Рекомендуемое значение |
+| VRAM | Recommended value |
 |---|---|
 | 4 GB | 10–15 |
 | 6 GB | 15–20 |
 | 8 GB | 20–25 |
-| 12 GB+ | 25+ (полная выгрузка) |
+| 12 GB+ | 25+ (full offload) |
 
-При нехватке VRAM модель автоматически переключается на CPU для оставшихся слоёв.
+If VRAM runs out, the remaining layers fall back to CPU automatically.
 
-## Рекомендуемые модели
+## Recommended Models
 
-- `Llama-3.2-3B-Instruct-Q4_K_M.gguf` — хороший баланс качества и скорости
-- `Qwen2.5-3B-Instruct-Q4_K_M.gguf` — альтернатива с сильной многоязычностью
+- `Llama-3.2-3B-Instruct-Q4_K_M.gguf` — good balance of quality and speed
+- `Qwen2.5-3B-Instruct-Q4_K_M.gguf` — strong multilingual alternative
