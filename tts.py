@@ -13,11 +13,6 @@ try:
 except ImportError:
     WINSOUND_AVAILABLE = False
 
-# Re-export the shared PortAudio lock from config so callers that previously
-# imported `sound_lock` from this module continue to work without changes.
-sound_lock = config.AUDIO_LOCK
-
-
 # Technical synthesizer & audio configurations
 KOKORO_SAMPLE_RATE = 24_000   # Kokoro synthesizes native 24kHz audio outputs
 

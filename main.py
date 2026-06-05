@@ -412,7 +412,7 @@ class VoiceTutorGUI:
             logging.info("Voice Tutor initialization fully completed.")
 
         except Exception as e:
-            logging.exception(f"Error during initialization thread: {e}")
+            logging.exception("Error during initialization thread:")
             self.root.after(0, self.append_system_msg, f"Initialization Error: {e}")
             self.root.after(0, self.update_status, "Initialization Failed", "#ff5555")
 
@@ -431,7 +431,9 @@ class VoiceTutorGUI:
             self.trigger_recording_start()
 
     def on_gui_btn_release(self):
-        if self.is_recording and not self.space_is_held:
+        with self.record_lock:
+            currently_recording = self.is_recording
+        if currently_recording and not self.space_is_held:
             logging.info("GUI microphone button released.")
             self.trigger_recording_stop()
 
@@ -505,9 +507,14 @@ class VoiceTutorGUI:
         start_time = time.time()
         logging.info("sd.InputStream thread started.")
 
+        # Warnings from the realtime callback are buffered here and logged from
+        # the main record loop — calling logging directly inside a sounddevice
+        # callback can block on I/O and cause audio dropouts.
+        callback_warnings: list[str] = []
+
         def callback(indata, frames, time_info, status):
             if status:
-                logging.warning(f"Audio input warning: {status}")
+                callback_warnings.append(str(status))
             with self.record_lock:
                 if self.is_recording:
                     self.recorded_chunks.append(indata.copy())
@@ -533,6 +540,10 @@ class VoiceTutorGUI:
 
             try:
                 while True:
+                    # Flush warnings accumulated by the realtime callback
+                    while callback_warnings:
+                        logging.warning(f"Audio input warning: {callback_warnings.pop(0)}")
+
                     with self.record_lock:
                         still_recording = self.is_recording
 
@@ -612,7 +623,7 @@ class VoiceTutorGUI:
             def token_cb(token):
                 self.root.after(0, self.append_emma_token, token)
 
-            _full_response = self.llm_mgr.stream_and_queue_tts(
+            self.llm_mgr.stream_and_queue_tts(
                 user_text,
                 self.tts_queue,
                 self.tts_stop_event,

@@ -9,6 +9,10 @@ import config
 # Technical configuration parameters
 LLM_TIMEOUT = 30.0
 
+# Compiled once at import time — splits on sentence-ending punctuation only when
+# followed by an uppercase letter, avoiding false splits on "Mr. Smith" or "1.5 sec".
+_SENTENCE_END = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я])')
+
 
 class LLMManager:
     def __init__(self, model: str = None):
@@ -53,7 +57,9 @@ class LLMManager:
             if silent:
                 logging.debug(f"LLM server not yet available: {error}")
             else:
-                logging.exception("LLM server not available:")
+                # Connection failures are expected (e.g. LM Studio offline) —
+                # log the message only, not the full traceback.
+                logging.error(f"LLM server not available: {error}")
             return False
 
     def stream_and_queue_tts(self, user_text: str, tts_queue: Queue, stop_event: Event, token_callback=None) -> str:
@@ -85,10 +91,6 @@ class LLMManager:
 
             full_reply = ""
             sentence_buffer = ""
-            # Split on sentence-ending punctuation only when followed by an uppercase letter.
-            # This avoids false splits on abbreviations ("Mr. Smith"), decimals ("1.5 sec"),
-            # and mid-sentence periods, which the LLM prompt discourages but may still produce.
-            sentence_end = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я])')
 
             for chunk in stream_response:
                 if stop_event.is_set():
@@ -104,7 +106,7 @@ class LLMManager:
                 full_reply += token
                 sentence_buffer += token
 
-                parts = sentence_end.split(sentence_buffer)
+                parts = _SENTENCE_END.split(sentence_buffer)
                 if len(parts) > 1:
                     sentence_buffer = parts.pop()
                     for item in parts:

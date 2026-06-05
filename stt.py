@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from faster_whisper import WhisperModel
 import config
 

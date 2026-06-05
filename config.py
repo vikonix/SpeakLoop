@@ -111,4 +111,4 @@ AUDIO_OUTPUT_DEVICE = None   # None → OS default speaker
 # =====================================================================
 # Logging Settings
 # =====================================================================
-LOG_FILE = "voice_tutor.log"
+LOG_FILE = str(BASE_DIR / "voice_tutor.log")
