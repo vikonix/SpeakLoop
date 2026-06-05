@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
 import config
 from stt import STTManager, WHISPER_SAMPLE_RATE
 from llm import LLMManager
-from tts import TTSManager, sound_lock
+from tts import TTSManager
 
 # Configure comprehensive events logging (console + file)
 log_format = "%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s"
@@ -43,9 +43,6 @@ _TTS_START_SENTINEL = object()
 
 # Technical recording & signal processing parameters
 RECORDING_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
-AUDIO_LATENCY = None        # Use default shared-mode latency to prevent low-latency driver conflicts
-AUDIO_CHANNELS = 1      # Mono recording/playback mode
-AUDIO_INPUT_DEVICE = None   # None defaults to OS system default microphone
 
 # Signal gain normalization parameters
 AUDIO_MIN_PEAK_THRESHOLD = 0.01      # Prevents boosting pure background noise floor during silence
@@ -77,11 +74,11 @@ class VoiceTutorGUI:
         self.recorded_chunks: list[np.ndarray] = []
         self.record_thread: Optional[threading.Thread] = None
 
-        # Audio processing guard — prevents concurrent process_audio() calls (T3 fix)
+        # Audio processing guard — prevents concurrent process_audio() calls
         self.is_processing_audio = False
         self.processing_lock = threading.Lock()
 
-        # TTS state tracking — avoids reading Tkinter widget from background thread (B3 fix)
+        # TTS state tracking — avoids reading Tkinter widget from background thread
         self._tts_is_speaking = False
         self.tts_state_lock = threading.Lock()
 
@@ -415,7 +412,7 @@ class VoiceTutorGUI:
             logging.info("Voice Tutor initialization fully completed.")
 
         except Exception as e:
-            logging.error(f"Error during initialization thread: {e}")
+            logging.exception(f"Error during initialization thread: {e}")
             self.root.after(0, self.append_system_msg, f"Initialization Error: {e}")
             self.root.after(0, self.update_status, "Initialization Failed", "#ff5555")
 
@@ -460,7 +457,7 @@ class VoiceTutorGUI:
             self.is_recording = True
             self.recorded_chunks = []
 
-            # All GUI updates scheduled on main thread via root.after (B1 fix)
+            # All GUI updates scheduled on main thread via root.after
             self.root.after(0, self.draw_mic_button, "recording")
             self.root.after(0, self.update_status, "Recording...", "#ff5555")
             self.root.after(0, self.update_instruction, "Release key or click button when finished speaking.")
@@ -475,21 +472,26 @@ class VoiceTutorGUI:
             logging.info("Stopping audio recording...")
             self.is_recording = False
 
-        # GUI updates after releasing lock, but record_loop is joined first (B1 fix)
         self.root.after(0, self.draw_mic_button, "processing")
         self.root.after(0, self.update_status, "Processing Speech (STT)...", "#ffb86c")
 
+        # Join and audio processing happen off the main thread to prevent UI freeze.
+        # record_thread.join() can block up to RECORD_THREAD_JOIN_TIMEOUT_SEC —
+        # running it on the main thread would make the window unresponsive.
+        threading.Thread(target=self._finalize_recording, daemon=True).start()
+
+    def _finalize_recording(self):
+        """Joins the record thread, then starts audio processing — runs off the main thread."""
         if self.record_thread:
             self.record_thread.join(timeout=RECORD_THREAD_JOIN_TIMEOUT_SEC)
 
-        # Guard against concurrent process_audio() calls (T3 fix)
         with self.processing_lock:
             if self.is_processing_audio:
                 logging.warning("process_audio already running, skipping duplicate.")
                 return
             self.is_processing_audio = True
 
-        threading.Thread(target=self._process_audio_safe, daemon=True).start()
+        self._process_audio_safe()
 
     def _process_audio_safe(self):
         """Wrapper that ensures process_audio runs exactly once and releases the guard."""
@@ -511,7 +513,7 @@ class VoiceTutorGUI:
                     self.recorded_chunks.append(indata.copy())
 
         try:
-            with sound_lock:
+            with config.AUDIO_LOCK:
                 try:
                     sd._terminate()
                     sd._initialize()
@@ -520,11 +522,11 @@ class VoiceTutorGUI:
 
                 stream = sd.InputStream(
                         samplerate=WHISPER_SAMPLE_RATE,
-                        channels=AUDIO_CHANNELS,
+                        channels=config.AUDIO_CHANNELS,
                         dtype="float32",
                         blocksize=RECORDING_BLOCKSIZE,
-                        latency=AUDIO_LATENCY,
-                        device=AUDIO_INPUT_DEVICE,
+                        latency=config.AUDIO_LATENCY,
+                        device=config.AUDIO_INPUT_DEVICE,
                         callback=callback,
                 )
                 stream.start()
@@ -546,15 +548,15 @@ class VoiceTutorGUI:
 
                     time.sleep(0.01)
             finally:
-                with sound_lock:
+                with config.AUDIO_LOCK:
                     try:
                         stream.stop()
                         stream.close()
                     except Exception as close_error:
                         logging.debug(f"Error during sound input stream close: {close_error}")
 
-        except Exception as error:
-            logging.error(f"Recording InputStream error: {error}")
+        except Exception:
+            logging.exception("Recording InputStream error:")
             with self.record_lock:
                 self.is_recording = False
             self.root.after(0, self.update_status, "Recording Error", "#ff5555")
@@ -633,9 +635,9 @@ class VoiceTutorGUI:
                 self.root.after(0, self.draw_mic_button, "speaking")
                 self.root.after(0, self.update_status, "Emma is speaking...", "#ff79c6")
 
-        except Exception as error:
-            logging.error(f"Error in process_audio: {error}")
-            self.root.after(0, self.append_system_msg, f"Processing Error: {error}")
+        except Exception:
+            logging.exception("Error in process_audio:")
+            self.root.after(0, self.append_system_msg, "Processing Error. Please try again.")
             self.root.after(0, self.draw_mic_button, "idle")
             self.root.after(0, self.update_status, "Error", "#ff5555")
 
@@ -702,7 +704,7 @@ class VoiceTutorGUI:
                             self.tts_mgr.play_stream(sentence, self.tts_stop_event, self.shutdown_event)
                         except Exception as play_err:
                             # Skip the failed sentence and continue with the rest
-                            logging.error(f"TTS playback error for {sentence!r}: {play_err}")
+                            logging.exception(f"TTS playback error for {sentence!r}:")
                 elif self.tts_stop_event.is_set():
                     # Stop was requested — discard buffered sentences and this one
                     pending_sentences.clear()
@@ -710,8 +712,8 @@ class VoiceTutorGUI:
                     # LLM still running — buffer the sentence, do not synthesize yet
                     logging.info(f"TTS buffering sentence (waiting for LLM): {item!r}")
                     pending_sentences.append(item)
-            except Exception as e:
-                logging.error(f"Error in TTS queue thread: {e}")
+            except Exception:
+                logging.exception("Error in TTS queue thread:")
             finally:
                 self.tts_queue.task_done()
 
@@ -733,7 +735,7 @@ class VoiceTutorGUI:
         if self._llm_server_log_file is not None:
             self._llm_server_log_file.close()
 
-        # Explicitly close log handlers (R1 fix)
+        # Explicitly close log handlers
         for handler in logging.root.handlers[:]:
             handler.close()
             logging.root.removeHandler(handler)

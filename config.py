@@ -1,9 +1,12 @@
-import torch
+import threading
+from pathlib import Path
+
+# Base directory — always absolute, regardless of working directory at launch.
+BASE_DIR = Path(__file__).parent
 
 # =====================================================================
 # Language Pair & Persona Configuration
 # =====================================================================
-# Define your language learning pair configuration
 NATIVE_LANGUAGE = "Russian"
 TARGET_LANGUAGE = "English"
 TARGET_LANG_CODE = "en"  # ISO code used for Whisper transcription routing
@@ -17,17 +20,17 @@ SYSTEM_PROMPT = (
 )
 
 # =====================================================================
-# Controls & Hotkeys
+# Controls
 # =====================================================================
-# Global keyboard triggers mapped via the keyboard listener module
-HOTKEY_RECORD = "space"
-HOTKEY_QUIT = "esc"
-
 # Safety threshold to prevent infinite recording loops if a key gets physically stuck
 MAX_RECORD_SECONDS = 20
 
-# Hardware Acceleration setup
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Hardware Acceleration setup — wrapped so startup does not crash if torch is absent
+try:
+    import torch
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+except ImportError:
+    DEVICE = "cpu"
 
 # =====================================================================
 # LLM Backend Settings
@@ -35,7 +38,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Backend selection:
 #   "lm-studio"    — external LM Studio app (must be running separately)
 #   "local_server" — llm_server.py started automatically as a subprocess
-#   "local_gguf"   — llama_cpp loaded directly in-process (legacy, GPU contention risk)
 LLM_BACKEND = "local_server"
 
 # =====================================================================
@@ -60,27 +62,28 @@ LOCAL_SERVER_STARTUP_TIMEOUT = 60
 # =====================================================================
 # GGUF Model Settings (shared by "local_server" and "local_gguf" backends)
 # =====================================================================
-EXTERNAL_MODEL_PATH = "models/llama-3.2-3b-instruct-q4_k_m.gguf"  # Path to your GGUF model file
-EXTERNAL_N_GPU_LAYERS = 20  # Number of layers to offload to GPU (10, 20, 25...)
+# Absolute path — safe regardless of the working directory at launch
+EXTERNAL_MODEL_PATH = str(BASE_DIR / "models" / "llama-3.2-3b-instruct-q4_k_m.gguf")
+EXTERNAL_N_GPU_LAYERS = 20  # Number of layers to offload to GPU
 EXTERNAL_N_CTX = 2048       # Context window size
 
-# Generation tuning variables controlling response creativity and lengths (used by both backends)
+# Generation tuning parameters
 LLM_TEMPERATURE = 0.3
 LLM_MAX_TOKENS = 50
 LLM_TOP_P = 0.9
 
-# Context buffer constraints (used by both backends)
-LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept inside short-term memory
+# Context buffer constraints
+LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept in short-term memory
 
 # =====================================================================
 # Speech-to-Text (Whisper) Settings
 # =====================================================================
-# Speech transcription configuration parameters
 WHISPER_MODEL = "small"
-WHISPER_BEAM_SIZE = 1         # Beam size 1 provides optimal inference speed at 0.0 temperature
+WHISPER_BEAM_SIZE = 1         # Beam size 1 provides optimal speed at temperature 0.0
 WHISPER_NO_SPEECH_THRESHOLD = 0.45
+WHISPER_CPU_THREADS = 4       # CPU inference threads (tune to available core count)
 
-# Context conditioning instruction guiding spelling logic styles
+# Context conditioning instruction guiding Whisper's spelling logic
 WHISPER_INITIAL_PROMPT = (
     f"This is a conversation with a {TARGET_LANGUAGE} tutor. "
     f"The speaker is practicing simple phrases."
@@ -89,12 +92,23 @@ WHISPER_INITIAL_PROMPT = (
 # =====================================================================
 # Text-to-Speech (Kokoro) Settings
 # =====================================================================
-# Voice synthesis operational parameters
-KOKORO_LANG_CODE = "a"        # 'a' stands for American English voice pipelines, 'b' for British
-KOKORO_VOICE = "af_heart"     # Chosen voice model matrix file
+KOKORO_LANG_CODE = "a"        # 'a' = American English, 'b' = British English, etc.
+KOKORO_VOICE = "af_heart"     # Voice model identifier
+
+# =====================================================================
+# Shared Audio Device Settings
+# =====================================================================
+# Single lock coordinates PortAudio access between the mic (main.py) and
+# speaker (tts.py) streams. Both modules import this object — do not create
+# separate Lock instances or they will not mutually exclude each other.
+AUDIO_LOCK = threading.Lock()
+
+AUDIO_CHANNELS = 1           # Mono for both recording and playback
+AUDIO_LATENCY = None         # None → OS default shared-mode latency
+AUDIO_INPUT_DEVICE = None    # None → OS default microphone
+AUDIO_OUTPUT_DEVICE = None   # None → OS default speaker
 
 # =====================================================================
 # Logging Settings
 # =====================================================================
 LOG_FILE = "voice_tutor.log"
-

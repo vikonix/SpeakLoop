@@ -209,7 +209,9 @@ def chat_completions(request: ChatCompletionRequest):
             },
         )
 
-    # Non-streaming: acquire lock and return full response
+    # Non-streaming: acquire lock and return full response.
+    # The second _model is None check inside the lock is intentional (double-checked locking):
+    # the model could be unloaded between the early check above and acquiring the lock.
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
     with _inference_lock:
         if _model is None:

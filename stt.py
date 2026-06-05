@@ -23,7 +23,7 @@ class STTManager:
             config.WHISPER_MODEL,
             device=config.DEVICE,
             compute_type=COMPUTE_TYPE,
-            cpu_threads=4,
+            cpu_threads=config.WHISPER_CPU_THREADS,
             num_workers=1,
         )
 

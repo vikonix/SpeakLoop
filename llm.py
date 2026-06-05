@@ -1,5 +1,6 @@
 import re
 import logging
+import threading
 from queue import Queue
 from threading import Event
 from openai import OpenAI
@@ -16,6 +17,8 @@ class LLMManager:
         self.model = model or config.LM_STUDIO_MODEL
         # Chat history buffer starting with the system instructions
         self.messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
+        # Protects self.messages from concurrent reads/writes across threads
+        self._messages_lock = threading.Lock()
 
     def init_client(self, base_url: str = None, api_key: str = None):
         """
@@ -50,7 +53,7 @@ class LLMManager:
             if silent:
                 logging.debug(f"LLM server not yet available: {error}")
             else:
-                logging.error(f"LLM server not available: {error}")
+                logging.exception("LLM server not available:")
             return False
 
     def stream_and_queue_tts(self, user_text: str, tts_queue: Queue, stop_event: Event, token_callback=None) -> str:
@@ -64,12 +67,15 @@ class LLMManager:
         logging.info(f"LLM request started for user input: {user_text!r}")
 
         try:
-            # Append user message only inside try — so we can roll back if streaming fails
-            self.messages.append({"role": "user", "content": user_text})
+            # Append user message and snapshot history for the API call.
+            # Snapshot prevents the lock being held during the entire streaming operation.
+            with self._messages_lock:
+                self.messages.append({"role": "user", "content": user_text})
+                messages_snapshot = list(self.messages)
 
             stream_response = self.client.chat.completions.create(
                 model=self.model,
-                messages=self.messages,
+                messages=messages_snapshot,
                 temperature=config.LLM_TEMPERATURE,
                 max_tokens=config.LLM_MAX_TOKENS,
                 top_p=config.LLM_TOP_P,
@@ -79,8 +85,10 @@ class LLMManager:
 
             full_reply = ""
             sentence_buffer = ""
-            # Regex tracking common punctuation (. ! ?) followed by spaces to detect completed sentences
-            sentence_end = re.compile(r'(?<=[.!?])\s+')
+            # Split on sentence-ending punctuation only when followed by an uppercase letter.
+            # This avoids false splits on abbreviations ("Mr. Smith"), decimals ("1.5 sec"),
+            # and mid-sentence periods, which the LLM prompt discourages but may still produce.
+            sentence_end = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я])')
 
             for chunk in stream_response:
                 if stop_event.is_set():
@@ -93,8 +101,6 @@ class LLMManager:
 
                 if token_callback:
                     token_callback(token)
-                else:
-                    print(token, end="", flush=True)
                 full_reply += token
                 sentence_buffer += token
 
@@ -114,25 +120,27 @@ class LLMManager:
                 tts_queue.put(remaining_text)
 
             final_reply = full_reply.strip() if full_reply.strip() else "Sorry, I did not get a response."
-            self.messages.append({"role": "assistant", "content": final_reply})
-            self._trim_history()
+            with self._messages_lock:
+                self.messages.append({"role": "assistant", "content": final_reply})
+                self._trim_history()
 
             logging.info(f"LLM full response: {final_reply!r}")
             return final_reply
 
-        except Exception as error:
+        except Exception:
             # Roll back the user message so history stays consistent (user/assistant pairs)
-            if self.messages and self.messages[-1].get("role") == "user":
-                self.messages.pop()
-            logging.error(f"LLM Stream error: {error}")
+            with self._messages_lock:
+                if self.messages and self.messages[-1].get("role") == "user":
+                    self.messages.pop()
+            logging.exception("LLM Stream error:")
             return "Sorry, please try again."
 
-    def _trim_history(self, max_pairs: int = None):
-        """Prunes conversation state list sizes to conserve system context window bounds."""
-        if max_pairs is None:
-            max_pairs = config.LLM_HISTORY_MAX_PAIRS
+    def _trim_history(self):
+        """Prunes conversation history to the most recent LLM_HISTORY_MAX_PAIRS turns.
+
+        Must be called with self._messages_lock held.
+        """
         system_message = self.messages[0]
         conversation = self.messages[1:]
-        max_messages = max_pairs * 2
-        conversation = conversation[-max_messages:]
-        self.messages = [system_message] + conversation
+        max_messages = config.LLM_HISTORY_MAX_PAIRS * 2
+        self.messages = [system_message] + conversation[-max_messages:]

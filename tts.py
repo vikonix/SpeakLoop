@@ -1,12 +1,11 @@
 import logging
-from threading import Event, Lock
+from threading import Event
 import numpy as np
 import sounddevice as sd
 from kokoro import KModel, KPipeline
 import config
 import io
 import wave
-import time
 
 try:
     import winsound
@@ -14,8 +13,9 @@ try:
 except ImportError:
     WINSOUND_AVAILABLE = False
 
-# Global thread-safety lock for PortAudio/sounddevice operations on Windows
-sound_lock = Lock()
+# Re-export the shared PortAudio lock from config so callers that previously
+# imported `sound_lock` from this module continue to work without changes.
+sound_lock = config.AUDIO_LOCK
 
 
 # Technical synthesizer & audio configurations
@@ -40,10 +40,6 @@ KOKORO_WARMUP_WORDS = {
     "r": "Привет.",    # Russian
     "z": "你好",       # Chinese
 }
-PLAYBACK_BLOCKSIZE = 0      # 0 lets sounddevice choose optimal block size for output
-AUDIO_LATENCY = None
-AUDIO_CHANNELS = 1
-AUDIO_OUTPUT_DEVICE = None
 
 
 class TTSManager:
@@ -139,9 +135,9 @@ class TTSManager:
                 full_audio = full_audio.reshape(-1, 1)
 
             # 2. Open the audio output stream only when we are fully ready to play,
-            # using sound_lock and a full PortAudio reset to heal any HDMI/NVIDIA driver disconnects
-            # caused by CUDA power state transitions on Windows
-            with sound_lock:
+            # using config.AUDIO_LOCK and a full PortAudio reset to heal any HDMI/NVIDIA
+            # driver disconnects caused by CUDA power state transitions on Windows.
+            with config.AUDIO_LOCK:
                 try:
                     sd._terminate()
                     sd._initialize()
@@ -150,11 +146,11 @@ class TTSManager:
 
                 stream = sd.OutputStream(
                         samplerate=KOKORO_SAMPLE_RATE,
-                        channels=AUDIO_CHANNELS,
+                        channels=config.AUDIO_CHANNELS,
                         dtype="float32",
-                        blocksize=PLAYBACK_BLOCKSIZE,
-                        latency=AUDIO_LATENCY,
-                        device=AUDIO_OUTPUT_DEVICE,
+                        blocksize=0,  # 0 lets sounddevice choose optimal block size
+                        latency=config.AUDIO_LATENCY,
+                        device=config.AUDIO_OUTPUT_DEVICE,
                 )
                 stream.start()
 
@@ -167,12 +163,12 @@ class TTSManager:
                     chunk = full_audio[i:i+chunk_size]
                     stream.write(chunk)
             finally:
-                with sound_lock:
+                with config.AUDIO_LOCK:
                     try:
                         stream.stop()
                         stream.close()
                     except Exception as close_error:
                         logging.debug(f"Error during sound output stream close: {close_error}")
 
-        except Exception as error:
-            logging.error(f"TTS Stream Play error: {error}")
+        except Exception:
+            logging.exception("TTS Stream Play error:")
