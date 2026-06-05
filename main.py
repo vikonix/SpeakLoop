@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore", message="dropout option adds dropout.*")
 warnings.filterwarnings("ignore", message=".*weight_norm.*deprecated.*")
 
 import config
-from stt import STTManager, COMPUTE_TYPE, WHISPER_SAMPLE_RATE
+from stt import STTManager, WHISPER_SAMPLE_RATE
 from llm import LLMManager
 from tts import TTSManager, sound_lock
 
@@ -98,6 +98,8 @@ class VoiceTutorGUI:
         self.llm_fallback_warning = None
         # Holds the subprocess.Popen handle when local_server is auto-started
         self._llm_server_process: Optional[subprocess.Popen] = None
+        # File handle for the LLM server log (kept open for the lifetime of the subprocess)
+        self._llm_server_log_file = None
 
         if self.llm_backend == "local_server":
             logging.info("Using local_server LLM backend (llm_server/server.py subprocess).")
@@ -333,8 +335,15 @@ class VoiceTutorGUI:
             "--n-gpu-layers", str(config.EXTERNAL_N_GPU_LAYERS),
             "--n-ctx", str(config.EXTERNAL_N_CTX),
         ]
+        log_path = os.path.join(os.path.dirname(__file__), "llm_server.log")
         logging.info(f"Starting LLM server: {' '.join(cmd)}")
-        self._llm_server_process = subprocess.Popen(cmd)
+        logging.info(f"LLM server output → {log_path}")
+        self._llm_server_log_file = open(log_path, "w", encoding="utf-8", buffering=1)
+        self._llm_server_process = subprocess.Popen(
+            cmd,
+            stdout=self._llm_server_log_file,
+            stderr=self._llm_server_log_file,
+        )
 
         # Poll until server is ready or timeout expires
         deadline = time.time() + config.LOCAL_SERVER_STARTUP_TIMEOUT
@@ -343,12 +352,18 @@ class VoiceTutorGUI:
             api_key=config.LOCAL_SERVER_API_KEY,
         )
         while time.time() < deadline:
-            if self.llm_mgr.check_connection():
+            # Check if the process has already exited (e.g. model not found, OOM)
+            if self._llm_server_process.poll() is not None:
+                exit_code = self._llm_server_process.returncode
+                logging.error(f"LLM server process exited unexpectedly (code {exit_code}).")
+                return False
+
+            if self.llm_mgr.check_connection(silent=True):
                 logging.info("LLM server is ready.")
                 return True
             time.sleep(1.0)
 
-        logging.error("LLM server did not become ready in time.")
+        logging.error("LLM server did not become ready within the timeout.")
         return False
 
     def load_components(self):
@@ -372,10 +387,13 @@ class VoiceTutorGUI:
                 self.root.after(0, self.append_system_msg, f"Starting LLM server with {model_name}...")
                 self.root.after(0, self.update_status, "Starting LLM server...", "#ffb86c")
                 ready = self._start_llm_server()
-                if ready:
-                    self.root.after(0, self.append_system_msg, "LLM server is ready.")
-                else:
+                if not ready:
                     self.root.after(0, self.append_system_msg, "Error: LLM server failed to start. Check model path and GPU memory.")
+                    self.root.after(0, self.update_status, "LLM Server Error", "#ff5555")
+                    self.root.after(0, self.update_instruction, "LLM server failed to start. Check the log and restart.")
+                    # Do not call make_app_ready — keep the button in loading/disabled state
+                    return
+                self.root.after(0, self.append_system_msg, "LLM server is ready.")
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
@@ -406,7 +424,7 @@ class VoiceTutorGUI:
             self._tts_is_speaking = False
         self.draw_mic_button("idle")
         self.update_status("Ready", "#00e676")
-        self.update_instruction(f"Hold SPACE or click Button to speak. Press ESC to quit.")
+        self.update_instruction("Hold SPACE or click Button to speak. Press ESC to quit.")
         self.append_system_msg(f"Voice Tutor ready. Practice learning {config.TARGET_LANGUAGE}!")
 
     def on_gui_btn_press(self):
@@ -558,6 +576,7 @@ class VoiceTutorGUI:
                 self.root.after(0, self.append_system_msg, "Audio is too short. Try holding space longer.")
                 self.root.after(0, self.draw_mic_button, "idle")
                 self.root.after(0, self.update_status, "Ready", "#00e676")
+                self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
                 return
 
             audio = self.normalize_audio(audio)
@@ -573,6 +592,7 @@ class VoiceTutorGUI:
                 self.root.after(0, self.append_system_msg, "Could not hear you clearly. Please try again.")
                 self.root.after(0, self.draw_mic_button, "idle")
                 self.root.after(0, self.update_status, "Ready", "#00e676")
+                self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
                 return
 
             # Update User Speech to GUI
@@ -672,12 +692,17 @@ class VoiceTutorGUI:
                 if item is _TTS_START_SENTINEL:
                     # LLM has finished — GPU is now free. Play all buffered sentences.
                     logging.info(f"TTS sentinel received. Playing {len(pending_sentences)} buffered sentence(s).")
-                    for sentence in pending_sentences:
+                    remaining = list(pending_sentences)
+                    pending_sentences.clear()
+                    for sentence in remaining:
                         if self.tts_stop_event.is_set() or self.shutdown_event.is_set():
                             break
-                        logging.info(f"TTS playing synthesized block: {sentence!r}")
-                        self.tts_mgr.play_stream(sentence, self.tts_stop_event, self.shutdown_event)
-                    pending_sentences.clear()
+                        try:
+                            logging.info(f"TTS playing synthesized block: {sentence!r}")
+                            self.tts_mgr.play_stream(sentence, self.tts_stop_event, self.shutdown_event)
+                        except Exception as play_err:
+                            # Skip the failed sentence and continue with the rest
+                            logging.error(f"TTS playback error for {sentence!r}: {play_err}")
                 elif self.tts_stop_event.is_set():
                     # Stop was requested — discard buffered sentences and this one
                     pending_sentences.clear()
@@ -687,7 +712,6 @@ class VoiceTutorGUI:
                     pending_sentences.append(item)
             except Exception as e:
                 logging.error(f"Error in TTS queue thread: {e}")
-                pending_sentences.clear()
             finally:
                 self.tts_queue.task_done()
 
@@ -705,6 +729,9 @@ class VoiceTutorGUI:
             except subprocess.TimeoutExpired:
                 logging.warning("LLM server did not exit cleanly — killing it.")
                 self._llm_server_process.kill()
+
+        if self._llm_server_log_file is not None:
+            self._llm_server_log_file.close()
 
         # Explicitly close log handlers (R1 fix)
         for handler in logging.root.handlers[:]:

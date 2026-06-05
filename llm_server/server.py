@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -32,9 +33,13 @@ from pydantic import BaseModel
 try:
     from llama_cpp import Llama
 except ImportError:
-    raise RuntimeError(
-        "llama_cpp not installed. Run: pip install llama-cpp-python"
+    print(
+        "ERROR: llama_cpp is not installed.\n"
+        "Install it with: pip install llama-cpp-python\n"
+        "For CUDA support see llm_server/README.md",
+        file=sys.stderr,
     )
+    sys.exit(1)
 
 
 logging.basicConfig(
@@ -78,7 +83,7 @@ class ModelLoadRequest(BaseModel):
 
 # ── Model management ──────────────────────────────────────────────────────────
 
-def _load_model(model_path: str, n_gpu_layers: int, n_ctx: int) -> None:
+def _load_model(model_path: str, n_gpu_layers: int, n_ctx: int, verbose: bool = False) -> None:
     """Load (or reload) the GGUF model. Must be called with _inference_lock held."""
     global _model, _model_path, _model_params
 
@@ -96,7 +101,7 @@ def _load_model(model_path: str, n_gpu_layers: int, n_ctx: int) -> None:
         model_path=model_path,
         n_gpu_layers=n_gpu_layers,
         n_ctx=n_ctx,
-        verbose=False,
+        verbose=verbose,
     )
     _model_path = model_path
     _model_params = {"n_gpu_layers": n_gpu_layers, "n_ctx": n_ctx}
@@ -157,11 +162,14 @@ def _stream_chat(request: ChatCompletionRequest) -> Iterator[str]:
 @app.get("/health")
 def health():
     """Returns model load status and basic params."""
-    loaded = _model is not None
+    with _inference_lock:
+        loaded = _model is not None
+        path = _model_path
+        params = dict(_model_params) if loaded else {}
     return {
         "status": "ok" if loaded else "no_model",
-        "model_path": _model_path,
-        "params": _model_params if loaded else {},
+        "model_path": path,
+        "params": params,
     }
 
 
@@ -249,11 +257,13 @@ def main():
                         help="Number of model layers to offload to GPU")
     parser.add_argument("--n-ctx", type=int, default=2048,
                         help="Context window size in tokens")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Show llama.cpp model loading output (layer counts, VRAM usage, etc.)")
     args = parser.parse_args()
 
     if args.model:
         with _inference_lock:
-            _load_model(args.model, args.n_gpu_layers, args.n_ctx)
+            _load_model(args.model, args.n_gpu_layers, args.n_ctx, verbose=args.verbose)
     else:
         logging.warning(
             "No --model provided. Server will start without a model. "

@@ -33,16 +33,24 @@ class LLMManager:
             timeout=LLM_TIMEOUT,
         )
 
-    def check_connection(self) -> bool:
-        """Validates connectivity to the local LLM server."""
+    def check_connection(self, silent: bool = False) -> bool:
+        """
+        Validates connectivity to the local LLM server.
+
+        Pass silent=True during startup polling to suppress per-attempt error logs
+        and avoid flooding the log with dozens of identical connection errors.
+        """
         try:
             if self.client is None:
                 raise RuntimeError("LLM client not initialized. Call init_client() first.")
             self.client.models.list()
-            logging.info("Successfully connected to LM Studio.")
+            logging.info("Successfully connected to LLM server.")
             return True
         except Exception as error:
-            logging.error(f"LM Studio not available: {error}")
+            if silent:
+                logging.debug(f"LLM server not yet available: {error}")
+            else:
+                logging.error(f"LLM server not available: {error}")
             return False
 
     def stream_and_queue_tts(self, user_text: str, tts_queue: Queue, stop_event: Event, token_callback=None) -> str:
@@ -50,8 +58,6 @@ class LLMManager:
         Streams text from the LLM, parses sentences using regex on-the-fly,
         and pushes completed strings into the TTS queue.
         """
-        assert self.client is not None
-
         if self.client is None:
             raise RuntimeError("LLM client not initialized. Call init_client() first.")
 

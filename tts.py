@@ -1,7 +1,6 @@
 import logging
 from threading import Event, Lock
 import numpy as np
-import torch
 import sounddevice as sd
 from kokoro import KModel, KPipeline
 import config
@@ -85,8 +84,8 @@ class TTSManager:
                 model=self.model,
             )
 
-            # 1. Synthesize all audio chunks first to avoid keeping the audio stream open and idle
-            # during VRAM/GPU contention between llama_cpp and Kokoro
+            # 1. Synthesize all audio chunks before opening the audio output stream.
+            #    This avoids holding the stream open while the GPU is idle between chunks.
             audio_chunks = []
             for _, _, audio in generator:
                 if stop_event.is_set() or shutdown_event.is_set():
