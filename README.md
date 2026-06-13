@@ -1,10 +1,10 @@
 # SpeakLoop
 
-AI-powered voice tutor for practicing foreign languages through real conversation.
+AI-powered voice tutor for practicing foreign languages through real conversation (MVP).
 
 ## About
 
-SpeakLoop is a desktop application (Windows) for practicing conversational foreign language with an AI partner. Hold Space to speak, release to get a response — the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
+SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Hold Space to speak, release to get a response — the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
 
 ## Tech Stack
 
