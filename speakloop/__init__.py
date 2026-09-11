@@ -3,9 +3,8 @@
 
 """SpeakLoop application package: a local voice dialogue trainer.
 
-The package is being built step by step next to the old root modules
-(main.py, config.py, stt.py, llm.py, tts.py, llm_server/), which still run the
-application until they move into this package.
+Entry point ``speakloop/cli.py``; the application in ``speakloop/app.py``.
+The root ``main.py`` is a shim over the same ``cli.main()``.
 """
 
 # Single source of truth for the application version (SemVer MAJOR.MINOR.PATCH,

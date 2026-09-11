@@ -6,7 +6,7 @@ AI-powered voice tutor for practicing foreign languages through real conversatio
 
 SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Hold Space to speak and release it to get a response: the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
 
-The application is being moved to a new package structure (`speakloop/`) step by step. At this stage the installer and the model downloads are in the package, and the application itself still runs from the modules in the project root.
+The application is being moved to a new structure step by step. It now runs from the `speakloop/` package; the local model server is still the old `llm_server/` (llama-cpp-python) until it is replaced by the official `llama-server`.
 
 ## Tech Stack
 
@@ -139,28 +139,39 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 
 ## Configuration
 
-All settings of the current application are in [`config.py`](config.py):
+The configuration has three layers, lowest priority first:
+
+1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): language pair, persona prompt, LLM backend and server address, generation parameters, Whisper and Kokoro settings.
+2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`), GPU layers and context size of the local model, audio devices.
+3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
+   - `max_record_seconds`: limit of one recording, in seconds (default 20).
+
+Both files are optional. A broken or missing file leaves the lower layers in effect, and the problem is printed to the console. Restart the app to apply a change.
+
+The LLM backend is still selected in `speakloop/config.py`:
 
 ```python
-# LLM backend selection
-LLM_BACKEND = "local_server"   # recommended
+LLM_BACKEND = "local_server"   # recommended: starts llm_server/server.py
 # LLM_BACKEND = "lm-studio"   # if using LM Studio
-
-# Path to the GGUF model file (for local_server)
-EXTERNAL_MODEL_PATH = "models/llama-3.2-3b-instruct-q4_k_m.gguf"
-
-# Language pair
-NATIVE_LANGUAGE = "Russian"
-TARGET_LANGUAGE = "English"
 ```
+
+Models are loaded from `model_cache/`. When all models of a run are there, the app does not connect to the Hugging Face Hub at all.
 
 ## Running
 
+In the activated virtual environment, any of these starts the same application:
+
 ```bash
 python main.py
+python -m speakloop
+speakloop                # console script, after `pip install -e .`
 ```
 
+`speakloop --version` prints the version, `speakloop --detect-hardware` rewrites `config/hardware_config.json`.
+
 With `LLM_BACKEND = "local_server"` the server starts automatically. With `LLM_BACKEND = "lm-studio"` start LM Studio first.
+
+Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_server.log` (the model server), `install.log` and `hwdetect.log` (kept across runs).
 
 ## Controls
 
@@ -173,22 +184,25 @@ With `LLM_BACKEND = "local_server"` the server starts automatically. With `LLM_B
 python -m unittest discover -s tests -v
 ```
 
-The tests are fast, download nothing and replace torch, subprocesses and the network with stubs.
+The tests download nothing and replace subprocesses and the network with stubs. `tests/test_config.py` imports the real configuration of the checkout, so it also imports torch, like the application does.
 
 ## Project Structure
 
 ```
 SpeakLoop/
-├── main.py              GUI, thread orchestration (current application)
-├── stt.py               Speech-to-Text (Whisper)
-├── llm.py               LLM client (OpenAI-compatible)
-├── tts.py               Text-to-Speech (Kokoro)
-├── config.py            configuration of the current application
-├── llm_server/          standalone process for the local LLM (llama-cpp-python)
+├── main.py              launcher shim for a source checkout
 ├── install.py           guided installer
-├── pyproject.toml       package metadata and the dependency list
-├── speakloop/           new package
-│   ├── bootstrap.py         early process setup, log headers
+├── pyproject.toml       package metadata, dependency list, console script
+├── speakloop/           application package
+│   ├── cli.py               entry point (--version, --detect-hardware)
+│   ├── __main__.py          python -m speakloop
+│   ├── app.py               GUI, thread orchestration, run()
+│   ├── stt.py               Speech-to-Text (faster-whisper)
+│   ├── llm.py               LLM client (OpenAI-compatible)
+│   ├── tts.py               Text-to-Speech (Kokoro)
+│   ├── config.py            configuration layers
+│   ├── bootstrap.py         early process setup, logging
+│   ├── lifecycle.py         process exit and relaunch helpers
 │   ├── paths.py             where every file lives (SPEAKLOOP_HOME)
 │   ├── loader.py            JSON reading and atomic writing
 │   ├── models_info.py       model catalogue
@@ -196,8 +210,11 @@ SpeakLoop/
 │   ├── gguf_fetch.py        GGUF model download
 │   ├── llama_server_fetch.py  pinned llama-server binary
 │   └── detect_hardware.py   hardware probe, config/hardware_config.json
+├── llm_server/          standalone process for the local LLM (llama-cpp-python)
+├── config/              settings.example.json (settings.json, hardware_config.json are local)
 ├── tests/               unit tests
 ├── tools/               maintainer tools (measure_model_sizes.py)
+├── docs/                plans and reviews
 ├── models/              GGUF model files
-└── bin/, model_cache/, logs/, config/   created by the installer
+└── bin/, model_cache/, logs/   created by the installer
 ```

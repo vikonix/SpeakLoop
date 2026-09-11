@@ -1,9 +1,18 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Valeriy Kovalev
+
 import numpy as np
+# torch before faster_whisper, and the order must stay: on Windows the CUDA
+# build of torch puts its cuBLAS and cuDNN libraries on the DLL search path when
+# it is imported, and ctranslate2 (the engine of faster-whisper) needs them to
+# run on CUDA.
+import torch  # noqa: F401
 from faster_whisper import WhisperModel
-import config
+
+from speakloop import config
 
 
-COMPUTE_TYPE = "float16" if config.DEVICE == "cuda" else "int8"
+COMPUTE_TYPE = "float16" if config.STT_DEVICE == "cuda" else "int8"
 
 # Technical transcription configuration
 WHISPER_SAMPLE_RATE = 16_000   # Whisper architecture requires strict 16kHz audio layouts
@@ -20,7 +29,7 @@ class STTManager:
         """Instantiates the Whisper AI engine into memory."""
         self.model = WhisperModel(
             config.WHISPER_MODEL,
-            device=config.DEVICE,
+            device=config.STT_DEVICE,
             compute_type=COMPUTE_TYPE,
             cpu_threads=config.WHISPER_CPU_THREADS,
             num_workers=1,

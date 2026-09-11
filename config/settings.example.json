@@ -1,0 +1,5 @@
+{
+  "_readme": "SpeakLoop user settings. Copy this file to settings.json in the same directory and edit it by hand; restart the app to apply. Delete a key (or the whole file) to use the built-in default. Keys starting with '_' are ignored and may be used as comments.",
+  "_max_record_seconds": "Hard limit on a single recording, in seconds (a safety stop for a stuck key). Minimum 1.",
+  "max_record_seconds": 20
+}

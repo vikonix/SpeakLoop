@@ -163,10 +163,18 @@ Homepage = "https://github.com/vikonix/SpeakLoop"
 Repository = "https://github.com/vikonix/SpeakLoop"
 Issues = "https://github.com/vikonix/SpeakLoop/issues"
 
+# cli:main, not app:run. The application module imports torch, faster-whisper
+# and Kokoro at module level, so an entry point naming it would load all of that
+# before it could answer --version; cli.py is stdlib-only and imports the
+# application after parsing the arguments. speakloop/__main__.py routes
+# `python -m speakloop` into the same function.
+[project.scripts]
+speakloop = "speakloop.cli:main"
+
 # Discovered rather than listed by hand, so a new subpackage cannot be lost
 # from the list. namespaces = false keeps the search to directories with an
-# __init__.py: the old modules in the project root (main.py, config.py, stt.py,
-# llm.py, tts.py) and llm_server/ are not packages and stay out.
+# __init__.py: the root main.py shim, install.py, llm_server/, tests/ and tools/
+# are not part of the package.
 [tool.setuptools.packages.find]
 include = ["speakloop*"]
 namespaces = false

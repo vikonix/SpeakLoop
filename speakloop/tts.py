@@ -1,11 +1,15 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Valeriy Kovalev
+
 import logging
 from threading import Event
 import numpy as np
 import sounddevice as sd
 from kokoro import KModel, KPipeline
-import config
 import io
 import wave
+
+from speakloop import config
 
 try:
     import winsound
@@ -49,7 +53,7 @@ class TTSManager:
 
     def load_model(self):
         """Instantiates Kokoro TTS network into memory."""
-        self.model = KModel(repo_id="hexgrad/Kokoro-82M").to(config.DEVICE)
+        self.model = KModel(repo_id=config.KOKORO_REPO_ID).to(config.DEVICE)
         self.pipeline = KPipeline(lang_code=config.KOKORO_LANG_CODE)
 
     def warm_up(self):

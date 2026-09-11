@@ -1,15 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Valeriy Kovalev
+
 import re
 import logging
 import threading
 from queue import Queue
 from threading import Event
 from openai import OpenAI
-import config
+
+from speakloop import config
 
 # Technical configuration parameters
 LLM_TIMEOUT = 30.0
 
-# Compiled once at import time — splits on sentence-ending punctuation only when
+# Compiled once at import time - splits on sentence-ending punctuation only when
 # followed by an uppercase letter, avoiding false splits on "Mr. Smith" or "1.5 sec".
 _SENTENCE_END = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я])')
 
@@ -57,7 +61,7 @@ class LLMManager:
             if silent:
                 logging.debug(f"LLM server not yet available: {error}")
             else:
-                # Connection failures are expected (e.g. LM Studio offline) —
+                # Connection failures are expected (e.g. LM Studio offline) -
                 # log the message only, not the full traceback.
                 logging.error(f"LLM server not available: {error}")
             return False
