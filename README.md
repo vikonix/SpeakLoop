@@ -131,7 +131,7 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 
 | Model | Used for | Download | Command |
 |---|---|---|---|
-| `Systran/faster-whisper-small` | speech recognition | about 490 MB | `python -m speakloop.model_fetch --hf` |
+| `Systran/faster-whisper-small` | speech recognition | 486 MB | `python -m speakloop.model_fetch --hf` |
 | Kokoro-82M (`hexgrad/Kokoro-82M`) | speech output (English) | 363 MB | `python -m speakloop.model_fetch --hf` |
 | Supertonic 3 (`Supertone/supertonic-3`) | speech output (Spanish) | 404 MB | `python -m speakloop.model_fetch --supertonic`. The weights have the **OpenRAIL-M** license, so they are downloaded, not included |
 | `llama-3.2-3b-instruct-q4_k_m.gguf` | conversation | 2019 MB | `python -m speakloop.gguf_fetch` |

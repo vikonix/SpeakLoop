@@ -2,11 +2,11 @@
 
 Статус: утверждённый порядок работ, детали отдельных этапов ещё открыты (см. раздел 10).
 Дата: 2026-09-11.
-Основная копия файла: `proposals/refactoring.md` в репозитории SpeakLoop.
+Основная копия файла: `docs/refactoring.md` в репозитории SpeakLoop.
 
-Документ заменяет `proposals/SpeakLoop-v1-plan.md`. Исходные данные для него:
-`proposals/SpeakLoop-status-2026-09-11.md` (разбор текущего кода) и
-`proposals/Mimora-reuse-inventory.md` (что можно взять из Mimora).
+Документ заменяет `docs/SpeakLoop-v1-plan.md`. Исходные данные для него:
+`docs/SpeakLoop-status-2026-09-11.md` (разбор текущего кода) и
+`docs/Mimora-reuse-inventory.md` (что можно взять из Mimora).
 
 ---
 
@@ -543,11 +543,11 @@ SpeakLoop/
 
 ---
 
-## 13. Судьба старых документов в `proposals/`
+## 13. Судьба старых документов (`docs/`)
 
 - `SpeakLoop-v1-plan.md`: заменён этим документом.
 - `SpeakLoop-status-2026-09-11.md`, `Mimora-reuse-inventory.md`: исходные данные,
   остаются как справка.
-- `ReadLoop-A2-spec.md`: устарел (рассчитан на модель 3B и удаляемые файлы);
-  идеи фаз урока пригодятся для программы-ведущего.
-- `EchoLoop-B-spec.md`: перекрыт Mimora.
+- `ReadLoop-A2-spec.md`: устарел (рассчитан на модель 3B и удаляемые файлы),
+  в `docs/` не перенесён; идеи фаз урока пригодятся для программы-ведущего.
+- `EchoLoop-B-spec.md`: перекрыт Mimora, в `docs/` не перенесён.

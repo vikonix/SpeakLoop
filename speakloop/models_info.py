@@ -113,8 +113,7 @@ class PackagedModel(NamedTuple):
 WHISPER_SMALL = HfRepo(
     "Systran/faster-whisper-small",
     "faster-whisper small (speech recognition)",
-    # Not measured yet: re-snap with tools/measure_model_sizes.py.
-    size_mb=486,
+    size_mb=486,  # measured 2026-09-11
 )
 
 KOKORO = HfRepo(
