@@ -1,0 +1,175 @@
+[build-system]
+# 77 is the release that added PEP 639 support (license = "MIT" plus
+# license-files below). pip installs a current setuptools into the isolated
+# build environment anyway, so the floor only matters for a build with
+# isolation disabled against a pinned older version.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speakloop"
+# Version is the single source of truth in speakloop/__init__.py (read dynamically below).
+dynamic = ["version"]
+description = "Local voice dialogue trainer for language learning: faster-whisper speech recognition, a local LLM partner, Kokoro and Supertonic speech synthesis."
+readme = "README.md"
+# Tested on 3.11 and 3.12, and bounded rather than left open. The bound is a
+# statement about the INSTALL, not about the application: curated-tokenizers
+# (kokoro -> misaki[en] -> spacy-curated-transformers 0.3.1) publishes no cp314
+# wheel, so a newer interpreter compiles a C extension from source and the
+# install needs a C++ compiler. With the bound, pip refuses in one line instead
+# of dying inside somebody else's build.
+#
+# Raising the ceiling is a deliberate act, together with WHEEL_TESTED_MAX in
+# install.py and the requirements section of README.md, once a newer minor is
+# verified to have wheels for every dependency.
+requires-python = ">=3.11,<3.13"
+# PEP 639 SPDX expression, not the older license = { file = ... } table: that
+# form embeds the whole licence TEXT into the License: metadata field, and
+# setuptools deprecated it in 77 - which is the floor in build-system above.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Valeriy Kovalev" }]
+keywords = [
+    "language-learning",
+    "dialogue",
+    "speech",
+    "speech-recognition",
+    "text-to-speech",
+    "offline",
+    "llm",
+    "tkinter",
+]
+# No "License ::" classifier: PyPI takes the licence from the field above, and
+# the two disagreeing is a known way to publish a package labelled twice.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: English",
+    "Natural Language :: Spanish",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Education",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+# The single list of runtime dependencies. install.py reads this list (tomllib,
+# stdlib since 3.11 = requires-python above), so there is one list and not a
+# list plus a copy in a requirements.txt.
+#
+# No index is named here, because a PyPI package cannot name one. That matters
+# on exactly one platform: PyPI's torch is a CUDA build on Linux and CUDA does
+# not exist on macOS, so only Windows with an NVIDIA card gets a CPU-only wheel
+# it did not want. install.py installs the CUDA build before this list for that
+# reason (its step 3).
+#
+# Intel macOS (x86_64) runs on relaxed pins throughout: PyTorch published no
+# wheel newer than 2.2.2 for it, that build wants NumPy 1.x, and transformers
+# 5.x requires torch>=2.7. So torch, transformers and numpy each carry a pair
+# of markers. This accepts CVE-2026-4372 on Intel Mac (a local desktop app
+# loading only trusted models) in exchange for a working stack; every other
+# platform keeps the hardened pins.
+#
+# torchaudio is NOT a dependency, and adding it breaks Linux. Nothing in this
+# project imports it, but transformers imports it at module level whenever
+# is_torchaudio_available() says yes, and that predicate asks the environment's
+# METADATA rather than whether the import works. On Linux the usual install
+# resolves torch and torchaudio to different CUDA series, so that import raises
+# RuntimeError inside transformers (which Kokoro loads). A version pin cannot
+# fix it: the +cuXXX suffix is a local version and PEP 508 specifiers do not
+# see it.
+dependencies = [
+    # --- core runtime -----------------------------------------------------
+    # NumPy upper bound: numba (via librosa) supports NumPy <= 2.4, and without
+    # the cap librosa.resample fails at runtime with "Numba needs NumPy 2.4 or
+    # less". Drop it once numba supports 2.5.
+    "numpy>=1.24.0,<2.5; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "numpy>=1.24.0,<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "torch>=2.0.0; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "torch==2.2.2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    # transformers arrives with kokoro and is named here for the pin:
+    # transformers>=5.3 closes CVE-2026-4372 (config-injection RCE; no 4.x fix
+    # exists). 5.x needs torch>=2.7 for torch.float8_e8m0fnu.
+    "transformers>=5.3; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "transformers>=4.44,<5; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    # numba (via librosa) upper bound on Intel macOS only: from llvmlite 0.46.0
+    # (paired with numba 0.63.0) PyPI publishes no wheels for macOS x86_64, and
+    # without a wheel pip builds llvmlite from source, which needs a matching
+    # LLVM on the machine and fails outright otherwise. numba pins its paired
+    # llvmlite minor tightly, so capping numba alone keeps llvmlite in the
+    # 0.45.x range, which still ships a wheel.
+    "numba<0.63,>=0.60; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+
+    # --- audio in and out -------------------------------------------------
+    "soundfile>=0.12.0",
+    "sounddevice>=0.4.6",
+    # librosa resamples the microphone capture to 16 kHz in the recorder.
+    "librosa>=0.10.0",
+    "scipy>=1.10.0",
+
+    # --- speech recognition -----------------------------------------------
+    # 1.2 is the release line the application already runs on. It brings
+    # ctranslate2 4.x, whose CUDA path needs cuBLAS 12 and cuDNN 9 at runtime;
+    # on Windows those come from the CUDA build of torch, which is why torch is
+    # imported before faster_whisper (see detect_hardware._probe_stt_cuda).
+    "faster-whisper>=1.2",
+
+    # --- speech synthesis -------------------------------------------------
+    # Kokoro: English. Its English G2P (misaki) downloads the spaCy pipeline
+    # en_core_web_sm with pip at the first English synthesis, so the
+    # environment needs pip and network access once.
+    "kokoro>=0.3.0",
+    # Supertonic 3: Spanish. Pulls onnxruntime and huggingface-hub. The weights
+    # (~400 MB, OpenRAIL-M) are NOT bundled: install.py pre-downloads them.
+    "supertonic>=0.1",
+
+    # --- LLM ----------------------------------------------------------------
+    # The LLM itself has no entry on purpose: it runs in the official
+    # llama-server binary, installed by speakloop/llama_server_fetch.py rather
+    # than by pip. Do not add llama-cpp-python: it publishes no CPU wheel on
+    # recent releases, so the binary-only install would fail outright.
+    "openai>=1.0.0",
+
+    # --- model downloads --------------------------------------------------
+    # Arrives transitively but pinned: speakloop/model_fetch.py and
+    # gguf_fetch.py were verified against huggingface_hub 1.24 (the cache
+    # predicates and the tqdm_class check in model_fetch.progress_kwargs).
+    # Intel macOS is left unconstrained on purpose - transformers 4.x caps the
+    # hub below 1.0 there, so a pin would make that platform unsatisfiable.
+    "huggingface_hub>=1.24; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    # Nothing here imports click and no dependency of ours declares it: it
+    # arrives only because huggingface_hub 1.x requires it. On Intel macOS,
+    # where the pin above does not apply, hub 0.x has no such requirement and
+    # the kokoro -> misaki -> spacy chain dies with "No module named 'click'".
+    # Listed unconditionally rather than behind a marker, so the day the hub
+    # drops it nothing breaks silently.
+    "click>=8.4.2",
+
+    # --- user interface ---------------------------------------------------
+    # Themed ttk widgets, imported as a drop-in "ttk". Capped below 2.0: the
+    # UI theme code disables the classic-widget autostyle hook through the 1.x
+    # internal Bootstyle.update_tk_widget_style, which the 2.x rewrite renames.
+    "ttkbootstrap>=1.10,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/vikonix/SpeakLoop"
+Repository = "https://github.com/vikonix/SpeakLoop"
+Issues = "https://github.com/vikonix/SpeakLoop/issues"
+
+# Discovered rather than listed by hand, so a new subpackage cannot be lost
+# from the list. namespaces = false keeps the search to directories with an
+# __init__.py: the old modules in the project root (main.py, config.py, stt.py,
+# llm.py, tts.py) and llm_server/ are not packages and stay out.
+[tool.setuptools.packages.find]
+include = ["speakloop*"]
+namespaces = false
+
+[tool.setuptools.dynamic]
+version = { attr = "speakloop.__version__" }

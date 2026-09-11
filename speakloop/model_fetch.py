@@ -1,0 +1,547 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Valeriy Kovalev
+
+"""Download the models SpeakLoop always needs into model_cache/.
+
+Covers the downloads that are required whatever the LLM backend is: the
+faster-whisper speech recognizer and Kokoro TTS - both through the Hugging
+Face hub cache - plus the Supertonic 3 TTS weights, which live in their own
+cache directory.
+
+The LLM stack is deliberately NOT here: `speakloop/llama_server_fetch.py`
+fetches the llama-server binary and `speakloop/gguf_fetch.py` the GGUF chat
+model. Both are unnecessary when `llm_backend` is "lm-studio", while
+everything in this module is needed by every run that speaks and listens, so
+the split follows what a run can actually skip.
+
+Run it directly:
+
+    python -m speakloop.model_fetch              # everything that is missing
+    python -m speakloop.model_fetch --list       # what is present, what is not
+    python -m speakloop.model_fetch --hf --force # re-fetch the hub repos only
+
+Design notes
+------------
+* No side effects at import time and no heavy imports at module level:
+  huggingface_hub and supertonic are imported inside the functions that need
+  them, so install.py can import this module before the requirements step has
+  run and still get the "is it downloaded?" predicates. The two project modules
+  imported at the top, models_info and loader, are pure and stdlib-only, so
+  they cost nothing and break no rule.
+* This module must NEVER import speakloop.config. config sets HF_HUB_OFFLINE=1 as
+  soon as the models are cached, which would switch the network off exactly
+  when a download is wanted. The dependency runs the other way: config takes
+  the cache paths and the Supertonic predicate from here.
+* What each model IS (repo id, label, download size) comes from
+  speakloop/models_info.py, which config reads as well - that is how the same
+  facts reach both sides without either importing the other. It is pure data
+  with no imports of its own, so it costs this module nothing. Paths stay here,
+  next to the code that writes into them.
+* prepare_hf_env() must run before huggingface_hub is first imported anywhere
+  in the process - HF_HOME, HF_HUB_DISABLE_XET and HF_HUB_DISABLE_SYMLINKS are
+  read at import time. Each ensure_* function calls it, so callers do not have
+  to remember the ordering.
+"""
+
+from __future__ import annotations
+
+import argparse
+import inspect
+import logging
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Optional, Sequence
+
+if __package__ in (None, ""):
+    # Executed as a plain script (python speakloop/model_fetch.py) rather than
+    # with -m: that form puts THIS directory on sys.path instead of the project
+    # root, so the "import speakloop" below would not resolve. Same shim, and the
+    # same reason, as in gguf_fetch.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from speakloop import loader, models_info, paths
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+# paths.py is stdlib-only, which is what makes it importable here despite the
+# rule against importing config (see the module docstring): the ban is on
+# config's import-time side effects, not on knowing where files go.
+# Mirrors config.MODEL_CACHE_DIR; config imports this constant instead of
+# spelling the path a second time.
+MODEL_CACHE_DIR = paths.model_cache_dir()
+
+# Supertonic keeps its weights OUTSIDE the HF hub cache: the package downloads
+# them with snapshot_download(local_dir=...) into the directory named by the
+# SUPERTONIC_CACHE_DIR env var (whose own default would be ~/.cache/supertonic3).
+# Pinning it under model_cache/ keeps the weights next to the code.
+DEFAULT_SUPERTONIC_CACHE_DIR = MODEL_CACHE_DIR / "supertonic3"
+
+# Identity and size of every model live in speakloop/models_info.py. The names
+# below BIND to those records rather than restating them: a binding cannot
+# drift from what it points at, and a second copy of the string can.
+SUPERTONIC_MODEL_NAME = models_info.SUPERTONIC.name
+SUPERTONIC_SIZE_MB = models_info.SUPERTONIC.size_mb
+
+# Repos the app loads from the hub cache; pre-fetching them makes the first
+# launch offline-ready. Repo ids match what the app requests.
+# Supertonic is NOT in this list on purpose: it does not use the hub cache
+# (see above), so caching its repo under HF_HOME/hub would be dead weight the
+# app never reads. It has its own ensure_supertonic() instead.
+HF_MODEL_REPOS: tuple[models_info.HfRepo, ...] = models_info.HF_REPOS
+
+
+class ModelFetchError(RuntimeError):
+    """A download did not finish, so the model is not usable."""
+
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+
+def hf_home() -> Path:
+    """Effective HF cache root: the env var when set, model_cache/ otherwise.
+
+    Read through the environment rather than from MODEL_CACHE_DIR directly so
+    that an externally set HF_HOME is honored by the predicates too.
+    """
+    return Path(os.environ.get("HF_HOME") or MODEL_CACHE_DIR)
+
+
+def hf_hub_dir() -> Path:
+    """Directory the hub keeps its repo caches in, under hf_home().
+
+    The "hub" segment is huggingface_hub's own layout, not ours. One function
+    so a change in that layout is one edit.
+    """
+    return hf_home() / "hub"
+
+
+def supertonic_cache_dir() -> Path:
+    """Effective Supertonic cache directory (env var wins, as for HF_HOME)."""
+    return Path(os.environ.get("SUPERTONIC_CACHE_DIR")
+                or DEFAULT_SUPERTONIC_CACHE_DIR)
+
+
+def prepare_hf_env() -> None:
+    """Point the HF caches at model_cache/ and arm the Windows/macOS fallbacks.
+
+    Shared by every download here and by gguf_fetch, because each of them can
+    also run standalone from its own CLI and so cannot rely on another step
+    having done this first. Must run before huggingface_hub is imported:
+    HF_HOME, HF_HUB_DISABLE_XET and HF_HUB_DISABLE_SYMLINKS are read at import
+    time. Idempotent, and setdefault for the cache paths, so an externally
+    configured cache stays untouched.
+    """
+    # parents=True: run from its own CLI in package mode, this may be the first
+    # thing to touch the data root, and its parent does not exist yet.
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(MODEL_CACHE_DIR))
+    os.environ.setdefault("SUPERTONIC_CACHE_DIR",
+                          str(DEFAULT_SUPERTONIC_CACHE_DIR))
+    _configure_symlink_fallback()
+
+
+# Result of the one-off symlink probe below; None until it has run. The probe
+# creates a temporary directory and its outcome cannot change while the process
+# lives, so repeating it on every prepare_hf_env() call would be pure cost -
+# and every predicate in this module calls prepare_hf_env().
+_symlink_supported: Optional[bool] = None
+
+
+def _probe_symlink_support() -> bool:
+    """Can this process create a symlink inside the model cache?"""
+    try:
+        with tempfile.TemporaryDirectory(dir=MODEL_CACHE_DIR) as tmp:
+            src = Path(tmp) / "probe_src"
+            src.touch()
+            try:
+                os.symlink(src, Path(tmp) / "probe_dst")
+            except OSError:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _configure_symlink_fallback() -> None:
+    """On Windows, make huggingface_hub copy into the cache instead of linking.
+
+    The hub cache stores each file once as blobs/<sha> and points
+    snapshots/<revision>/<name> at it with a symlink. Creating a symlink on
+    Windows needs Developer Mode or admin rights; without either, os.symlink
+    raises OSError [WinError 1314].
+
+    huggingface_hub has a fallback for that (move or copy the blob into the
+    snapshot instead), but it is gated on are_symlinks_supported(), which is NOT
+    thread safe: it writes True into its per-directory cache BEFORE running the
+    probe that may overwrite it with False. snapshot_download uses eight worker
+    threads and its file lock is per-etag, so a second file that reaches the
+    linking step inside that window reads the optimistic True, calls os.symlink
+    and gets 1314 - which _create_symlink does not catch (it handles
+    FileExistsError and PermissionError, and 1314 maps to EINVAL, so it arrives
+    as a bare OSError). The failure therefore lands on whichever small file
+    happened to race, while the large weights download fine.
+
+    HF_HUB_DISABLE_SYMLINKS is the deterministic way out: are_symlinks_supported
+    returns False on it BEFORE consulting the racy cache, so every file takes
+    the copy path. It is set only when our own probe says symlinks are
+    unavailable, so a machine with Developer Mode keeps the cheaper symlinked
+    cache. Windows-only: macOS and Linux create symlinks without a permission
+    bit to fight, so there is nothing here for either to fall back from.
+
+    HF_HUB_DISABLE_XET stays on for every Windows run because older hf-xet
+    downloaders linked files into the cache themselves and raised 1314 with no
+    copy fallback at all. macOS gets the same variable set for an unrelated
+    reason - see the early return below - so this module ends up disabling Xet
+    everywhere except Linux, where it downloads and reports progress correctly
+    (confirmed under WSL2). It stays enabled there rather than disabled
+    everywhere on principle, because Xet is otherwise the faster transport.
+
+    All three variables are frozen by huggingface_hub's constants.py at import
+    time, so this must run before huggingface_hub is first imported anywhere in
+    the process. The env vars are re-applied on every call (they are cheap, and
+    a caller that restored os.environ must not silently lose them), while the
+    probe and its log line happen exactly once per process.
+    """
+    global _symlink_supported
+
+    if sys.platform == "darwin":
+        # macOS has no symlink/copy-fallback issue to work around, so the
+        # probe below is skipped entirely.
+        #
+        # Disabling Xet is a no-op on Intel macOS today and kept for when it
+        # stops being one: the relaxed `transformers>=4.44,<5` pin there holds
+        # huggingface_hub below 1.0, where Xet does not exist yet.
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        return
+
+    if sys.platform != "win32":
+        return
+
+    # Unconditional, unlike HF_HUB_DISABLE_SYMLINKS below: older hf-xet builds
+    # link into the cache with no copy fallback at all, so the probe cannot be
+    # trusted to gate them.
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+    first_call = _symlink_supported is None
+    if first_call:
+        _symlink_supported = _probe_symlink_support()
+
+    if _symlink_supported:
+        if first_call:
+            log.info("Symlink support: OK (hf-xet disabled on Windows for "
+                     "safety).")
+        return
+
+    # The first one changes behaviour (copy instead of link, race-free); the
+    # second only silences the library's own notice, which our log line below
+    # replaces.
+    os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    if first_call:
+        log.info("Symlinks unavailable (no Developer Mode / admin): HF "
+                 "downloads will COPY into the cache instead of symlinking "
+                 "(more disk use). Tip: enabling Windows Developer Mode lets "
+                 "HF use symlinks.")
+
+
+# ---------------------------------------------------------------------------
+# "Already downloaded?" predicates
+# ---------------------------------------------------------------------------
+
+def hf_repo_cached(repo_id: str) -> bool:
+    """Is the repo present in the local HF cache and free of partial files?
+
+    Delegates to loader.models_cached so that the installer, config's
+    offline gate and the app's startup check all answer this question the same
+    way. A snapshot directory has to exist and no *.incomplete blob may be left
+    behind by an interrupted download - the latter matters because
+    ensure_hf_models() SKIPS a repo this returns True for, so an over-generous
+    answer here means a half-fetched repo that no later run ever completes.
+
+    Do NOT replace this with snapshot_download(local_files_only=True). It
+    verifies every file of the recorded revision only when trees/<commit>.json
+    is cached, and that listing is written as a side effect of
+    snapshot_download itself (huggingface_hub 1.24.0,
+    _snapshot_download._raise_if_incomplete_snapshot returns early without it)
+    - so on a cache filled file by file by the libraries that load the models,
+    which is how a first run fills it, the check passes without looking at
+    anything. The filesystem
+    check is both stricter and free of the huggingface_hub import.
+
+    Neither check can see a download interrupted exactly BETWEEN two files: no
+    *.incomplete is left then. With files of this size an interrupt lands
+    mid-file in nearly every case, and --force remains the way out.
+    """
+    prepare_hf_env()
+    return loader.models_cached(hf_hub_dir(), (repo_id,))
+
+
+def supertonic_cached() -> bool:
+    """True when the Supertonic 3 model is fully present in its cache dir.
+
+    Unlike the hub cache above, no manifest check is needed: the supertonic
+    package downloads atomically (into a temp directory that is renamed onto
+    the cache dir only on success), so a present, non-empty directory is a
+    complete download. Pure filesystem work, so config.py can call it during
+    its own import without pulling huggingface_hub in.
+    """
+    cache_dir = supertonic_cache_dir()
+    try:
+        return cache_dir.is_dir() and any(cache_dir.iterdir())
+    except OSError:
+        return False
+
+
+# There is deliberately no "everything that is missing" aggregate here. Which
+# set a run needs depends on the active language (Kokoro for English,
+# Supertonic for Spanish), i.e. on config, which this module may not read.
+# install.py wants everything, so a machine is prepared for any settings
+# change, and gets it by looping over HF_MODEL_REPOS itself.
+
+
+# ---------------------------------------------------------------------------
+# Downloads
+# ---------------------------------------------------------------------------
+
+def progress_kwargs(download_fn: Callable[..., Any],
+                    tqdm_class: Optional[type]) -> dict[str, Any]:
+    """Return the ``tqdm_class`` keyword for *download_fn*, or nothing.
+
+    huggingface_hub does not offer that hook on every entry point of every
+    version: snapshot_download has taken it since 0.x, hf_hub_download only
+    since 1.24. Intel macOS resolves the hub below 1.0 - transformers 4.x caps
+    it there, and that cap cannot be lifted while torch stays at 2.2.2 - so a
+    call that passes the keyword unconditionally dies with TypeError and takes
+    the whole download with it.
+
+    Asking the signature rather than the version number keeps one rule in one
+    place and needs no platform branch. The hook is passed BY NAME, so a
+    positional-only parameter does not count as accepting it.
+
+    A callable declaring ``**kwargs`` does count, so a wrapper around the hub
+    still reports progress - and that is the one shape this check cannot
+    answer for: such a wrapper in front of an old hf_hub_download swallows the
+    question and raises TypeError anyway. It stays theoretical because
+    huggingface_hub's own decorators keep the wrapped signature
+    (functools.wraps), so inspect.signature reads the real parameters.
+
+    An unreadable signature answers "no" on purpose: a progress bar that does
+    not move costs cosmetics, a TypeError costs the download.
+    """
+    if tqdm_class is None:
+        return {}
+    try:
+        parameters = inspect.signature(download_fn).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    accepted = any(p.kind is p.VAR_KEYWORD
+                   or (p.name == "tqdm_class"
+                       and p.kind is not p.POSITIONAL_ONLY)
+                   for p in parameters)
+    if not accepted:
+        log.info("This huggingface_hub takes no tqdm_class on %s - the "
+                 "download runs without progress reporting.",
+                 getattr(download_fn, "__name__", download_fn))
+        return {}
+    return {"tqdm_class": tqdm_class}
+
+
+def ensure_hf_models(repos: Optional[Sequence[models_info.HfRepo]] = None, *,
+                     force: bool = False,
+                     tqdm_class: Optional[type] = None) -> None:
+    """Download every Hugging Face repo SpeakLoop needs into the hub cache.
+
+    Already-cached repos are skipped unless *force* is set; already-downloaded
+    files inside a partially fetched repo are reused either way (that is
+    snapshot_download's own behaviour). Every repo is attempted even when one
+    fails, so a single flaky download does not hide the state of the rest;
+    the failures are collected and reported together.
+
+    *tqdm_class* is huggingface_hub's own hook for replacing the progress bar,
+    forwarded untouched. A GUI can pass a stand-in that records bytes instead
+    of drawing; the CLI and install.py pass nothing and keep the normal bars.
+    Whether it reaches the hub at all is progress_kwargs' decision - see there.
+    """
+    prepare_hf_env()
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ModelFetchError(
+            "huggingface_hub is not installed - install the project "
+            "requirements first (python install.py).") from exc
+
+    progress_arg = progress_kwargs(snapshot_download, tqdm_class)
+
+    failures: list[str] = []
+    for repo in repos if repos is not None else HF_MODEL_REPOS:
+        repo_id = repo.repo_id
+        if not force and hf_repo_cached(repo_id):
+            log.info("Already cached: %s", repo_id)
+            continue
+        log.info("Fetching %s, %d MB [%s] ...", repo.label, repo.size_mb, repo_id)
+        try:
+            snapshot_download(repo_id=repo_id, **progress_arg)
+            _sweep_incomplete_blobs(repo_id)
+            log.info("-> done: %s", repo_id)
+        except Exception as exc:  # noqa: BLE001 - record which repo failed
+            log.error("-> FAILED: %s: %s", repo_id, exc)
+            failures.append(repo_id)
+
+    if failures:
+        raise ModelFetchError(
+            f"Could not download: {', '.join(failures)}. Check the network / "
+            f"proxy and re-run; finished repos are not fetched again.")
+
+
+def _sweep_incomplete_blobs(repo_id: str) -> None:
+    """Remove leftover *.incomplete blobs from a repo we have just completed.
+
+    Only ever called right after a successful snapshot_download, and that is
+    what makes it safe: the download has just fetched every file of the
+    revision, so anything still marked incomplete is not a file we are waiting
+    for. It is a partial download of something else - in practice transformers'
+    auto-conversion thread, killed by the app exiting mid-flight.
+
+    Without this the leftovers are permanent, and they are not cosmetic:
+    loader.models_cached treats any *.incomplete as "this repo is not cached",
+    which is right for an interrupted first run and wrong here. The repo is
+    complete and loads fine, but every start reports it missing and offers a
+    download that cannot help - it does not need that file, so nothing removes
+    it. bootstrap.early_init() now stops the thread that produced these
+    (DISABLE_SAFETENSORS_CONVERSION); this is what heals the caches that
+    already have them, and the backstop if anything else leaves one.
+
+    Best-effort by design: a file that cannot be deleted (another process is
+    writing it, Windows has it open) leaves the cache exactly as it was, which
+    is the state this function exists to improve rather than to guarantee.
+    """
+    repo_dir = hf_hub_dir() / ("models--" + repo_id.replace("/", "--"))
+    for stale in repo_dir.glob("blobs/*.incomplete"):
+        try:
+            stale.unlink()
+        except OSError as exc:
+            log.info("Could not remove the stale partial file %s (%s); the "
+                     "repo may keep being reported as not cached.", stale, exc)
+        else:
+            log.info("Removed a stale partial file left in the cache: %s",
+                     stale.name)
+
+
+def ensure_supertonic(*, force: bool = False) -> None:
+    """Download the Supertonic 3 TTS model into its own cache directory.
+
+    The Spanish TTS backend (speakloop/tts.py SupertonicBackend). Separate from
+    the hub repos because the supertonic package does not read the HF hub
+    cache. Pre-fetching matters for offline mode: the app flips
+    HF_HUB_OFFLINE=1 once its models are cached, and this download goes through
+    huggingface_hub, so it must happen while the Hub is still online. The
+    weights are OpenRAIL-M licensed (the code is MIT), which is why they are
+    downloaded rather than shipped with SpeakLoop.
+    """
+    prepare_hf_env()
+    if not force and supertonic_cached():
+        log.info("Already downloaded: %s (%s)",
+                 SUPERTONIC_MODEL_NAME, supertonic_cache_dir())
+        return
+
+    try:
+        # The loader-level functions download without loading the ONNX sessions
+        # (no synthesis warm-up is wanted at install time). get_cache_dir honors
+        # SUPERTONIC_CACHE_DIR, so the download lands where the app looks.
+        from supertonic.loader import download_model, get_cache_dir
+    except ImportError as exc:
+        raise ModelFetchError(
+            "the supertonic package is not installed - install the project "
+            "requirements first (python install.py).") from exc
+
+    try:
+        target = get_cache_dir(SUPERTONIC_MODEL_NAME)
+        log.info("Fetching Supertonic 3 [%s] into %s ...",
+                 SUPERTONIC_MODEL_NAME, target)
+        download_model(target, SUPERTONIC_MODEL_NAME)
+        log.info("-> done: Supertonic 3")
+    except Exception as exc:  # noqa: BLE001 - network, disk, licence prompts
+        raise ModelFetchError(
+            f"Could not download the Supertonic 3 model: {exc}") from exc
+
+
+def ensure_all(*, force: bool = False) -> None:
+    """Download everything this module owns, hub repos first."""
+    ensure_hf_models(force=force)
+    ensure_supertonic(force=force)
+
+
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+
+def _print_status() -> None:
+    prepare_hf_env()
+    print(f"HF cache : {hf_home()}")
+    print(f"Supertonic cache: {supertonic_cache_dir()}")
+    print("Models   :")
+    for repo in HF_MODEL_REPOS:
+        mark = "present" if hf_repo_cached(repo.repo_id) else "MISSING"
+        print(f"    [{mark:>7}] {repo.repo_id}  - {repo.label}, "
+              f"{repo.size_mb} MB")
+    supertonic = models_info.SUPERTONIC
+    mark = "present" if supertonic_cached() else "MISSING"
+    print(f"    [{mark:>7}] {supertonic.name}  - {supertonic.label}, "
+          f"{supertonic.size_mb} MB")
+
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download the Hugging Face and Supertonic models SpeakLoop "
+                    "needs into model_cache/.")
+    parser.add_argument("--hf", action="store_true",
+                        help="only the Hugging Face hub repos")
+    parser.add_argument("--supertonic", action="store_true",
+                        help="only the Supertonic 3 TTS model")
+    parser.add_argument("--force", action="store_true",
+                        help="download even when the model is already present")
+    parser.add_argument("--list", action="store_true",
+                        help="show what is present and what is missing, then exit")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+    # stream=stdout, not the default stderr: _print_status() print()s to stdout
+    # and two streams with different buffering interleave in whatever order the
+    # OS feels like - the symlink notice ended up in the middle of the model
+    # list.
+    logging.basicConfig(level=logging.INFO, format="%(message)s",
+                        stream=sys.stdout)
+
+    if args.list:
+        _print_status()
+        return 0
+
+    # Neither flag given means "everything"; both given means the same.
+    want_hf = args.hf or not args.supertonic
+    want_supertonic = args.supertonic or not args.hf
+    try:
+        if want_hf:
+            ensure_hf_models(force=args.force)
+        if want_supertonic:
+            ensure_supertonic(force=args.force)
+    except ModelFetchError as exc:
+        print(f"\nERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(130)

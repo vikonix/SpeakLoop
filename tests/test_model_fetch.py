@@ -1,0 +1,391 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Valeriy Kovalev
+
+"""Unit tests for the model downloader (speakloop/model_fetch.py).
+
+Nothing here touches the network or the real cache: the "is it downloaded?"
+predicates and the environment preparation are the parts install.py and the app
+branch on, and both are pure enough to check against a temporary directory.
+Run from the project root with:
+
+    python -m unittest tests.test_model_fetch
+"""
+
+import contextlib
+import io
+import logging
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from speakloop import model_fetch, models_info
+
+_saved_level = logging.NOTSET
+
+
+def setUpModule():
+    """Silence the module's own INFO chatter for the duration of the suite.
+
+    "Fetching X", "Already cached: Y" and the Windows symlink notice are the
+    point of the module when a user runs it, and 30 lines of noise around the
+    assertions when unittest does.
+    """
+    global _saved_level
+    logger = logging.getLogger(model_fetch.__name__)
+    _saved_level = logger.level
+    logger.setLevel(logging.CRITICAL)
+
+
+def tearDownModule():
+    logging.getLogger(model_fetch.__name__).setLevel(_saved_level)
+
+
+class EnvHelperTests(unittest.TestCase):
+    """hf_home() / supertonic_cache_dir() must follow the environment."""
+
+    def test_hf_home_falls_back_to_model_cache(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HF_HOME", None)
+            self.assertEqual(model_fetch.hf_home(),
+                             model_fetch.MODEL_CACHE_DIR)
+
+    def test_hf_home_honours_external_setting(self):
+        with patch.dict(os.environ, {"HF_HOME": "/elsewhere/hf"}):
+            self.assertEqual(model_fetch.hf_home(), Path("/elsewhere/hf"))
+
+    def test_supertonic_dir_falls_back_to_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SUPERTONIC_CACHE_DIR", None)
+            self.assertEqual(model_fetch.supertonic_cache_dir(),
+                             model_fetch.DEFAULT_SUPERTONIC_CACHE_DIR)
+
+    def test_supertonic_dir_honours_external_setting(self):
+        with patch.dict(os.environ, {"SUPERTONIC_CACHE_DIR": "/elsewhere/st"}):
+            self.assertEqual(model_fetch.supertonic_cache_dir(),
+                             Path("/elsewhere/st"))
+
+
+class PrepareHfEnvTests(unittest.TestCase):
+    """prepare_hf_env() sets defaults without overriding what is already set."""
+
+    def test_sets_both_cache_variables(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HF_HOME", None)
+            os.environ.pop("SUPERTONIC_CACHE_DIR", None)
+            model_fetch.prepare_hf_env()
+            self.assertEqual(os.environ["HF_HOME"],
+                             str(model_fetch.MODEL_CACHE_DIR))
+            self.assertEqual(os.environ["SUPERTONIC_CACHE_DIR"],
+                             str(model_fetch.DEFAULT_SUPERTONIC_CACHE_DIR))
+
+    def test_keeps_an_externally_configured_cache(self):
+        # setdefault, not assignment: a user who points HF_HOME at a shared
+        # cache must keep it, or the installer would silently download twice.
+        with patch.dict(os.environ, {"HF_HOME": "/shared/hf",
+                                     "SUPERTONIC_CACHE_DIR": "/shared/st"}):
+            model_fetch.prepare_hf_env()
+            self.assertEqual(os.environ["HF_HOME"], "/shared/hf")
+            self.assertEqual(os.environ["SUPERTONIC_CACHE_DIR"], "/shared/st")
+
+
+class SymlinkFallbackTests(unittest.TestCase):
+    """Windows without symlink rights must get the deterministic copy path."""
+
+    def setUp(self):
+        # The probe result is cached for the life of the process; each test
+        # needs its own answer, so reset it and put back what was there.
+        previous = model_fetch._symlink_supported
+        self.addCleanup(setattr, model_fetch, "_symlink_supported", previous)
+        model_fetch._symlink_supported = None
+        # patch.dict restores additions and removals alike on exit.
+        patcher = patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ("HF_HUB_DISABLE_SYMLINKS", "HF_HUB_DISABLE_XET"):
+            os.environ.pop(name, None)
+
+    def _configure(self, *, platform: str, symlinks: bool) -> None:
+        with patch.object(model_fetch.sys, "platform", platform), \
+                patch.object(model_fetch, "_probe_symlink_support",
+                             return_value=symlinks):
+            model_fetch._configure_symlink_fallback()
+
+    def test_no_symlink_rights_disables_symlinks_outright(self):
+        # The warning variable alone is not enough. huggingface_hub's own copy
+        # fallback is gated on are_symlinks_supported(), which writes True into
+        # its per-directory cache before running the probe that may correct it
+        # to False - so a parallel download worker reading that cache mid-probe
+        # takes the os.symlink branch and dies with WinError 1314.
+        # HF_HUB_DISABLE_SYMLINKS is checked ahead of the cache, which makes it
+        # the only race-free way to force copying.
+        self._configure(platform="win32", symlinks=False)
+        self.assertEqual(os.environ["HF_HUB_DISABLE_SYMLINKS"], "1")
+        self.assertEqual(os.environ["HF_HUB_DISABLE_XET"], "1")
+
+    def test_symlink_rights_keep_the_cheaper_linked_cache(self):
+        # Developer Mode is on: linking stores each blob once, while copying
+        # would double the disk use for no gain.
+        self._configure(platform="win32", symlinks=True)
+        self.assertNotIn("HF_HUB_DISABLE_SYMLINKS", os.environ)
+        # xet is disabled regardless: older builds link into the cache
+        # themselves, with no copy fallback the probe could gate.
+        self.assertEqual(os.environ["HF_HUB_DISABLE_XET"], "1")
+
+    def test_other_platforms_are_left_alone(self):
+        self._configure(platform="linux", symlinks=False)
+        self.assertNotIn("HF_HUB_DISABLE_SYMLINKS", os.environ)
+        self.assertNotIn("HF_HUB_DISABLE_XET", os.environ)
+
+
+class SupertonicCachedTests(unittest.TestCase):
+    """A present, non-empty directory means a complete download."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cache_dir = Path(self._tmp.name) / "supertonic3"
+        patcher = patch.dict(os.environ,
+                             {"SUPERTONIC_CACHE_DIR": str(self.cache_dir)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_missing_directory(self):
+        self.assertFalse(model_fetch.supertonic_cached())
+
+    def test_empty_directory(self):
+        self.cache_dir.mkdir()
+        self.assertFalse(model_fetch.supertonic_cached())
+
+    def test_directory_with_a_file(self):
+        self.cache_dir.mkdir()
+        (self.cache_dir / "model.onnx").write_bytes(b"x")
+        self.assertTrue(model_fetch.supertonic_cached())
+
+
+class HfRepoCachedTests(unittest.TestCase):
+    """The predicate ensure_hf_models() skips a repo on.
+
+    An over-generous answer is the expensive direction: the repo is skipped and
+    no later run completes it, so a half-fetched cache stays half-fetched until
+    somebody thinks to pass --force.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.dict(os.environ, {"HF_HOME": self._tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.repo_dir = (Path(self._tmp.name) / "hub" / "models--repo--one")
+
+    def _populate(self, *, incomplete: bool):
+        (self.repo_dir / "snapshots" / "abc123").mkdir(parents=True)
+        (self.repo_dir / "snapshots" / "abc123" / "config.json").write_bytes(b"{}")
+        blobs = self.repo_dir / "blobs"
+        blobs.mkdir()
+        if incomplete:
+            (blobs / "deadbeef.incomplete").write_bytes(b"half a file")
+
+    def test_absent_repo(self):
+        self.assertFalse(model_fetch.hf_repo_cached("repo/one"))
+
+    def test_complete_snapshot(self):
+        self._populate(incomplete=False)
+        self.assertTrue(model_fetch.hf_repo_cached("repo/one"))
+
+    def test_snapshot_with_an_interrupted_blob(self):
+        # The case the previous implementation missed: it asked
+        # snapshot_download(local_files_only=True), whose completeness check is
+        # skipped when trees/<commit>.json is absent - which it is for a cache
+        # filled file by file by the loading libraries, i.e. after a first run.
+        self._populate(incomplete=True)
+        self.assertFalse(model_fetch.hf_repo_cached("repo/one"))
+
+    def test_needs_no_huggingface_hub(self):
+        # install.py calls this before the requirements step, and the app calls
+        # it on the way to a download; neither should depend on the library
+        # being importable just to ask a filesystem question.
+        self._populate(incomplete=False)
+        with patch.dict(sys.modules, {"huggingface_hub": None}):
+            self.assertTrue(model_fetch.hf_repo_cached("repo/one"))
+
+
+class ProgressKwargsTests(unittest.TestCase):
+    """The hook goes only to a callable that declares it.
+
+    huggingface_hub grew tqdm_class on hf_hub_download later than on
+    snapshot_download, and Intel macOS is held below that version by
+    transformers 4.x, so an unconditional keyword is a TypeError there.
+    """
+
+    class _Sink:
+        """Stands in for a GUI's tqdm replacement."""
+
+    def test_no_hook_asks_for_nothing(self):
+        def accepts_it(repo_id, tqdm_class=None):
+            pass
+
+        self.assertEqual(model_fetch.progress_kwargs(accepts_it, None), {})
+
+    def test_declared_parameter_is_used(self):
+        def accepts_it(repo_id, tqdm_class=None):
+            pass
+
+        self.assertEqual(model_fetch.progress_kwargs(accepts_it, self._Sink),
+                         {"tqdm_class": self._Sink})
+
+    def test_var_keyword_counts_as_accepting(self):
+        def accepts_anything(repo_id, **kwargs):
+            pass
+
+        self.assertEqual(
+            model_fetch.progress_kwargs(accepts_anything, self._Sink),
+            {"tqdm_class": self._Sink})
+
+    def test_old_hub_signature_is_dropped(self):
+        def takes_no_hook(repo_id, local_dir=None):
+            pass
+
+        self.assertEqual(
+            model_fetch.progress_kwargs(takes_no_hook, self._Sink), {})
+
+    def test_positional_only_parameter_is_dropped(self):
+        # The hook is passed by name, so a parameter that can only be filled
+        # positionally is not a parameter this call can use - matching on the
+        # name alone would produce the very TypeError the helper prevents.
+        def positional_only(repo_id, tqdm_class=None, /):
+            pass
+
+        self.assertEqual(
+            model_fetch.progress_kwargs(positional_only, self._Sink), {})
+
+    def test_unreadable_signature_is_dropped(self):
+        # Some C entry points have no signature inspect can read. Losing the
+        # bar is the safe answer there; raising inside a multi-gigabyte
+        # download is not.
+        class Opaque:
+            @property
+            def __signature__(self):
+                raise ValueError("no signature")
+
+            def __call__(self, *args, **kwargs):
+                pass
+
+        self.assertEqual(model_fetch.progress_kwargs(Opaque(), self._Sink), {})
+
+
+class EnsureHfModelsTests(unittest.TestCase):
+    """Every repo is attempted even when one fails, and the failures are
+    reported together rather than aborting on the first one."""
+
+    def setUp(self):
+        self.repos = (models_info.HfRepo("repo/one", "first", 1),
+                      models_info.HfRepo("repo/two", "second", 2))
+
+    def test_skips_cached_repos(self):
+        downloaded = []
+        with patch.object(model_fetch, "hf_repo_cached", return_value=True), \
+                patch("huggingface_hub.snapshot_download",
+                      side_effect=lambda repo_id: downloaded.append(repo_id),
+                      create=True):
+            model_fetch.ensure_hf_models(self.repos)
+        self.assertEqual(downloaded, [])
+
+    def test_force_downloads_cached_repos(self):
+        downloaded = []
+        with patch.object(model_fetch, "hf_repo_cached", return_value=True), \
+                patch("huggingface_hub.snapshot_download",
+                      side_effect=lambda repo_id: downloaded.append(repo_id),
+                      create=True):
+            model_fetch.ensure_hf_models(self.repos, force=True)
+        self.assertEqual(downloaded, ["repo/one", "repo/two"])
+
+    def test_a_hub_without_the_hook_still_downloads(self):
+        # The Intel macOS shape: transformers 4.x caps huggingface_hub below
+        # the version whose entry points take tqdm_class. Passing the keyword
+        # blind raises TypeError and loses the download.
+        downloaded = []
+
+        def old_snapshot_download(repo_id):
+            downloaded.append(repo_id)
+
+        with patch.object(model_fetch, "hf_repo_cached", return_value=False), \
+                patch("huggingface_hub.snapshot_download",
+                      new=old_snapshot_download, create=True):
+            model_fetch.ensure_hf_models(self.repos, tqdm_class=object)
+        self.assertEqual(downloaded, ["repo/one", "repo/two"])
+
+    def test_reports_every_failure_at_once(self):
+        def fail(repo_id):
+            raise RuntimeError("no network")
+
+        with patch.object(model_fetch, "hf_repo_cached", return_value=False), \
+                patch("huggingface_hub.snapshot_download", side_effect=fail,
+                      create=True):
+            with self.assertRaises(model_fetch.ModelFetchError) as ctx:
+                model_fetch.ensure_hf_models(self.repos)
+        message = str(ctx.exception)
+        self.assertIn("repo/one", message)
+        self.assertIn("repo/two", message)
+
+
+class CliTests(unittest.TestCase):
+    """The flags install.py and a user typing the command both rely on."""
+
+    def setUp(self):
+        # main() configures logging for its CLI use; letting it install a root
+        # handler here would leak into every test module that runs afterwards.
+        patcher = patch("logging.basicConfig")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_defaults_select_nothing_explicitly(self):
+        args = model_fetch.parse_args([])
+        self.assertFalse(args.hf)
+        self.assertFalse(args.supertonic)
+        self.assertFalse(args.force)
+        self.assertFalse(args.list)
+
+    def test_single_target_flags(self):
+        self.assertTrue(model_fetch.parse_args(["--hf"]).hf)
+        self.assertTrue(model_fetch.parse_args(["--supertonic"]).supertonic)
+
+    def test_list_runs_no_download(self):
+        with patch.object(model_fetch, "_print_status") as printer, \
+                patch.object(model_fetch, "ensure_hf_models") as hf, \
+                patch.object(model_fetch, "ensure_supertonic") as st:
+            self.assertEqual(model_fetch.main(["--list"]), 0)
+        printer.assert_called_once()
+        hf.assert_not_called()
+        st.assert_not_called()
+
+    def test_no_flag_means_everything(self):
+        with patch.object(model_fetch, "ensure_hf_models") as hf, \
+                patch.object(model_fetch, "ensure_supertonic") as st:
+            self.assertEqual(model_fetch.main([]), 0)
+        hf.assert_called_once()
+        st.assert_called_once()
+
+    def test_hf_flag_skips_supertonic(self):
+        with patch.object(model_fetch, "ensure_hf_models") as hf, \
+                patch.object(model_fetch, "ensure_supertonic") as st:
+            self.assertEqual(model_fetch.main(["--hf"]), 0)
+        hf.assert_called_once()
+        st.assert_not_called()
+
+    def test_failure_becomes_a_nonzero_exit(self):
+        # The error goes to stderr for the user; captured so the test report
+        # does not look like something went wrong.
+        stderr = io.StringIO()
+        with patch.object(model_fetch, "ensure_hf_models",
+                          side_effect=model_fetch.ModelFetchError("boom")), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(model_fetch.main(["--hf"]), 1)
+        self.assertIn("boom", stderr.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
