@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Valeriy Kovalev
 
-"""The application: the Tkinter window and the voice loop, plus run().
+"""The controller: the voice loop and the threads behind it, plus run().
 
 Started only through speakloop/cli.py, which calls bootstrap.early_init()
 before this module is imported (UTF-8 console, warning filters) - that is why
 nothing of the kind is done here. Logging is configured in run(), after the
 heavy imports below, for the reason given in bootstrap.setup_logging.
+
+The window lives in speakloop/ui.py. This module creates the Tk root, composes
+a TutorView on it (``self.view``) and drives it through the view's intent
+methods; it owns no widget, no color and no interface wording. Every worker
+thread reaches the window through ``self.root.after()``, the only thread-safe
+way into Tk - a direct call from a thread is the one mistake this split cannot
+prevent on its own.
 """
 
 import time
@@ -16,8 +23,6 @@ from typing import Optional
 import os
 import logging
 import tkinter as tk
-from tkinter import ttk
-from tkinter import scrolledtext
 import numpy as np
 import sounddevice as sd
 
@@ -29,6 +34,7 @@ from speakloop.stt import STTManager, WHISPER_SAMPLE_RATE
 from speakloop.llm import LLMManager, error_message
 from speakloop.llm_server_ctl import LLMServerController
 from speakloop.tts import TTSManager
+from speakloop.ui import TutorView, ViewCallbacks
 
 # Sentinel object pushed to the TTS queue after LLM finishes streaming.
 # The TTS thread buffers sentences and only starts playback when it sees this object,
@@ -47,15 +53,30 @@ AUDIO_NORMALIZATION_CEILING = 0.9    # Scales the peak target output level direc
 RECORD_THREAD_JOIN_TIMEOUT_SEC = 1.5
 
 
-class VoiceTutorGUI:
+class VoiceTutorController:
+    """The application: the voice loop, its threads, and the window's driver.
+
+    Holds the controller logic (model loading, recording, transcription, the
+    model exchange and speech output) and owns the view by composition:
+    ``self.view`` is a TutorView (ui.py) that builds and renders the widgets.
+    The controller drives the window through ``self.view.*`` and the view
+    forwards its bindings back to the handlers passed in ViewCallbacks.
+
+    Flow per exchange (state machine):
+        Record     -> Space or the mic button is held, record_loop captures.
+        Process    -> faster-whisper transcribes the take (stt.py).
+        Think      -> the model answers as a stream (llm.py), tokens go to the
+                      window and whole sentences to the TTS queue.
+        Speak      -> the queue is played once the model is done (sentinel).
+        Loop       -> back to idle; a new recording interrupts the speech.
+    """
+
     def __init__(self):
         logging.info("Starting Voice Tutor GUI Application...")
 
-        # Core Tkinter setup
+        # Core Tkinter setup. Only the root is created here; its title, size,
+        # colors and widgets are the view's (see TutorView below).
         self.root = tk.Tk()
-        self.root.title("Emma - Voice Tutor")
-        self.root.geometry("500x700")
-        self.root.configure(bg="#121214")
 
         # Thread management events
         self.shutdown_event = threading.Event()
@@ -95,214 +116,26 @@ class VoiceTutorGUI:
         # untouched by "lm-studio": all of its methods are no-ops until start().
         self._llm_server = LLMServerController()
 
-        # Setup custom dark styles for UI elements
-        self.setup_styles()
-        # Build UI layout
-        self.build_ui()
-        # Bind keyboard events locally
-        self.bind_events()
+        # The window. Built last of the members, because the loader thread
+        # started below drives it at once.
+        self.view = TutorView(self.root, ViewCallbacks(
+            on_mic_pressed=self.on_mic_pressed,
+            on_mic_released=self.on_mic_released,
+            on_space_pressed=self.on_space_pressed,
+            on_space_released=self.on_space_released,
+            on_quit=self.quit_app,
+        ))
 
         # Start loading models in a background thread to prevent UI freezing
         threading.Thread(target=self.load_components, daemon=True).start()
 
-    def setup_styles(self):
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
-
-        # Configure scrollbar styling
-        self.style.configure("Vertical.TScrollbar",
-                             gripcount=0,
-                             background="#1a1a1e",
-                             troughcolor="#121214",
-                             bordercolor="#121214",
-                             arrowcolor="#8a2be2")
-
-    def build_ui(self):
-        # 1. Header Area (Top)
-        header_frame = tk.Frame(self.root, bg="#121214", height=60)
-        header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=10)
-
-        title_label = tk.Label(header_frame, text="EMMA • Voice Tutor", font=("Segoe UI", 16, "bold"), fg="#8a2be2", bg="#121214")
-        title_label.pack(side=tk.LEFT)
-
-        lang_label = tk.Label(header_frame,
-                             text=f"{config.NATIVE_LANGUAGE} ➔ {config.TARGET_LANGUAGE}",
-                             font=("Segoe UI", 9, "bold"),
-                             fg="#a0a0a5",
-                             bg="#1a1a1e",
-                             padx=10,
-                             pady=4,
-                             bd=0)
-        lang_label.pack(side=tk.RIGHT)
-
-        # 2. Status & Stats Bar (Absolute Bottom)
-        self.status_bar = tk.Frame(self.root, bg="#1a1a1e", height=30)
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
-        self.status_label = tk.Label(
-            self.status_bar,
-            text="Status: Starting...",
-            font=("Segoe UI", 9),
-            fg="#00e676",
-            bg="#1a1a1e"
-        )
-        self.status_label.pack(side=tk.LEFT, padx=15, pady=4)
-
-        self.stats_label = tk.Label(
-            self.status_bar,
-            text="STT: --ms | LLM: --ms",
-            font=("Segoe UI", 9),
-            fg="#a0a0a5",
-            bg="#1a1a1e"
-        )
-        self.stats_label.pack(side=tk.RIGHT, padx=15, pady=4)
-
-        # 3. Bottom Control Panel (Above Status Bar)
-        control_frame = tk.Frame(self.root, bg="#121214")
-        control_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=10)
-
-        # Interactive Canvas Button (Pulsing Mic)
-        self.btn_canvas = tk.Canvas(control_frame, width=100, height=100, bg="#121214", highlightthickness=0, cursor="hand2")
-        self.btn_canvas.pack(pady=5)
-        self.btn_canvas.bind("<ButtonPress-1>", lambda e: self.on_gui_btn_press())
-        self.btn_canvas.bind("<ButtonRelease-1>", lambda e: self.on_gui_btn_release())
-
-        self.draw_mic_button("loading")
-
-        # Instruction Text
-        self.instruction_label = tk.Label(
-            control_frame,
-            text="Loading components...",
-            font=("Segoe UI", 10),
-            fg="#a0a0a5",
-            bg="#121214"
-        )
-        self.instruction_label.pack(pady=5)
-
-        # 4. Chat Transcript Area (Middle - takes up all remaining space)
-        chat_frame = tk.Frame(self.root, bg="#121214")
-        chat_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=20, pady=5)
-
-        self.chat_display = scrolledtext.ScrolledText(
-            chat_frame,
-            bg="#1a1a1e",
-            fg="#f8f8f2",
-            insertbackground="#ffffff",
-            font=("Segoe UI", 11),
-            wrap=tk.WORD,
-            bd=0,
-            highlightthickness=1,
-            highlightbackground="#25252a",
-            highlightcolor="#8a2be2",
-            padx=15,
-            pady=15,
-            spacing2=6,
-            spacing3=10
-        )
-        self.chat_display.pack(fill=tk.BOTH, expand=True)
-        self.chat_display.configure(state=tk.DISABLED)
-
-        # Define text styles/tags for the chat window
-        self.chat_display.tag_configure("user", foreground="#8be9fd", font=("Segoe UI", 11, "bold"))
-        self.chat_display.tag_configure("emma", foreground="#ff79c6", font=("Segoe UI", 11, "bold"))
-        self.chat_display.tag_configure("system", foreground="#6272a4", font=("Segoe UI", 10, "italic"))
-        self.chat_display.tag_configure("text_user", foreground="#ffffff", font=("Segoe UI", 11))
-        self.chat_display.tag_configure("text_emma", foreground="#f1f1f6", font=("Segoe UI", 11))
-
-    def draw_mic_button(self, state):
-        self.btn_canvas.delete("all")
-
-        # Center coordinates
-        cx, cy = 50, 50
-        r_outer, r_inner = 42, 34
-
-        if state == "loading":
-            bg_color = "#1e1e24"
-            outline_color = "#44475a"
-            emoji = "⌛"
-        elif state == "idle":
-            bg_color = "#1f1430"
-            outline_color = "#8a2be2"
-            emoji = "🎤"
-        elif state == "recording":
-            bg_color = "#3a0c10"
-            outline_color = "#ff5555"
-            emoji = "🔴"
-        elif state == "processing":
-            bg_color = "#36220f"
-            outline_color = "#ffb86c"
-            emoji = "⚡"
-        elif state == "speaking":
-            bg_color = "#0f2c1d"
-            outline_color = "#50fa7b"
-            emoji = "🔊"
-        else:
-            bg_color = "#1e1e24"
-            outline_color = "#44475a"
-            emoji = "🎤"
-
-        # Draw outer glow circle
-        self.btn_canvas.create_oval(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer, fill="", outline=outline_color, width=3)
-        # Draw solid inner circle
-        self.btn_canvas.create_oval(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner, fill=bg_color, outline="")
-        # Render Emoji inside
-        self.btn_canvas.create_text(cx, cy, text=emoji, font=("Segoe UI", 20), fill="#ffffff")
-
-    def bind_events(self):
-        # Keyboard Push-to-Talk bindings
-        self.root.bind("<KeyPress-space>", self.on_keyboard_press)
-        self.root.bind("<KeyRelease-space>", self.on_keyboard_release)
-
-        # Escape bindings to shut down gracefully
-        self.root.bind("<Escape>", lambda _: self.quit_app())
-        self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
-
-    def append_system_msg(self, text: str):
-        self.chat_display.configure(state=tk.NORMAL)
-        self.chat_display.insert(tk.END, f"[System] {text}\n", "system")
-        self.chat_display.configure(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-    def append_user_msg(self, text: str):
-        self.chat_display.configure(state=tk.NORMAL)
-        self.chat_display.insert(tk.END, "You: ", "user")
-        self.chat_display.insert(tk.END, f"{text}\n", "text_user")
-        self.chat_display.configure(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-    def append_emma_start(self):
-        self.chat_display.configure(state=tk.NORMAL)
-        self.chat_display.insert(tk.END, "Emma: ", "emma")
-        # Keep track of where Emma's streamed response starts
-        self.emma_start_index = self.chat_display.index(tk.INSERT)
-        self.chat_display.configure(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-    def append_emma_token(self, token: str):
-        self.chat_display.configure(state=tk.NORMAL)
-        self.chat_display.insert(tk.END, token, "text_emma")
-        self.chat_display.configure(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-    def append_emma_end(self):
-        self.chat_display.configure(state=tk.NORMAL)
-        self.chat_display.insert(tk.END, "\n")
-        self.chat_display.configure(state=tk.DISABLED)
-        self.chat_display.see(tk.END)
-
-    def update_status(self, text: str, color: str = "#a0a0a5"):
-        self.status_label.configure(text=f"Status: {text}", fg=color)
-
-    def update_instruction(self, text: str):
-        self.instruction_label.configure(text=text)
-
-    def update_stats(self, stt_ms: float, llm_ms: float):
-        self.stats_label.configure(text=f"STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms")
-
+    # ------------------------------------------------------------------
+    # Startup
+    # ------------------------------------------------------------------
     def load_components(self):
         logging.info("Starting model loading thread...")
-        self.root.after(0, self.update_status, "Loading models...", "#ffb86c")
-        self.root.after(0, self.append_system_msg, "Loading Whisper (STT) and Kokoro (TTS) models...")
+        self.root.after(0, self.view.enter_loading)
+        self.root.after(0, self.view.append_system_msg, "Loading Whisper (STT) and Kokoro (TTS) models...")
 
         try:
             self.stt_mgr.load_model()
@@ -317,8 +150,8 @@ class VoiceTutorGUI:
                 # named the model and the launch would then describe something
                 # that did not happen. Both are said below, once it is known
                 # which of the two it was.
-                self.root.after(0, self.append_system_msg, "Connecting to the LLM server...")
-                self.root.after(0, self.update_status, "Connecting to LLM server...", "#ffb86c")
+                self.root.after(0, self.view.append_system_msg, "Connecting to the LLM server...")
+                self.root.after(0, self.view.enter_connecting)
                 ready = self._llm_server.start(self.llm_mgr)
                 if not ready:
                     # The controller's own sentence, because only it knows which
@@ -329,31 +162,31 @@ class VoiceTutorGUI:
                     # second one.
                     reason = (self._llm_server.last_error
                               or "The LLM server did not start.")
-                    self.root.after(0, self.append_system_msg, f"Error: {reason}")
-                    self.root.after(0, self.append_system_msg, "See logs/main.log and logs/llm_server.log.")
-                    self.root.after(0, self.update_status, "LLM Server Error", "#ff5555")
-                    self.root.after(0, self.update_instruction, "LLM server failed to start. Check the log and restart.")
-                    # Do not call make_app_ready - keep the button in loading/disabled state
+                    self.root.after(0, self.view.append_system_msg, f"Error: {reason}")
+                    self.root.after(0, self.view.append_system_msg, "See logs/main.log and logs/llm_server.log.")
+                    self.root.after(0, self.view.server_failed)
+                    # Do not make the window ready - there is nothing to answer
+                    # a recording with.
                     return
                 if self._llm_server.adopted:
                     # Said in the window and not only in the log: the answers
                     # now come from a server this run did not configure, which
                     # explains a model or a speed the settings do not.
-                    self.root.after(0, self.append_system_msg,
+                    self.root.after(0, self.view.append_system_msg,
                                     f"Using the llama-server already running on "
                                     f"{config.LLM_SERVER_HOST}:{config.LLM_SERVER_PORT}. "
                                     f"It keeps the model it was started with.")
                 else:
                     model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
-                    self.root.after(0, self.append_system_msg,
+                    self.root.after(0, self.view.append_system_msg,
                                     f"llama-server is ready with {model_name}.")
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
-                    self.root.after(0, self.append_system_msg, "Warning: LM Studio is offline. Start it to use voice tutor!")
+                    self.root.after(0, self.view.append_system_msg, "Warning: LM Studio is offline. Start it to use voice tutor!")
                     logging.warning("LM Studio is offline during initialization.")
 
-            self.root.after(0, self.update_status, "Warming up models...", "#ffb86c")
+            self.root.after(0, self.view.enter_warming_up)
             self.stt_mgr.warm_up()
             self.tts_mgr.warm_up()
             logging.info("Models warmed up successfully.")
@@ -369,38 +202,40 @@ class VoiceTutorGUI:
 
         except Exception as e:
             logging.exception("Error during initialization thread:")
-            self.root.after(0, self.append_system_msg, f"Initialization Error: {e}")
-            self.root.after(0, self.update_status, "Initialization Failed", "#ff5555")
+            self.root.after(0, self.view.append_system_msg, f"Initialization Error: {e}")
+            self.root.after(0, self.view.init_failed)
 
     def make_app_ready(self):
         with self.tts_state_lock:
             self._tts_is_speaking = False
-        self.draw_mic_button("idle")
-        self.update_status("Ready", "#00e676")
-        self.update_instruction("Hold SPACE or click Button to speak. Press ESC to quit.")
-        self.append_system_msg(f"Voice Tutor ready. Practice learning {config.TARGET_LANGUAGE}!")
+        self.view.enter_app_ready()
+        self.view.append_system_msg(f"Voice Tutor ready. Practice learning {config.TARGET_LANGUAGE}!")
 
-    def on_gui_btn_press(self):
+    # ------------------------------------------------------------------
+    # Push-to-talk handlers (called by the view's bindings)
+    # ------------------------------------------------------------------
+    def on_mic_pressed(self):
         # Click behavior (simulates holding space)
         if not self.space_is_held:
             logging.info("GUI microphone button clicked.")
             self.trigger_recording_start()
 
-    def on_gui_btn_release(self):
+    def on_mic_released(self):
         with self.record_lock:
             currently_recording = self.is_recording
         if currently_recording and not self.space_is_held:
             logging.info("GUI microphone button released.")
             self.trigger_recording_stop()
 
-    def on_keyboard_press(self, event):
-        if event.keysym == "space" and not self.space_is_held:
+    def on_space_pressed(self):
+        # Holding the key repeats KeyPress; the flag keeps the first one.
+        if not self.space_is_held:
             self.space_is_held = True
             logging.info("Spacebar keyboard press event.")
             self.trigger_recording_start()
 
-    def on_keyboard_release(self, event):
-        if event.keysym == "space" and self.space_is_held:
+    def on_space_released(self):
+        if self.space_is_held:
             self.space_is_held = False
             logging.info("Spacebar keyboard release event.")
             self.trigger_recording_stop()
@@ -415,10 +250,8 @@ class VoiceTutorGUI:
             self.is_recording = True
             self.recorded_chunks = []
 
-            # All GUI updates scheduled on main thread via root.after
-            self.root.after(0, self.draw_mic_button, "recording")
-            self.root.after(0, self.update_status, "Recording...", "#ff5555")
-            self.root.after(0, self.update_instruction, "Release key or click button when finished speaking.")
+            # All window updates are scheduled on the main thread.
+            self.root.after(0, self.view.enter_recording)
 
             self.record_thread = threading.Thread(target=self.record_loop, daemon=True)
             self.record_thread.start()
@@ -430,8 +263,7 @@ class VoiceTutorGUI:
             logging.info("Stopping audio recording...")
             self.is_recording = False
 
-        self.root.after(0, self.draw_mic_button, "processing")
-        self.root.after(0, self.update_status, "Processing Speech (STT)...", "#ffb86c")
+        self.root.after(0, self.view.enter_processing)
 
         # Join and audio processing happen off the main thread to prevent UI freeze.
         # record_thread.join() can block up to RECORD_THREAD_JOIN_TIMEOUT_SEC -
@@ -459,6 +291,9 @@ class VoiceTutorGUI:
             with self.processing_lock:
                 self.is_processing_audio = False
 
+    # ------------------------------------------------------------------
+    # Recording
+    # ------------------------------------------------------------------
     def record_loop(self):
         start_time = time.time()
         logging.info("sd.InputStream thread started.")
@@ -508,7 +343,7 @@ class VoiceTutorGUI:
 
                     if time.time() - start_time >= config.MAX_RECORD_SECONDS:
                         logging.info("Maximum recording duration reached.")
-                        self.root.after(0, self.append_system_msg, "Reached maximum record limit.")
+                        self.root.after(0, self.view.append_system_msg, "Reached maximum record limit.")
                         with self.record_lock:
                             self.is_recording = False
                         break
@@ -526,7 +361,7 @@ class VoiceTutorGUI:
             logging.exception("Recording InputStream error:")
             with self.record_lock:
                 self.is_recording = False
-            self.root.after(0, self.update_status, "Recording Error", "#ff5555")
+            self.root.after(0, self.view.recording_failed)
 
     def normalize_audio(self, audio: np.ndarray) -> np.ndarray:
         peak = np.max(np.abs(audio))
@@ -537,15 +372,24 @@ class VoiceTutorGUI:
         audio = audio / peak * AUDIO_NORMALIZATION_CEILING
         return np.nan_to_num(audio).astype(np.float32)
 
+    def get_recorded_audio(self) -> Optional[np.ndarray]:
+        with self.record_lock:
+            if not self.recorded_chunks:
+                return None
+            chunks = list(self.recorded_chunks)
+            self.recorded_chunks = []
+        return np.concatenate(chunks, axis=0).flatten().astype(np.float32, copy=False)
+
+    # ------------------------------------------------------------------
+    # One exchange: transcribe, ask the model, queue the speech
+    # ------------------------------------------------------------------
     def process_audio(self):
         try:
             audio = self.get_recorded_audio()
             if audio is None or len(audio) < WHISPER_SAMPLE_RATE * 0.2:
                 logging.warning("Captured audio too short or empty.")
-                self.root.after(0, self.append_system_msg, "Audio is too short. Try holding space longer.")
-                self.root.after(0, self.draw_mic_button, "idle")
-                self.root.after(0, self.update_status, "Ready", "#00e676")
-                self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                self.root.after(0, self.view.append_system_msg, "Audio is too short. Try holding space longer.")
+                self.root.after(0, self.view.enter_idle)
                 return
 
             audio = self.normalize_audio(audio)
@@ -558,26 +402,24 @@ class VoiceTutorGUI:
 
             if not user_text:
                 logging.info("STT returned empty transcription.")
-                self.root.after(0, self.append_system_msg, "Could not hear you clearly. Please try again.")
-                self.root.after(0, self.draw_mic_button, "idle")
-                self.root.after(0, self.update_status, "Ready", "#00e676")
-                self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                self.root.after(0, self.view.append_system_msg, "Could not hear you clearly. Please try again.")
+                self.root.after(0, self.view.enter_idle)
                 return
 
             # Update User Speech to GUI
-            self.root.after(0, self.append_user_msg, user_text)
-            self.root.after(0, self.update_status, "Thinking (LLM)...", "#8be9fd")
+            self.root.after(0, self.view.append_user_msg, user_text)
+            self.root.after(0, self.view.enter_thinking)
 
             # Start LLM stream feeding the TTS queue
             llm_start = time.perf_counter()
             self.clear_tts_queue()
             self.tts_stop_event.clear()
 
-            self.root.after(0, self.append_emma_start)
+            self.root.after(0, self.view.append_reply_start)
 
             # Streaming callback to append tokens live
             def token_cb(token):
-                self.root.after(0, self.append_emma_token, token)
+                self.root.after(0, self.view.append_reply_token, token)
 
             try:
                 self.llm_mgr.stream_and_queue_tts(
@@ -589,23 +431,21 @@ class VoiceTutorGUI:
             except Exception as llm_error:
                 # Handled here and not by the outer handler, which cannot know
                 # that a reply line is already open in the chat. Without this
-                # the window keeps an empty "Emma:" line and a status bar that
+                # the window keeps an empty partner line and a status bar that
                 # still says "Thinking", and the failure is only in the log.
                 # llm.py has logged the traceback already.
-                self.root.after(0, self.append_emma_end)
-                self.root.after(0, self.append_system_msg,
+                self.root.after(0, self.view.append_reply_end)
+                self.root.after(0, self.view.append_system_msg,
                                 f"LLM error: {error_message(llm_error)}")
                 self._abort_tts()
-                self.root.after(0, self.draw_mic_button, "idle")
-                self.root.after(0, self.update_status, "LLM Error", "#ff5555")
-                self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                self.root.after(0, self.view.enter_error, "LLM Error")
                 return
 
             llm_ms = (time.perf_counter() - llm_start) * 1000
             logging.info(f"LLM complete streaming and queuing. Duration: {llm_ms:.0f}ms")
 
-            self.root.after(0, self.append_emma_end)
-            self.root.after(0, self.update_stats, stt_ms, llm_ms)
+            self.root.after(0, self.view.append_reply_end)
+            self.root.after(0, self.view.update_stats, stt_ms, llm_ms)
 
             # Signal TTS thread that LLM has finished and GPU is free.
             # The TTS thread buffers sentences until it receives this sentinel,
@@ -614,23 +454,16 @@ class VoiceTutorGUI:
                 self.tts_queue.put(_TTS_START_SENTINEL)
                 with self.tts_state_lock:
                     self._tts_is_speaking = True
-                self.root.after(0, self.draw_mic_button, "speaking")
-                self.root.after(0, self.update_status, "Emma is speaking...", "#ff79c6")
+                self.root.after(0, self.view.enter_speaking)
 
         except Exception:
             logging.exception("Error in process_audio:")
-            self.root.after(0, self.append_system_msg, "Processing Error. Please try again.")
-            self.root.after(0, self.draw_mic_button, "idle")
-            self.root.after(0, self.update_status, "Error", "#ff5555")
+            self.root.after(0, self.view.append_system_msg, "Processing Error. Please try again.")
+            self.root.after(0, self.view.enter_error, "Error")
 
-    def get_recorded_audio(self) -> Optional[np.ndarray]:
-        with self.record_lock:
-            if not self.recorded_chunks:
-                return None
-            chunks = list(self.recorded_chunks)
-            self.recorded_chunks = []
-        return np.concatenate(chunks, axis=0).flatten().astype(np.float32, copy=False)
-
+    # ------------------------------------------------------------------
+    # Speech output
+    # ------------------------------------------------------------------
     def stop_current_tts(self):
         logging.info("Stopping active text-to-speech output...")
         with self.tts_state_lock:
@@ -677,9 +510,7 @@ class VoiceTutorGUI:
                         with self.tts_state_lock:
                             tts_speaking = self._tts_is_speaking
                         if tts_speaking:
-                            self.root.after(0, self.draw_mic_button, "idle")
-                            self.root.after(0, self.update_status, "Ready", "#00e676")
-                            self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                            self.root.after(0, self.view.enter_idle)
                             with self.tts_state_lock:
                                 self._tts_is_speaking = False
                 continue
@@ -711,14 +542,18 @@ class VoiceTutorGUI:
             finally:
                 self.tts_queue.task_done()
 
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
     def quit_app(self):
         logging.info("Shutting down VoiceTutor App...")
         self.shutdown_event.set()
         self.stop_current_tts()
 
         # Terminate the llama-server subprocess if this app started one. A
-        # no-op for the "lm-studio" backend and safe to reach while the loader
-        # thread is still in start(): see LLMServerController.shutdown.
+        # no-op for the "lm-studio" backend, for a server that was adopted
+        # rather than started, and while the loader thread is still in start():
+        # see LLMServerController.shutdown.
         self._llm_server.shutdown()
 
         self.root.destroy()
@@ -743,5 +578,5 @@ def run(append_log: bool = False) -> None:
     # One log line when an NVIDIA GPU is present but torch runs on the CPU:
     # the app works then, only several times slower, and nothing else says so.
     detect_hardware.warn_if_gpu_unused(config.DEVICE)
-    app = VoiceTutorGUI()
+    app = VoiceTutorController()
     app.run()

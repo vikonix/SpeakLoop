@@ -57,6 +57,7 @@ _USER = loader.read_json(CONFIG_DIR / "settings.json")
 # a typo in a hand-edited file otherwise changes nothing and says nothing.
 _KNOWN_USER_KEYS = {
     "max_record_seconds",
+    "color_theme",
     "llm_backend",
     "lm_studio_host",
     "llama_server_path",
@@ -325,6 +326,97 @@ AUDIO_LATENCY = None         # None -> OS default shared-mode latency
 # Device indices from hardware detection; None -> OS default microphone/speaker.
 AUDIO_INPUT_DEVICE = _HW.get("AUDIO_INPUT_DEVICE")
 AUDIO_OUTPUT_DEVICE = _HW.get("AUDIO_OUTPUT_DEVICE")
+
+# =====================================================================
+# Color Theme (UI palette)
+# =====================================================================
+# UI colors, read from settings.json ("color_theme") at startup; changing the
+# theme needs a restart. Each theme is one <name>_schema.json, a flat map of
+# semantic color names to hex values, so adding a theme is just adding a file.
+# The file is looked for in TWO places (see _theme_file): the user's
+# config/themes/ first, then the schemas shipped inside the package. That is
+# what lets a user add a theme without touching the installation, and override a
+# shipped one by reusing its name. The built-in palette below doubles as the
+# complete list of valid keys and as the fallback: a missing or broken schema
+# file, or a missing key inside one, falls back to these values, so the app
+# always starts with a usable (dark) palette.
+#
+# The values are the colors the window had when they were still literals in
+# app.py, so the default look did not change when the view layer was split out.
+_DARK_THEME = {
+    # Surfaces
+    "bg_main": "#121214",            # window background (darkest surface)
+    "bg_panel": "#1a1a1e",           # chat, status bar, language chip
+    "bg_accent": "#1f1430",          # accent-tinted fill: the idle mic button
+    "border": "#25252a",             # chat outline
+    "accent": "#8a2be2",             # brand purple: title, focus highlight
+    # Text
+    "text": "#f8f8f2",               # chat body
+    "text_emph": "#f1f1f6",          # the partner's reply
+    "text_bright": "#ffffff",        # the learner's own line, mic glyph, caret
+    "text_dim": "#a0a0a5",           # secondary labels: stats, instruction
+    "text_muted": "#6272a4",         # [System] lines
+    # Status / feedback
+    "good": "#50fa7b",               # mic outline while the partner speaks
+    "ready": "#00e676",              # "Ready"
+    "bad": "#ff5555",                # errors, mic outline while recording
+    "warn": "#ffb86c",               # loading, processing
+    "info": "#8be9fd",               # the learner's name, "Thinking (LLM)..."
+    "partner": "#ff79c6",            # the partner's name and speaking status
+    # Mic button per-state inner fill (outlines reuse accent/bad/warn/good)
+    "mic_loading_bg": "#1e1e24",
+    "mic_loading_outline": "#44475a",
+    "mic_recording_bg": "#3a0c10",
+    "mic_processing_bg": "#36220f",
+    "mic_speaking_bg": "#0f2c1d",
+}
+
+
+def _theme_file(name: str) -> Path:
+    """The schema file for theme *name*, user copy preferred over the shipped one.
+
+    Returns the shipped path when neither exists: it is the one worth naming in
+    an error message, and read_json answers the same way for a file that is not
+    there as for one that is unreadable.
+    """
+    filename = f"{name}_schema.json"
+    user_file = paths.themes_dir() / filename
+    return user_file if user_file.is_file() else paths.shipped_themes_dir() / filename
+
+
+COLOR_THEME = _USER.get("color_theme", "dark")
+if not isinstance(COLOR_THEME, str) or not COLOR_THEME.strip():
+    print(f"[config] settings.json: color_theme must be a non-empty string, "
+          f"got {COLOR_THEME!r}; using 'dark'", file=sys.stderr)
+    COLOR_THEME = "dark"
+
+# Resolved palette consumed by ui_theme.py. Starts as a copy of the built-in
+# dark palette so every key is always present, whatever the schema file holds.
+THEME = dict(_DARK_THEME)
+
+_THEME_FILE = _theme_file(COLOR_THEME)
+_SCHEMA = loader.read_json(_THEME_FILE)
+if not _SCHEMA:
+    # For "dark" a missing file is fine - the built-in palette IS dark.
+    if COLOR_THEME != "dark":
+        print(f"[config] theme file {_THEME_FILE.name} is missing or invalid; "
+              f"using the built-in dark palette", file=sys.stderr)
+else:
+    for _key, _value in _SCHEMA.items():
+        if _key.startswith("_"):
+            continue  # comment keys, same convention as settings.json
+        if _key not in _DARK_THEME:
+            print(f"[config] {_THEME_FILE.name}: unknown color {_key!r} ignored",
+                  file=sys.stderr)
+        elif isinstance(_value, str) and _value.strip():
+            THEME[_key] = _value
+        else:
+            print(f"[config] {_THEME_FILE.name}: {_key} must be a color string, "
+                  f"got {_value!r}; using {_DARK_THEME[_key]!r}", file=sys.stderr)
+    _missing = sorted(set(_DARK_THEME) - set(_SCHEMA))
+    if _missing:
+        print(f"[config] {_THEME_FILE.name}: missing colors filled from the "
+              f"built-in dark palette: {', '.join(_missing)}", file=sys.stderr)
 
 # =====================================================================
 # Logging Settings

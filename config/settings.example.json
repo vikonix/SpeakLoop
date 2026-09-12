@@ -2,6 +2,8 @@
   "_readme": "SpeakLoop user settings. Copy this file to settings.json in the same directory and edit it by hand; restart the app to apply. Delete a key (or the whole file) to use the built-in default. Keys starting with '_' are ignored and may be used as comments.",
   "_max_record_seconds": "Hard limit on a single recording, in seconds (a safety stop for a stuck key). Minimum 1.",
   "max_record_seconds": 20,
+  "_color_theme": "UI colors: 'dark' (the default) or 'light'. Each theme is one <name>_schema.json; the shipped ones live in speakloop/themes/, and a file of the same name in config/themes/ wins over them. A color missing from the file falls back to the built-in dark palette.",
+  "color_theme": "dark",
   "_llm_backend": "Which model server the app talks to: 'llama-server' (the default) starts the official llama.cpp binary itself with the GGUF model in models/; 'lm-studio' uses an already-running LM Studio app (see lm_studio_host).",
   "llm_backend": "llama-server",
   "_lm_studio_host": "Address of the LM Studio server, used by the 'lm-studio' backend only. Accepts 'host', 'host:port' or a full 'http://host:port' URL; the port defaults to 1234. Point it at another machine to run LM Studio on it.",

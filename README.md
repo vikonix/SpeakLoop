@@ -10,7 +10,7 @@ The application is being moved to a new structure step by step. It runs from the
 
 ## Tech Stack
 
-- **GUI**: Tkinter
+- **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
 - **STT**: faster-whisper (Whisper small)
 - **LLM**: local GGUF model via `llama-server` (llama.cpp) or LM Studio
 - **TTS**: Kokoro (hexgrad/Kokoro-82M)
@@ -137,6 +137,7 @@ The configuration has three layers, lowest priority first:
 2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`), GPU layers and context size of the local model, audio devices.
 3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
    - `max_record_seconds`: limit of one recording, in seconds (default 20).
+   - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
    - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
    - `llama_server_path`: the `llama-server` binary to start. Empty (default) means `bin/llama/`, then a `llama-server` on PATH.
@@ -188,7 +189,10 @@ SpeakLoop/
 ├── speakloop/           application package
 │   ├── cli.py               entry point (--version, --detect-hardware)
 │   ├── __main__.py          python -m speakloop
-│   ├── app.py               GUI, thread orchestration, run()
+│   ├── app.py               controller: threads, voice loop, run()
+│   ├── ui.py                the window (widgets, states, wording)
+│   ├── ui_theme.py          palette and fonts of the window
+│   ├── themes/              dark_schema.json, light_schema.json
 │   ├── stt.py               Speech-to-Text (faster-whisper)
 │   ├── llm.py               LLM client (OpenAI-compatible)
 │   ├── llm_server_ctl.py    starts and stops the llama-server subprocess

@@ -20,6 +20,7 @@ Run from the project root with:
 
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -107,6 +108,88 @@ class UserSettingTests(unittest.TestCase):
         data = json.loads(example.read_text(encoding="utf-8"))
         keys = {key for key in data if not key.startswith("_")}
         self.assertLessEqual(keys, config._KNOWN_USER_KEYS)
+
+
+class ColorThemeTests(unittest.TestCase):
+    """The palette the view layer reads: complete, and made of colors."""
+
+    def test_color_theme_is_a_known_key(self):
+        self.assertIn("color_theme", config._KNOWN_USER_KEYS)
+
+    def test_the_resolved_palette_holds_every_built_in_key(self):
+        # ui.py indexes THEME directly, so a missing key is a KeyError in the
+        # middle of building the window.
+        self.assertEqual(set(config.THEME), set(config._DARK_THEME))
+
+    def test_every_resolved_color_is_a_hex_value(self):
+        for name, value in config.THEME.items():
+            with self.subTest(color=name):
+                self.assertRegex(value, r"^#[0-9a-fA-F]{6}$")
+
+
+class ThemeFileTests(unittest.TestCase):
+    """Where a schema is looked for: the user's copy first, then the shipped one."""
+
+    def test_a_user_schema_wins_over_the_shipped_one(self):
+        # What lets a user edit a theme without touching the installation.
+        with tempfile.TemporaryDirectory() as temporary:
+            user_dir = Path(temporary)
+            (user_dir / "dark_schema.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(paths, "themes_dir", return_value=user_dir):
+                self.assertEqual(config._theme_file("dark"),
+                                 user_dir / "dark_schema.json")
+
+    def test_the_shipped_file_is_used_without_a_user_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.object(paths, "themes_dir",
+                                   return_value=Path(temporary)):
+                self.assertEqual(config._theme_file("dark"),
+                                 paths.shipped_themes_dir() / "dark_schema.json")
+
+    def test_an_unknown_theme_points_at_the_shipped_directory(self):
+        # Nothing is there to read, and the shipped path is the one worth
+        # naming in the warning that follows.
+        self.assertEqual(config._theme_file("no-such-theme").parent,
+                         paths.shipped_themes_dir())
+
+
+class ShippedThemeTests(unittest.TestCase):
+    """The schemas that travel with the code must need no fallback at all."""
+
+    THEMES = ("dark", "light")
+
+    def _colors(self, name: str) -> dict:
+        """The color keys of a shipped schema, without the '_' comment keys."""
+        path = paths.shipped_themes_dir() / f"{name}_schema.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {key: value for key, value in data.items()
+                if not key.startswith("_")}
+
+    def test_both_themes_are_shipped(self):
+        for name in self.THEMES:
+            with self.subTest(theme=name):
+                self.assertTrue(
+                    (paths.shipped_themes_dir() / f"{name}_schema.json").is_file())
+
+    def test_the_schemas_name_only_known_colors(self):
+        # An unknown key is ignored with a message on every single start.
+        for name in self.THEMES:
+            with self.subTest(theme=name):
+                self.assertLessEqual(set(self._colors(name)),
+                                     set(config._DARK_THEME))
+
+    def test_the_schemas_define_every_color(self):
+        # A missing key falls back to the dark value, which inside a light
+        # theme is an unreadable surprise rather than a safe default.
+        for name in self.THEMES:
+            with self.subTest(theme=name):
+                self.assertEqual(set(self._colors(name)),
+                                 set(config._DARK_THEME))
+
+    def test_the_dark_schema_matches_the_built_in_palette(self):
+        # The built-in palette IS the dark theme. Two spellings that disagree
+        # would change the window's look depending on whether the file is found.
+        self.assertEqual(self._colors("dark"), config._DARK_THEME)
 
 
 if __name__ == "__main__":

@@ -9,9 +9,13 @@ in the comment next to that line.
 ## Project Overview
 
 SpeakLoop is a local desktop **voice dialogue tutor** for language learning
-(Python 3.11/3.12, Tkinter GUI). Push-to-talk (Space or the mic button) ->
-faster-whisper speech recognition -> a local LLM (a GGUF model served by
-`llama-server`, or LM Studio) -> Kokoro speech synthesis.
+(Python 3.11/3.12, Tkinter with ttkbootstrap). Push-to-talk (Space or the mic
+button) -> faster-whisper speech recognition -> a local LLM (a GGUF model served
+by `llama-server`, or LM Studio) -> Kokoro speech synthesis.
+
+The window and the logic are **separate**: `speakloop/ui.py` owns every widget,
+color and piece of wording, `speakloop/app.py` owns the threads and the voice
+loop and drives the window through the view's intent methods.
 
 The project is in the middle of a planned refactoring into a voice dialogue
 trainer. The plan, the step order and the open questions are in
@@ -58,12 +62,30 @@ the key differ.
 
 ### Application
 
-- [`speakloop/app.py`](speakloop/app.py) - `VoiceTutorGUI`: Tkinter window,
-  audio recording, threading orchestration, and the owner of the
-  `LLMServerController`.
+- [`speakloop/app.py`](speakloop/app.py) - `VoiceTutorController`: audio
+  recording, threading orchestration, the voice loop, and the owner of both the
+  `LLMServerController` and the view. It creates the Tk root and **touches no
+  widget**: every window change is `self.root.after(0, self.view.<intent>, ...)`,
+  which is also the only thread-safe way into Tk.
   Module-level `run(append_log)` configures logging, logs
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
+- [`speakloop/ui.py`](speakloop/ui.py) - `TutorView`: the whole window (header,
+  chat transcript, mic canvas, status bar) plus the *intent* methods the
+  controller calls (`enter_recording`, `enter_thinking`, `enter_error`, …) and
+  the `append_*` transcript writers. Widget bindings call only the callables in
+  the `ViewCallbacks` passed in, so the view never references the controller.
+  Every status string, instruction line and the partner's name (`PARTNER_NAME`)
+  live here - do not move wording or colors back into the controller. Its
+  methods must run on the Tk main thread.
+- [`speakloop/ui_theme.py`](speakloop/ui_theme.py) - the palette (`THEME` from
+  config), the ttkbootstrap base theme, `FONT_FAMILY` per platform and the
+  `FONT_SIZE_*` scale. Importing it also **disables ttkbootstrap's
+  classic-widget autostyle hook**, which would otherwise repaint every `tk`
+  widget with the base theme's colors; that is why ui.py imports it first.
+- [`speakloop/themes/`](speakloop/themes) - `dark_schema.json` (the default,
+  equal to the built-in palette) and `light_schema.json`. A user copy in
+  `config/themes/` of the same name wins over these.
 - [`speakloop/stt.py`](speakloop/stt.py) - `STTManager`: faster-whisper with
   VAD filtering, on `config.STT_DEVICE`. **Imports torch before
   faster_whisper**: on Windows the CUDA build of torch provides the cuBLAS and
@@ -103,9 +125,14 @@ the key differ.
   import. Layers, lowest first: literals in the file ->
   `config/hardware_config.json` (`"config"` section) ->
   `config/settings.json`. Known settings.json keys are listed in
-  `_KNOWN_USER_KEYS` (`max_record_seconds`, `llm_backend`, `lm_studio_host`,
-  `llama_server_path`, `external_model_path`, `external_n_ctx`); keep
-  `config/settings.example.json` in step (a test checks it).
+  `_KNOWN_USER_KEYS` (`max_record_seconds`, `color_theme`, `llm_backend`,
+  `lm_studio_host`, `llama_server_path`, `external_model_path`,
+  `external_n_ctx`); keep `config/settings.example.json` in step (a test checks
+  it). The UI palette is resolved here too: `_DARK_THEME` is the built-in
+  palette, the complete list of valid color keys and the fallback for a missing
+  file or key, and `THEME` is it overlaid with the selected
+  `<name>_schema.json` (tests pin that the shipped dark schema equals
+  `_DARK_THEME`).
   `resolve_llama_server_path()` is a function and not a constant on purpose:
   the binary can be installed or removed while the app is not running, so the
   answer is taken from the disk when the server is started. Also sets
@@ -157,7 +184,9 @@ can use them before the requirements step:
 ## Key Patterns & Gotchas
 
 - **Threading**: recording, TTS queue processing and model loading run in
-  daemon threads. Always update the GUI with `root.after()`.
+  daemon threads. Always update the window with
+  `root.after(0, self.view.<intent>, ...)` - never call a view method straight
+  from a worker thread, and never reach for a widget.
 - **TTS sentinel pattern** (`app.py`): LLM sentences are buffered in the TTS
   queue processor and only played after `_TTS_START_SENTINEL` arrives, so the
   model server has finished before Kokoro synthesis starts. Do not remove it
