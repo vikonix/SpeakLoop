@@ -14,61 +14,72 @@ methods; it owns no widget, no color and no interface wording. Every worker
 thread reaches the window through ``self.root.after()``, the only thread-safe
 way into Tk - a direct call from a thread is the one mistake this split cannot
 prevent on its own.
+
+The audio itself belongs to three modules of its own: speakloop/recorder.py
+captures a take, speakloop/tts.py synthesizes and plays a reply, and
+speakloop/playback.py owns the stop event that says which reply may still be
+heard. This module only routes between them.
 """
 
-import time
+import logging
+import os
 import queue
 import threading
-from typing import Optional
-import os
-import logging
+import time
 import tkinter as tk
-import numpy as np
-import sounddevice as sd
+from typing import NamedTuple, Optional
 
-# config first: it sets HF_HOME and the offline switch, which huggingface_hub
-# reads when stt and tts import faster_whisper and kokoro below.
+import numpy as np
+
+# config first: it sets HF_HOME, the Supertonic cache and the offline switch,
+# which huggingface_hub reads when stt and tts import their engines below.
 from speakloop import config
 from speakloop import bootstrap, detect_hardware, lifecycle
-from speakloop.stt import STTManager, WHISPER_SAMPLE_RATE
 from speakloop.llm import LLMManager, error_message
 from speakloop.llm_server_ctl import LLMServerController
+from speakloop.playback import PlaybackController
+from speakloop.recorder import AudioRecorder, normalize_audio
+from speakloop.stt import STTManager
 from speakloop.tts import TTSManager
 from speakloop.ui import TutorView, ViewCallbacks
 
-# Sentinel object pushed to the TTS queue after LLM finishes streaming.
-# The TTS thread buffers sentences and only starts playback when it sees this object,
-# ensuring the LLM has released the GPU before Kokoro synthesis begins.
-_TTS_START_SENTINEL = object()
 
-# Technical recording & signal processing parameters
-RECORDING_BLOCKSIZE = 1024  # Small block sizes maintain responsive streaming frame intervals
+class _ReplyEnd(NamedTuple):
+    """Queue marker: the model has finished, its sentences may now be spoken.
 
-# Signal gain normalization parameters
-AUDIO_MIN_PEAK_THRESHOLD = 0.01      # Prevents boosting pure background noise floor during silence
-AUDIO_NORMALIZATION_CEILING = 0.9    # Scales the peak target output level directly to 90%
+    The speech thread buffers the sentences of a reply and synthesizes nothing
+    until this marker arrives, so the model server has released the GPU before
+    the synthesis starts (both share one card).
 
-# How long to wait for the recording thread to finish after stopping.
-# Covers the last InputStream callback flush; should be well under 1 second in normal use.
-RECORD_THREAD_JOIN_TIMEOUT_SEC = 1.5
+    The marker carries the stop event of ITS OWN reply. That is what makes an
+    interrupt final: a take started meanwhile has already set that event, so the
+    buffered sentences are dropped instead of being spoken over the new take.
+    """
+    stop_event: threading.Event
+
+
+# Shortest take that is passed to recognition, in seconds. Anything below is a
+# slip of the key rather than a phrase.
+MIN_RECORD_SECONDS = 0.2
 
 
 class VoiceTutorController:
     """The application: the voice loop, its threads, and the window's driver.
 
-    Holds the controller logic (model loading, recording, transcription, the
-    model exchange and speech output) and owns the view by composition:
-    ``self.view`` is a TutorView (ui.py) that builds and renders the widgets.
-    The controller drives the window through ``self.view.*`` and the view
-    forwards its bindings back to the handlers passed in ViewCallbacks.
+    Holds the controller logic (model loading, the exchange with the model and
+    the routing of audio) and owns the view by composition: ``self.view`` is a
+    TutorView (ui.py) that builds and renders the widgets. The controller drives
+    the window through ``self.view.*`` and the view forwards its bindings back
+    to the handlers passed in ViewCallbacks.
 
     Flow per exchange (state machine):
-        Record     -> Space or the mic button is held, record_loop captures.
+        Record     -> one press opens the microphone; the take ends by itself
+                      after a pause, or on the next press (recorder.py).
         Process    -> faster-whisper transcribes the take (stt.py).
         Think      -> the model answers as a stream (llm.py), tokens go to the
-                      window and whole sentences to the TTS queue.
-        Speak      -> the queue is played once the model is done (sentinel).
-        Loop       -> back to idle; a new recording interrupts the speech.
+                      window and whole sentences to the speech queue.
+        Speak      -> the queue is spoken once the model is done (_ReplyEnd).
+        Loop       -> back to idle; a new take interrupts the speech.
     """
 
     def __init__(self):
@@ -78,32 +89,37 @@ class VoiceTutorController:
         # colors and widgets are the view's (see TutorView below).
         self.root = tk.Tk()
 
-        # Thread management events
+        # Thread management
         self.shutdown_event = threading.Event()
-        self.tts_stop_event = threading.Event()
+        # One exchange at a time. A take made while the previous exchange still
+        # runs waits for this lock instead of being dropped - losing it was the
+        # second half of the interrupt race (problem 1 in docs/refactoring.md).
+        self._exchange_lock = threading.Lock()
 
-        # Recording state management
-        self.is_recording = False
-        self.space_is_held = False
-        self.record_lock = threading.Lock()
-        self.recorded_chunks: list[np.ndarray] = []
-        self.record_thread: Optional[threading.Thread] = None
+        # True once the models are loaded: nothing may be recorded before that.
+        self.app_ready = False
+        # Holding a key makes Tk repeat KeyPress. This flag keeps the first one
+        # and is cleared on the matching KeyRelease; it is NOT a "hold to
+        # record" state.
+        self._record_key_held = False
 
-        # Audio processing guard - prevents concurrent process_audio() calls
-        self.is_processing_audio = False
-        self.processing_lock = threading.Lock()
-
-        # TTS state tracking - avoids reading Tkinter widget from background thread
-        self._tts_is_speaking = False
-        self.tts_state_lock = threading.Lock()
-
-        # Text-to-Speech background queue and thread
-        self.tts_queue: queue.Queue[str] = queue.Queue()
+        # Text-to-speech background queue and thread
+        self.tts_queue: queue.Queue = queue.Queue()
         self.tts_thread: Optional[threading.Thread] = None
 
         # Initialize core modular sub-managers
         self.stt_mgr = STTManager()
         self.tts_mgr = TTSManager()
+        # Owns the stop event of the current reply (see speakloop/playback.py).
+        self.playback = PlaybackController(self.tts_mgr)
+        # Owns the capture thread. All four callbacks run on that thread, so
+        # each of them marshals its window work onto the Tk thread.
+        self.recorder = AudioRecorder(
+            on_max_duration=self._on_record_max_duration,
+            on_stream_error=self._on_record_stream_error,
+            on_silence_stop=self._on_record_silence_stop,
+            on_level=self._on_record_level,
+        )
 
         # LLM backend. config validates the name and falls back to the default,
         # so only the two known values reach this point.
@@ -120,7 +136,6 @@ class VoiceTutorController:
         # started below drives it at once.
         self.view = TutorView(self.root, ViewCallbacks(
             on_mic_pressed=self.on_mic_pressed,
-            on_mic_released=self.on_mic_released,
             on_space_pressed=self.on_space_pressed,
             on_space_released=self.on_space_released,
             on_quit=self.quit_app,
@@ -135,7 +150,8 @@ class VoiceTutorController:
     def load_components(self):
         logging.info("Starting model loading thread...")
         self.root.after(0, self.view.enter_loading)
-        self.root.after(0, self.view.append_system_msg, "Loading Whisper (STT) and Kokoro (TTS) models...")
+        self.root.after(0, self.view.append_system_msg,
+                        "Loading the speech models...")
 
         try:
             self.stt_mgr.load_model()
@@ -192,7 +208,8 @@ class VoiceTutorController:
             logging.info("Models warmed up successfully.")
 
             # Start TTS background thread
-            self.tts_thread = threading.Thread(target=self.process_tts_queue, daemon=True)
+            self.tts_thread = threading.Thread(target=self.process_tts_queue,
+                                               daemon=True)
             self.tts_thread.start()
             logging.info("TTS Queue processor thread started.")
 
@@ -206,193 +223,141 @@ class VoiceTutorController:
             self.root.after(0, self.view.init_failed)
 
     def make_app_ready(self):
-        with self.tts_state_lock:
-            self._tts_is_speaking = False
+        self.app_ready = True
         self.view.enter_app_ready()
-        self.view.append_system_msg(f"Voice Tutor ready. Practice learning {config.TARGET_LANGUAGE}!")
+        self.view.append_system_msg(
+            f"Voice Tutor ready. Practice learning {config.TARGET_LANGUAGE}!")
 
     # ------------------------------------------------------------------
-    # Push-to-talk handlers (called by the view's bindings)
+    # Press handlers (called by the view's bindings, on the Tk main thread)
     # ------------------------------------------------------------------
     def on_mic_pressed(self):
-        # Click behavior (simulates holding space)
-        if not self.space_is_held:
-            logging.info("GUI microphone button clicked.")
-            self.trigger_recording_start()
-
-    def on_mic_released(self):
-        with self.record_lock:
-            currently_recording = self.is_recording
-        if currently_recording and not self.space_is_held:
-            logging.info("GUI microphone button released.")
-            self.trigger_recording_stop()
+        logging.info("GUI microphone button clicked.")
+        self._toggle_recording()
 
     def on_space_pressed(self):
         # Holding the key repeats KeyPress; the flag keeps the first one.
-        if not self.space_is_held:
-            self.space_is_held = True
-            logging.info("Spacebar keyboard press event.")
-            self.trigger_recording_start()
+        if self._record_key_held:
+            return
+        self._record_key_held = True
+        logging.info("Spacebar keyboard press event.")
+        self._toggle_recording()
 
     def on_space_released(self):
-        if self.space_is_held:
-            self.space_is_held = False
-            logging.info("Spacebar keyboard release event.")
+        # Only clears the auto-repeat guard. The take keeps running until it
+        # stops on silence, on the time limit, or on the next press.
+        self._record_key_held = False
+
+    def _toggle_recording(self):
+        """One press starts a take, the next one ends it.
+
+        trigger_recording_start and trigger_recording_stop keep their own
+        guards, so this only routes.
+        """
+        if self.recorder.is_active():
             self.trigger_recording_stop()
+        else:
+            self.trigger_recording_start()
 
     def trigger_recording_start(self):
-        with self.record_lock:
-            if self.is_recording:
-                return  # Safety guard
-
-            logging.info("Starting audio recording...")
-            self.stop_current_tts()
-            self.is_recording = True
-            self.recorded_chunks = []
-
-            # All window updates are scheduled on the main thread.
-            self.root.after(0, self.view.enter_recording)
-
-            self.record_thread = threading.Thread(target=self.record_loop, daemon=True)
-            self.record_thread.start()
+        if not self.app_ready:
+            # Before the models are loaded there is nothing to answer a take
+            # with, and the window still shows the loading button.
+            return
+        # The learner has the floor: stop the reply that is being spoken. This
+        # also sets the stop event of that reply for good, so its speech cannot
+        # come back after the new take.
+        self.playback.stop()
+        if not self.recorder.start():
+            return
+        self.view.enter_recording()
 
     def trigger_recording_stop(self):
-        with self.record_lock:
-            if not self.is_recording:
-                return
-            logging.info("Stopping audio recording...")
-            self.is_recording = False
+        if not self.recorder.stop():
+            return
 
-        self.root.after(0, self.view.enter_processing)
-
-        # Join and audio processing happen off the main thread to prevent UI freeze.
-        # record_thread.join() can block up to RECORD_THREAD_JOIN_TIMEOUT_SEC -
-        # running it on the main thread would make the window unresponsive.
-        threading.Thread(target=self._finalize_recording, daemon=True).start()
-
-    def _finalize_recording(self):
-        """Joins the record thread, then starts audio processing - runs off the main thread."""
-        if self.record_thread:
-            self.record_thread.join(timeout=RECORD_THREAD_JOIN_TIMEOUT_SEC)
-
-        with self.processing_lock:
-            if self.is_processing_audio:
-                logging.warning("process_audio already running, skipping duplicate.")
-                return
-            self.is_processing_audio = True
-
-        self._process_audio_safe()
-
-    def _process_audio_safe(self):
-        """Wrapper that ensures process_audio runs exactly once and releases the guard."""
-        try:
-            self.process_audio()
-        finally:
-            with self.processing_lock:
-                self.is_processing_audio = False
+        self.view.enter_processing()
+        # The stop event of the reply to THIS take is installed here, on the Tk
+        # main thread (see PlaybackController.new_event); the worker only
+        # receives it.
+        stop_event = self.playback.new_event()
+        # The join and the exchange run off the main thread: the join can block
+        # for up to RECORD_THREAD_JOIN_TIMEOUT_SEC, which would freeze the
+        # window.
+        threading.Thread(target=self._finalize_recording, args=(stop_event,),
+                         daemon=True).start()
 
     # ------------------------------------------------------------------
-    # Recording
+    # Recorder callbacks (all called on the capture thread)
     # ------------------------------------------------------------------
-    def record_loop(self):
-        start_time = time.time()
-        logging.info("sd.InputStream thread started.")
+    def _on_record_max_duration(self):
+        """The take reached MAX_RECORD_SECONDS.
 
-        # Warnings from the realtime callback are buffered here and logged from
-        # the main record loop - calling logging directly inside a sounddevice
-        # callback can block on I/O and cause audio dropouts.
-        callback_warnings: list[str] = []
+        Routed through the normal stop path on the main thread, so the take is
+        finalized exactly like a manual stop.
+        """
+        self.root.after(0, self.view.append_system_msg,
+                        "Reached maximum record limit.")
+        self.root.after(0, self.trigger_recording_stop)
 
-        def callback(indata, frames, time_info, status):
-            if status:
-                callback_warnings.append(str(status))
-            with self.record_lock:
-                if self.is_recording:
-                    self.recorded_chunks.append(indata.copy())
+    def _on_record_silence_stop(self):
+        """The take ended after a pause. This is the designed ending, so the
+        chat says nothing about it; the same stop path finalizes the take."""
+        self.root.after(0, self.trigger_recording_stop)
 
-        try:
-            with config.AUDIO_LOCK:
-                try:
-                    sd._terminate()
-                    sd._initialize()
-                except Exception as init_err:
-                    logging.debug(f"PortAudio reinitialization error: {init_err}")
+    def _on_record_level(self, level: float):
+        """Live microphone level during a take, forwarded to the Tk thread."""
+        self.root.after(0, self._apply_record_level, level)
 
-                stream = sd.InputStream(
-                        samplerate=WHISPER_SAMPLE_RATE,
-                        channels=config.AUDIO_CHANNELS,
-                        dtype="float32",
-                        blocksize=RECORDING_BLOCKSIZE,
-                        latency=config.AUDIO_LATENCY,
-                        device=config.AUDIO_INPUT_DEVICE,
-                        callback=callback,
-                )
-                stream.start()
+    def _apply_record_level(self, level: float):
+        """Repaint the level indicator, but only while the take runs. (Tk thread.)
 
-            try:
-                while True:
-                    # Flush warnings accumulated by the realtime callback
-                    while callback_warnings:
-                        logging.warning(f"Audio input warning: {callback_warnings.pop(0)}")
+        A level report can be queued just before the take stops; applying it
+        afterwards would draw the red recording disc back on top of the
+        processing glyph. The capture thread clears its recording flag before
+        the stop path repaints, so this check drops such late reports.
+        """
+        if self.recorder.is_active():
+            self.view.set_record_level(level)
 
-                    with self.record_lock:
-                        still_recording = self.is_recording
-
-                    if not still_recording:
-                        break
-
-                    if time.time() - start_time >= config.MAX_RECORD_SECONDS:
-                        logging.info("Maximum recording duration reached.")
-                        self.root.after(0, self.view.append_system_msg, "Reached maximum record limit.")
-                        with self.record_lock:
-                            self.is_recording = False
-                        break
-
-                    time.sleep(0.01)
-            finally:
-                with config.AUDIO_LOCK:
-                    try:
-                        stream.stop()
-                        stream.close()
-                    except Exception as close_error:
-                        logging.debug(f"Error during sound input stream close: {close_error}")
-
-        except Exception:
-            logging.exception("Recording InputStream error:")
-            with self.record_lock:
-                self.is_recording = False
-            self.root.after(0, self.view.recording_failed)
-
-    def normalize_audio(self, audio: np.ndarray) -> np.ndarray:
-        peak = np.max(np.abs(audio))
-        logging.info(f"Normalizing audio. Peak signal level: {peak:.4f}")
-        if peak < AUDIO_MIN_PEAK_THRESHOLD:
-            logging.info("Peak signal is too low (silence). Skipping gain adjustment.")
-            return audio.astype(np.float32)
-        audio = audio / peak * AUDIO_NORMALIZATION_CEILING
-        return np.nan_to_num(audio).astype(np.float32)
-
-    def get_recorded_audio(self) -> Optional[np.ndarray]:
-        with self.record_lock:
-            if not self.recorded_chunks:
-                return None
-            chunks = list(self.recorded_chunks)
-            self.recorded_chunks = []
-        return np.concatenate(chunks, axis=0).flatten().astype(np.float32, copy=False)
+    def _on_record_stream_error(self):
+        """The input stream failed; the recorder has already flagged itself off."""
+        self.root.after(0, self.view.append_system_msg,
+                        "The microphone could not be opened. See logs/main.log.")
+        self.root.after(0, self.view.recording_failed)
 
     # ------------------------------------------------------------------
     # One exchange: transcribe, ask the model, queue the speech
     # ------------------------------------------------------------------
-    def process_audio(self):
+    def _finalize_recording(self, stop_event: threading.Event):
+        """Collect the take, then run the exchange - off the main thread."""
+        if not self.recorder.join():
+            # The capture thread is stuck (a device that hangs on close) and its
+            # callback may still be appending chunks. Reading them now would
+            # race the writer, so the take is dropped.
+            self.root.after(0, self.view.append_system_msg,
+                            "The audio device did not stop in time. "
+                            "The take was dropped, please try again.")
+            self.root.after(0, self.view.enter_idle)
+            return
+        # Collected BEFORE the lock below: a take started while this thread
+        # waits would otherwise replace the chunk buffer it is about to read.
+        audio = self.recorder.get_audio()
+        with self._exchange_lock:
+            self._run_exchange(audio, stop_event)
+
+    def _run_exchange(self, audio: Optional[np.ndarray],
+                      stop_event: threading.Event):
         try:
-            audio = self.get_recorded_audio()
-            if audio is None or len(audio) < WHISPER_SAMPLE_RATE * 0.2:
+            if audio is None or len(audio) < (config.AUDIO_SAMPLE_RATE
+                                              * MIN_RECORD_SECONDS):
                 logging.warning("Captured audio too short or empty.")
-                self.root.after(0, self.view.append_system_msg, "Audio is too short. Try holding space longer.")
+                self.root.after(0, self.view.append_system_msg,
+                                "The recording is too short. Please speak a little longer.")
                 self.root.after(0, self.view.enter_idle)
                 return
 
-            audio = self.normalize_audio(audio)
+            audio = normalize_audio(audio)
 
             # Speech-to-Text (STT)
             stt_start = time.perf_counter()
@@ -408,139 +373,130 @@ class VoiceTutorController:
 
             # Update User Speech to GUI
             self.root.after(0, self.view.append_user_msg, user_text)
-            self.root.after(0, self.view.enter_thinking)
 
-            # Start LLM stream feeding the TTS queue
-            llm_start = time.perf_counter()
-            self.clear_tts_queue()
-            self.tts_stop_event.clear()
-
-            self.root.after(0, self.view.append_reply_start)
-
-            # Streaming callback to append tokens live
-            def token_cb(token):
-                self.root.after(0, self.view.append_reply_token, token)
-
-            try:
-                self.llm_mgr.stream_and_queue_tts(
-                    user_text,
-                    self.tts_queue,
-                    self.tts_stop_event,
-                    token_callback=token_cb
-                )
-            except Exception as llm_error:
-                # Handled here and not by the outer handler, which cannot know
-                # that a reply line is already open in the chat. Without this
-                # the window keeps an empty partner line and a status bar that
-                # still says "Thinking", and the failure is only in the log.
-                # llm.py has logged the traceback already.
-                self.root.after(0, self.view.append_reply_end)
-                self.root.after(0, self.view.append_system_msg,
-                                f"LLM error: {error_message(llm_error)}")
-                self._abort_tts()
-                self.root.after(0, self.view.enter_error, "LLM Error")
+            if stop_event.is_set():
+                # A new take began while this one was being transcribed. The
+                # phrase stays in the chat, but it gets no answer: the learner
+                # is already speaking again, and the answer would arrive on top
+                # of the next one.
+                logging.info("The exchange was superseded by a new take; "
+                             "the model is not asked.")
                 return
 
-            llm_ms = (time.perf_counter() - llm_start) * 1000
-            logging.info(f"LLM complete streaming and queuing. Duration: {llm_ms:.0f}ms")
-
-            self.root.after(0, self.view.append_reply_end)
-            self.root.after(0, self.view.update_stats, stt_ms, llm_ms)
-
-            # Signal TTS thread that LLM has finished and GPU is free.
-            # The TTS thread buffers sentences until it receives this sentinel,
-            # preventing GPU contention between the model server and Kokoro.
-            if not self.tts_stop_event.is_set():
-                self.tts_queue.put(_TTS_START_SENTINEL)
-                with self.tts_state_lock:
-                    self._tts_is_speaking = True
-                self.root.after(0, self.view.enter_speaking)
+            self._answer(user_text, stt_ms, stop_event)
 
         except Exception:
-            logging.exception("Error in process_audio:")
+            logging.exception("Error in the exchange:")
             self.root.after(0, self.view.append_system_msg, "Processing Error. Please try again.")
             self.root.after(0, self.view.enter_error, "Error")
+
+    def _answer(self, user_text: str, stt_ms: float,
+                stop_event: threading.Event):
+        """Ask the model and hand its sentences to the speech thread."""
+        self.root.after(0, self.view.enter_thinking)
+
+        llm_start = time.perf_counter()
+        self.root.after(0, self.view.append_reply_start)
+
+        # Streaming callback to append tokens live
+        def token_cb(token):
+            self.root.after(0, self.view.append_reply_token, token)
+
+        try:
+            self.llm_mgr.stream_and_queue_tts(
+                user_text,
+                self.tts_queue,
+                stop_event,
+                token_callback=token_cb
+            )
+        except Exception as llm_error:
+            # Handled here and not by the caller, which cannot know that a reply
+            # line is already open in the chat. Without this the window keeps an
+            # empty partner line and a status bar that still says "Thinking",
+            # and the failure is only in the log. llm.py has logged the
+            # traceback already.
+            self.root.after(0, self.view.append_reply_end)
+            self.root.after(0, self.view.append_system_msg,
+                            f"LLM error: {error_message(llm_error)}")
+            # Half a reply must not be spoken. Setting the event of this reply
+            # from here is safe: it belongs to this exchange, and only the
+            # reference is main-thread state (see playback.py). The marker is
+            # what makes the speech thread drop the sentences it has already
+            # taken out of the queue.
+            stop_event.set()
+            self.tts_queue.put(_ReplyEnd(stop_event))
+            self.root.after(0, self.view.enter_error, "LLM Error")
+            return
+
+        llm_ms = (time.perf_counter() - llm_start) * 1000
+        logging.info(f"LLM complete streaming and queuing. Duration: {llm_ms:.0f}ms")
+
+        self.root.after(0, self.view.append_reply_end)
+        self.root.after(0, self.view.update_stats, stt_ms, llm_ms)
+
+        # The model has released the GPU, so the sentences may be synthesized.
+        # The marker carries this reply's stop event: an interrupt that arrived
+        # meanwhile drops them instead of speaking them over the new take.
+        self.tts_queue.put(_ReplyEnd(stop_event))
+        if not stop_event.is_set():
+            self.root.after(0, self.view.enter_speaking)
 
     # ------------------------------------------------------------------
     # Speech output
     # ------------------------------------------------------------------
-    def stop_current_tts(self):
-        logging.info("Stopping active text-to-speech output...")
-        with self.tts_state_lock:
-            self._tts_is_speaking = False
-        self.tts_stop_event.set()
-        self.clear_tts_queue()
-        self.tts_mgr.stop_playback()
-
-    def _abort_tts(self):
-        """Drop everything queued for speech after a failed exchange.
-
-        stop_current_tts() empties the queue, but sentences the TTS thread has
-        already taken from it are buffered inside that thread and are dropped
-        only when it sees another item. The sentinel is that item: with the
-        stop event set it clears the buffer and plays nothing. Without it those
-        sentences would be spoken after the NEXT reply.
-        """
-        self.stop_current_tts()
-        self.tts_queue.put(_TTS_START_SENTINEL)
-
-    def clear_tts_queue(self):
-        while True:
-            try:
-                self.tts_queue.get_nowait()
-                self.tts_queue.task_done()
-            except queue.Empty:
-                break
-
     def process_tts_queue(self):
-        # Sentences are buffered here while LLM is still running on the GPU.
-        # Playback starts only after _TTS_START_SENTINEL arrives (LLM done, GPU free).
-        pending_sentences: list[str] = []
+        """Buffer the sentences of a reply, then speak them when it is over.
+
+        The queue holds the sentences llm.py streams into it (plain strings)
+        and one _ReplyEnd marker per reply. Nothing is synthesized before that
+        marker: the model server and the synthesis share one GPU.
+        """
+        pending_sentences: list = []
 
         while not self.shutdown_event.is_set():
             try:
                 item = self.tts_queue.get(timeout=0.1)
             except queue.Empty:
-                # Transition to idle only when truly done: sentinel was received (pending
-                # is empty) and there are no more items waiting in the queue.
-                if not pending_sentences:
-                    with self.record_lock:
-                        currently_recording = self.is_recording
-                    if not currently_recording and not self.tts_stop_event.is_set() and self.tts_queue.empty():
-                        with self.tts_state_lock:
-                            tts_speaking = self._tts_is_speaking
-                        if tts_speaking:
-                            self.root.after(0, self.view.enter_idle)
-                            with self.tts_state_lock:
-                                self._tts_is_speaking = False
                 continue
 
             try:
-                if item is _TTS_START_SENTINEL:
-                    # LLM has finished - GPU is now free. Play all buffered sentences.
-                    logging.info(f"TTS sentinel received. Playing {len(pending_sentences)} buffered sentence(s).")
-                    remaining = list(pending_sentences)
-                    pending_sentences.clear()
-                    for sentence in remaining:
-                        if self.tts_stop_event.is_set() or self.shutdown_event.is_set():
-                            break
-                        try:
-                            logging.info(f"TTS playing synthesized block: {sentence!r}")
-                            self.tts_mgr.play_stream(sentence, self.tts_stop_event, self.shutdown_event)
-                        except Exception as play_err:
-                            # Skip the failed sentence and continue with the rest
-                            logging.exception(f"TTS playback error for {sentence!r}:")
-                elif self.tts_stop_event.is_set():
-                    # Stop was requested - discard buffered sentences and this one
-                    pending_sentences.clear()
-                else:
-                    # LLM still running - buffer the sentence, do not synthesize yet
-                    logging.info(f"TTS buffering sentence (waiting for LLM): {item!r}")
+                if not isinstance(item, _ReplyEnd):
+                    logging.info(f"TTS buffering sentence (waiting for the model): {item!r}")
                     pending_sentences.append(item)
+                    continue
+                sentences = list(pending_sentences)
+                pending_sentences.clear()
+                self._speak_reply(sentences, item.stop_event)
             except Exception:
                 logging.exception("Error in TTS queue thread:")
             finally:
                 self.tts_queue.task_done()
+
+    def _speak_reply(self, sentences: list, stop_event: threading.Event):
+        """Synthesize and play one reply, sentence by sentence."""
+        logging.info(f"TTS reply ready: {len(sentences)} sentence(s).")
+        for sentence in sentences:
+            if stop_event.is_set() or self.shutdown_event.is_set():
+                logging.info("Speech stopped; the rest of the reply is dropped.")
+                break
+            try:
+                waveform = self.tts_mgr.synthesize(sentence)
+                if stop_event.is_set() or self.shutdown_event.is_set():
+                    break
+                logging.info(f"TTS playing synthesized block: {sentence!r}")
+                self.tts_mgr.play_array(waveform, self.tts_mgr.sample_rate,
+                                        stop_event, self.shutdown_event)
+            except Exception:
+                # Skip the failed sentence and continue with the rest
+                logging.exception(f"TTS playback error for {sentence!r}:")
+
+        if self.shutdown_event.is_set():
+            return
+        # Back to waiting for the learner - but only for the reply that is still
+        # the current one. A reply that was interrupted must not overwrite the
+        # window state of the take that interrupted it.
+        if not stop_event.is_set() and self.playback.is_current(stop_event):
+            self.root.after(0, self.view.enter_idle)
 
     # ------------------------------------------------------------------
     # Shutdown
@@ -548,7 +504,7 @@ class VoiceTutorController:
     def quit_app(self):
         logging.info("Shutting down VoiceTutor App...")
         self.shutdown_event.set()
-        self.stop_current_tts()
+        self.playback.stop()
 
         # Terminate the llama-server subprocess if this app started one. A
         # no-op for the "lm-studio" backend, for a server that was adopted

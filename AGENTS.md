@@ -9,9 +9,14 @@ in the comment next to that line.
 ## Project Overview
 
 SpeakLoop is a local desktop **voice dialogue tutor** for language learning
-(Python 3.11/3.12, Tkinter with ttkbootstrap). Push-to-talk (Space or the mic
-button) -> faster-whisper speech recognition -> a local LLM (a GGUF model served
-by `llama-server`, or LM Studio) -> Kokoro speech synthesis.
+(Python 3.11/3.12, Tkinter with ttkbootstrap). One press (Space or the mic
+button) opens the microphone and the take ends on silence -> faster-whisper
+speech recognition -> a local LLM (a GGUF model served by `llama-server`, or LM
+Studio) -> speech synthesis (Kokoro for English, Supertonic for Spanish).
+
+The language of the lesson is data: `speakloop/languages/` holds one profile per
+language and `config.py` derives every per-run language constant from the active
+one. English is fixed until stage 3 of the plan.
 
 The window and the logic are **separate**: `speakloop/ui.py` owns every widget,
 color and piece of wording, `speakloop/app.py` owns the threads and the voice
@@ -62,11 +67,16 @@ the key differ.
 
 ### Application
 
-- [`speakloop/app.py`](speakloop/app.py) - `VoiceTutorController`: audio
-  recording, threading orchestration, the voice loop, and the owner of both the
+- [`speakloop/app.py`](speakloop/app.py) - `VoiceTutorController`: the routing
+  between the audio modules, threading orchestration, the voice loop, and the
+  owner of the `AudioRecorder`, the `PlaybackController`, the
   `LLMServerController` and the view. It creates the Tk root and **touches no
   widget**: every window change is `self.root.after(0, self.view.<intent>, ...)`,
-  which is also the only thread-safe way into Tk.
+  which is also the only thread-safe way into Tk. It no longer captures audio
+  itself - `recorder.py` does. `_toggle_recording` is the whole input model:
+  one press starts a take, the next one ends it, and a release only clears the
+  key auto-repeat guard. `_exchange_lock` keeps one exchange at a time, so a
+  take made during the previous exchange waits instead of being dropped.
   Module-level `run(append_log)` configures logging, logs
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
@@ -77,7 +87,9 @@ the key differ.
   the `ViewCallbacks` passed in, so the view never references the controller.
   Every status string, instruction line and the partner's name (`PARTNER_NAME`)
   live here - do not move wording or colors back into the controller. Its
-  methods must run on the Tk main thread.
+  methods must run on the Tk main thread. `set_record_level()` repaints the mic
+  button from the live input level while a take runs; the recording state has no
+  glyph of its own any more, because the level disc IS the indicator.
 - [`speakloop/ui_theme.py`](speakloop/ui_theme.py) - the palette (`THEME` from
   config), the ttkbootstrap base theme, `FONT_FAMILY` per platform and the
   `FONT_SIZE_*` scale. Importing it also **disables ttkbootstrap's
@@ -87,9 +99,29 @@ the key differ.
   equal to the built-in palette) and `light_schema.json`. A user copy in
   `config/themes/` of the same name wins over these.
 - [`speakloop/stt.py`](speakloop/stt.py) - `STTManager`: faster-whisper with
-  VAD filtering, on `config.STT_DEVICE`. **Imports torch before
+  VAD filtering, on `config.STT_DEVICE`, in the language of the active profile
+  (`config.WHISPER_LANGUAGE`; never automatic detection). **Imports torch before
   faster_whisper**: on Windows the CUDA build of torch provides the cuBLAS and
   cuDNN libraries ctranslate2 needs.
+- [`speakloop/recorder.py`](speakloop/recorder.py) - `AudioRecorder`: the
+  capture thread, the input device choice and the chunk buffer, plus the pure
+  `normalize_audio`. It captures at the device's own rate through WASAPI on
+  Windows (MME drops samples) and downsamples the take to
+  `config.AUDIO_SAMPLE_RATE` with librosa. Its four callbacks
+  (`on_max_duration`, `on_silence_stop`, `on_stream_error`, `on_level`) all run
+  on the capture thread. The realtime callback takes **no lock** - that was the
+  source of dropped samples - so the buffer may only be read after `join()`.
+- [`speakloop/audio_io.py`](speakloop/audio_io.py) - the device plumbing both
+  the microphone and the speaker need: `reset_portaudio()` (Windows only, and
+  skipped while any stream is open - it invalidates every stream in the
+  process), the open-stream counter and `uses_winsound()`.
+- [`speakloop/playback.py`](speakloop/playback.py) - `PlaybackController`: the
+  stop event of the **current reply**. `new_event()` and `stop()` are Tk-thread
+  only; workers get the event as an argument. An event is only ever set, never
+  cleared, which is what makes an interrupt final.
+- [`speakloop/languages/`](speakloop/languages) - one pure-data `PROFILE` per
+  language (`english.py`, `spanish.py`), the format documented in its
+  `__init__.py`. No imports and no side effects: `config.py` assembles them.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
   streaming client with conversation history; used by both backends. The
   response is streamed inside a `with`, so an interrupt closes it and the
@@ -116,8 +148,16 @@ the key differ.
   the `/v1` prefix, hence not through the OpenAI client). Both are diagnostic
   and warn on a mismatch with the configured model or a smaller context; a
   server that answers is never refused over them.
-- [`speakloop/tts.py`](speakloop/tts.py) - `TTSManager`: Kokoro on
-  `config.DEVICE`, winsound playback on Windows, sounddevice elsewhere.
+- [`speakloop/tts.py`](speakloop/tts.py) - two roles: a **synthesis backend**
+  per engine (`KokoroBackend` on torch at 24 kHz, `SupertonicBackend` on ONNX at
+  44.1 kHz), selected from the `TTS_BACKENDS` registry by the active variant's
+  data and never by an `if language` branch; and the **playback** path
+  (`play_array`), winsound on Windows and sounddevice elsewhere. `TTSManager`
+  is the facade: `synthesize()` then `play_array()`, with `sample_rate` taken
+  from the active backend - callers must never assume a rate. The winsound path
+  deliberately takes **no** `config.AUDIO_LOCK`: winsound does not touch
+  PortAudio, and holding the lock there made a new recording wait for the speech
+  to end, which cut the beginning off the take.
 
 ### Configuration and paths
 
@@ -125,10 +165,18 @@ the key differ.
   import. Layers, lowest first: literals in the file ->
   `config/hardware_config.json` (`"config"` section) ->
   `config/settings.json`. Known settings.json keys are listed in
-  `_KNOWN_USER_KEYS` (`max_record_seconds`, `color_theme`, `llm_backend`,
+  `_KNOWN_USER_KEYS` (`max_record_seconds`, `silence_timeout`,
+  `silence_threshold`, `accent`, `voice`, `color_theme`, `llm_backend`,
   `lm_studio_host`, `llama_server_path`, `external_model_path`,
   `external_n_ctx`); keep `config/settings.example.json` in step (a test checks
-  it). The UI palette is resolved here too: `_DARK_THEME` is the built-in
+  it). The **language section comes before the download section on purpose**:
+  the offline gate has to know the active synthesis backend, because only that
+  backend's model has to be cached before the Hub is switched off. Every
+  language constant (`TARGET_LANGUAGE`, `WHISPER_LANGUAGE`, `TTS_BACKEND`,
+  `TTS_LANG_CODE`, `TTS_VOICE`, `TTS_VOICES`, `TTS_TOTAL_STEPS`, `TTS_WARMUP`)
+  is derived from the profile and its variant - add a language by adding a
+  profile, never a branch. `PRACTICE_LANGUAGE` is fixed to `"english"` and has
+  no settings key until stage 3. The UI palette is resolved here too: `_DARK_THEME` is the built-in
   palette, the complete list of valid color keys and the fallback for a missing
   file or key, and `THEME` is it overlaid with the selected
   `<name>_schema.json` (tests pin that the shipped dark schema equals
@@ -187,34 +235,49 @@ can use them before the requirements step:
   daemon threads. Always update the window with
   `root.after(0, self.view.<intent>, ...)` - never call a view method straight
   from a worker thread, and never reach for a widget.
-- **TTS sentinel pattern** (`app.py`): LLM sentences are buffered in the TTS
-  queue processor and only played after `_TTS_START_SENTINEL` arrives, so the
-  model server has finished before Kokoro synthesis starts. Do not remove it
-  while the LLM and Kokoro share one GPU.
+- **Reply marker pattern** (`app.py`): LLM sentences are buffered in the TTS
+  queue processor and synthesized only when the `_ReplyEnd` marker of their
+  reply arrives, so the model server has finished before the synthesis starts.
+  Do not remove it while the model and the synthesis share one GPU. The marker
+  **carries the stop event of its own reply**: that is what makes a buffered
+  reply drop itself after an interrupt instead of being spoken over the next
+  take.
+- **One stop event per reply** (`playback.py`): a single application-wide event
+  had to be cleared before the next reply, and the clear ran in the OLD
+  exchange's worker after a new take had already set it - the interrupt was lost
+  (problem 1 of the plan). Never reintroduce a shared, cleared event.
 - **LLM history rollback** (`llm.py`): the user message is appended inside
   `try`; on exception it is popped to keep user/assistant pairs consistent.
   History is trimmed to `LLM_HISTORY_MAX_PAIRS` pairs after each exchange.
 - **Sentence streaming** (`llm.py`): output is split on sentence-ending
   punctuation followed by whitespace and an uppercase letter
   (`(?<=[.!?])\s+(?=[A-ZА-Я])`); the rest is flushed at the end of the stream.
-- **Audio normalization** (`app.py`): peaks are normalized before STT; a peak
-  below 0.01 is not boosted.
+- **Audio normalization** (`recorder.py`): peaks are normalized before STT; a
+  peak below 0.01 is not boosted.
 - **Windows audio**: TTS plays through `winsound` to bypass PortAudio/MME
-  driver issues, with a 150 ms silence lead-in. `config.AUDIO_LOCK`
-  serialises PortAudio init/teardown between the recording and playback paths.
+  driver issues, with a 150 ms silence lead-in. `config.AUDIO_LOCK` serialises
+  PortAudio init and teardown between the recording and the sounddevice
+  playback path only - the winsound path takes no lock at all (see tts.py).
 - **LLM server subprocess**: started in `LLMServerController.start()` with
   layers and context from `config` (hardware detection), polled with
   `LLMManager.check_connection()`, terminated in `quit_app()` with a 5-second
   kill fallback, output in `logs/llm_server.log`. An **adopted** server (one
   that was already listening) has no subprocess behind it, so `shutdown()` is
   a no-op for it by construction - do not "fix" that into terminating it.
-- **Aborting speech** (`app.py` `_abort_tts`): clearing the queue is not
-  enough, because the TTS thread buffers the sentences it has already taken
-  from it. The sentinel is what makes that thread drop them; without it a
-  failed exchange is spoken after the next reply.
-- **Known v0 issues** (interrupt race, 20 s record limit, recording during
-  loading) are listed in `docs/refactoring.md` with the step that fixes each.
-  Do not fix them outside their step.
+- **Aborting speech** (`app.py` `_answer`): emptying the queue is not enough,
+  because the TTS thread buffers the sentences it has already taken from it. A
+  `_ReplyEnd` marker whose event is set is what makes that thread drop them;
+  without it a failed exchange is spoken after the next reply. For the same
+  reason every exchange that opened the model stream must always end with one
+  marker.
+- **A take during the previous exchange** (`app.py`): it is neither dropped nor
+  run in parallel. `_finalize_recording` collects the take BEFORE it waits for
+  `_exchange_lock` (a later take would otherwise replace the chunk buffer it is
+  about to read), and the previous exchange gives the lock up quickly because
+  the new take already set its stop event. An exchange whose event was set
+  before the model call shows the recognized phrase and asks nothing.
+- **Known v0 issues** are listed in `docs/refactoring.md` with the step that
+  fixes each. Do not fix them outside their step.
 
 ## Testing
 
@@ -223,9 +286,13 @@ python -m unittest discover -s tests -v
 ```
 
 Test files are named after the module they cover (`tests/test_paths.py` for
-`speakloop/paths.py`). The suite stubs subprocesses, the OS and the network and
-downloads nothing. `tests/test_config.py` imports the real `config` of the
-checkout (and so torch).
+`speakloop/paths.py`). The suite stubs subprocesses, the OS, the audio devices
+and the network, and downloads nothing. `tests/test_config.py` imports the real
+`config` of the checkout (and so torch). `tests/test_recorder.py` runs the real
+capture thread against a stand-in `sd.InputStream`, so it is the one file with
+short waits in it; `tests/test_tts.py` replaces the synthesis backend and never
+loads a model; `tests/test_languages.py` imports the profile modules alone and
+needs neither config nor torch.
 
 ## Working Rules
 

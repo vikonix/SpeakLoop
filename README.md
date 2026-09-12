@@ -4,7 +4,7 @@ AI-powered voice tutor for practicing foreign languages through real conversatio
 
 ## About
 
-SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Hold Space to speak and release it to get a response: the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
+SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Press Space to speak: the recording stops by itself once you stop talking, then the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
 
 The application is being moved to a new structure step by step. It runs from the `speakloop/` package and serves the local model with the official `llama-server` binary from llama.cpp.
 
@@ -13,7 +13,7 @@ The application is being moved to a new structure step by step. It runs from the
 - **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
 - **STT**: faster-whisper (Whisper small)
 - **LLM**: local GGUF model via `llama-server` (llama.cpp) or LM Studio
-- **TTS**: Kokoro (hexgrad/Kokoro-82M)
+- **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish
 - **Python**: 3.11 or 3.12
 
 ## Requirements
@@ -133,10 +133,14 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 
 The configuration has three layers, lowest priority first:
 
-1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): language pair, persona prompt, LLM backend and server address, generation parameters, Whisper and Kokoro settings.
+1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): the language profile ([`speakloop/languages/`](speakloop/languages)), persona prompt, LLM backend and server address, generation parameters, recognition and synthesis settings.
 2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`), GPU layers and context size of the local model, audio devices.
 3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
    - `max_record_seconds`: limit of one recording, in seconds (default 20).
+   - `silence_timeout`: seconds of silence, after you have started to speak, before the recording stops by itself (default 3).
+   - `silence_threshold`: loudness (RMS, 0..1) above which the microphone counts as hearing speech (default 0.01). Raise it in a noisy room, lower it for a quiet voice.
+   - `accent`: variant of the practiced language, `"american"` (default) or `"british"`. It selects the synthesis language code and the list of voices.
+   - `voice`: voice of the partner. It must belong to the variant above; absent (default) means the variant default (`af_heart` for american, `bf_emma` for british).
    - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
    - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
@@ -168,7 +172,8 @@ Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_
 
 ## Controls
 
-- **Space (hold)**: record speech
+- **Space** or the microphone button: start a recording. It stops by itself after `silence_timeout` seconds of silence, on the next press, or at `max_record_seconds`. While it runs, the button shows the live microphone level.
+- **Space** or the microphone button during a reply: stop the reply and start recording at once.
 - **ESC**: quit
 
 ## Tests
@@ -196,7 +201,11 @@ SpeakLoop/
 │   ├── stt.py               Speech-to-Text (faster-whisper)
 │   ├── llm.py               LLM client (OpenAI-compatible)
 │   ├── llm_server_ctl.py    starts and stops the llama-server subprocess
-│   ├── tts.py               Text-to-Speech (Kokoro)
+│   ├── tts.py               Text-to-Speech (Kokoro, Supertonic) and playback
+│   ├── recorder.py          microphone capture and the automatic stop
+│   ├── audio_io.py          shared audio-device plumbing
+│   ├── playback.py          the stop event of the current reply
+│   ├── languages/           language profiles (english.py, spanish.py)
 │   ├── config.py            configuration layers
 │   ├── bootstrap.py         early process setup, logging
 │   ├── lifecycle.py         process exit and relaunch helpers

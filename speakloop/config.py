@@ -14,11 +14,17 @@ A missing or broken file leaves the lower layers in effect: problems are
 reported to stderr instead of crashing startup, because both files are
 optional and settings.json is edited by hand.
 
-This module also prepares the Hugging Face environment (HF_HOME and the offline
-switch). Those variables are read when huggingface_hub is imported, so this
-module has to be imported BEFORE faster_whisper and kokoro - app.py imports it
-first. For the same reason the fetchers and the hardware probe must never
-import it.
+The language of the lesson is resolved here too: speakloop/languages/ holds one
+pure-data profile per language, and every per-run language constant
+(TARGET_LANGUAGE, WHISPER_LANGUAGE, TTS_*) is derived from the active profile
+and its variant. Adding a language is a new profile module plus one entry in
+LANGUAGE_PROFILES, never a branch in the code.
+
+This module also prepares the model-download environment (HF_HOME, the
+Supertonic cache and the offline switch). Those variables are read when
+huggingface_hub is imported, so this module has to be imported BEFORE
+faster_whisper, kokoro and supertonic - app.py imports it first. For the same
+reason the fetchers and the hardware probe must never import it.
 """
 
 import os
@@ -29,6 +35,7 @@ from functools import partial
 from pathlib import Path
 
 from speakloop import llama_server_fetch, loader, model_fetch, models_info, paths
+from speakloop.languages import english, spanish
 
 # What this machine writes (settings, downloads, logs). In a clone this is the
 # project directory; installed as a package it is the OS user-data directory.
@@ -57,6 +64,10 @@ _USER = loader.read_json(CONFIG_DIR / "settings.json")
 # a typo in a hand-edited file otherwise changes nothing and says nothing.
 _KNOWN_USER_KEYS = {
     "max_record_seconds",
+    "silence_timeout",
+    "silence_threshold",
+    "accent",
+    "voice",
     "color_theme",
     "llm_backend",
     "lm_studio_host",
@@ -76,6 +87,94 @@ _num = partial(loader.user_number, _USER)
 _path = partial(loader.user_path, _USER, CONFIG_DIR)
 
 # =====================================================================
+# Language of the lesson (profiles in speakloop/languages/)
+# =====================================================================
+# Resolved before the download section below, which needs to know the active
+# synthesis backend: only that backend's model has to be cached before the Hub
+# can be switched off.
+#
+# The profile format is documented in speakloop/languages/__init__.py.
+LANGUAGE_PROFILES = {
+    "english": english.PROFILE,
+    "spanish": spanish.PROFILE,
+}
+
+# The practiced language is FIXED to English in this version. Both profiles are
+# complete, but the lesson prompt and the language selector arrive together in
+# stage 3 of docs/refactoring.md, and a language the prompt does not know would
+# only produce a lesson in the wrong language. No settings key, so nothing
+# promises a choice that does not work yet.
+PRACTICE_LANGUAGE = "english"
+_LANG_PROFILE = LANGUAGE_PROFILES[PRACTICE_LANGUAGE]
+
+# The language as the window and the system prompt name it.
+TARGET_LANGUAGE = _LANG_PROFILE["display_name"]
+
+# ISO code faster-whisper transcribes with: the learner speaks the practiced
+# language, so this follows the profile.
+WHISPER_LANGUAGE = _LANG_PROFILE["whisper_language"]
+
+# Variant within the language, read from settings.json ("accent"). Changing it
+# needs a restart: the synthesis backend, its language code and the selectable
+# voices are all wired from the variant when the model is loaded.
+#   English variants: "american" (General American), "british" (RP).
+_VARIANT_MAP = _LANG_PROFILE["variants"]
+ACCENT = _USER.get("accent", _LANG_PROFILE["default_variant"])
+if not isinstance(ACCENT, str) or ACCENT not in _VARIANT_MAP:
+    # (isinstance guards the dict lookup: an unhashable value such as a list
+    # would raise TypeError instead of falling back.)
+    print(f"[config] settings.json: unknown accent {ACCENT!r} for "
+          f"{PRACTICE_LANGUAGE} (expected one of {sorted(_VARIANT_MAP)}); "
+          f"using {_LANG_PROFILE['default_variant']!r}", file=sys.stderr)
+    ACCENT = _LANG_PROFILE["default_variant"]
+_VARIANT = _VARIANT_MAP[ACCENT]
+
+# Synthesis backend of the active variant - one of the keys of
+# speakloop.tts.TTS_BACKENDS ("kokoro" = Kokoro-82M on torch at 24 kHz,
+# "supertonic" = Supertonic 3 on ONNX at 44.1 kHz). Data, not a language
+# branch: Spanish selects another engine by profile alone.
+TTS_BACKEND_CHOICES = ("kokoro", "supertonic")
+TTS_BACKEND = _VARIANT.get("tts_backend", "kokoro")
+if TTS_BACKEND not in TTS_BACKEND_CHOICES:
+    print(f"[config] profile {PRACTICE_LANGUAGE}/{ACCENT}: unknown tts_backend "
+          f"{TTS_BACKEND!r} (expected one of {', '.join(TTS_BACKEND_CHOICES)}); "
+          f"using 'kokoro'", file=sys.stderr)
+    TTS_BACKEND = "kokoro"
+
+# Language code of the active variant, in the spelling its backend uses: Kokoro
+# takes single letters ("a" American, "b" British), Supertonic takes ISO codes.
+TTS_LANG_CODE = _VARIANT["tts_lang_code"]
+
+# Voice: the variant's default, unless settings.json names another voice OF THE
+# SAME VARIANT ("voice"). A voice of a different variant is rejected - it does
+# not match this variant's backend or language code.
+TTS_VOICE = _VARIANT["default_voice"]
+_user_voice = _USER.get("voice")
+if _user_voice is not None:
+    if _user_voice in _VARIANT["voices"]:
+        TTS_VOICE = _user_voice
+    else:
+        print(f"[config] settings.json: voice {_user_voice!r} is not a known "
+              f"{ACCENT} voice; using {TTS_VOICE!r}", file=sys.stderr)
+
+# Every voice of the active variant. They share its backend and language code,
+# so the Kokoro backend can pre-fetch them all in one online run.
+TTS_VOICES = _VARIANT["voices"]
+
+# Supertonic quality and speed trade-off: refinement steps per synthesis (more
+# is better and slower). The package range is wider, but 5..12 is the useful
+# band for sentence-length audio; a value outside it is clamped, not fatal.
+# Ignored by the Kokoro backend.
+TTS_TOTAL_STEPS = int(_VARIANT.get("total_steps", 8))
+if not 5 <= TTS_TOTAL_STEPS <= 12:
+    print(f"[config] profile {PRACTICE_LANGUAGE}/{ACCENT}: total_steps "
+          f"{TTS_TOTAL_STEPS} outside 5..12; clamping", file=sys.stderr)
+    TTS_TOTAL_STEPS = min(12, max(5, TTS_TOTAL_STEPS))
+
+# Word spoken by the synthesis warm-up pass, in the practiced language.
+TTS_WARMUP = _LANG_PROFILE["tts_warmup"]
+
+# =====================================================================
 # Local model cache (Hugging Face) - download once, then load offline
 # =====================================================================
 # faster-whisper and Kokoro load their weights through huggingface_hub, which
@@ -85,15 +184,38 @@ _path = partial(loader.user_path, _USER, CONFIG_DIR)
 MODEL_CACHE_DIR = model_fetch.MODEL_CACHE_DIR
 os.environ.setdefault("HF_HOME", str(MODEL_CACHE_DIR))
 
-# Offline gate. Once every repo THIS run loads is cached, the Hub is switched
+# Supertonic 3 (the Spanish backend) keeps its model in its own directory, NOT
+# under HF_HOME/hub: the package downloads with snapshot_download(local_dir=...)
+# into the directory named by SUPERTONIC_CACHE_DIR (whose own default would be
+# ~/.cache/supertonic3). Pinning it under model_cache/ keeps the weights next to
+# the code, like HF_HOME above. The package reads the variable on every call
+# rather than at import, but setting it here - before any supertonic import -
+# keeps the timing rule the same. model_fetch sets the same variable, so the
+# installer's download lands exactly where the app reads.
+os.environ.setdefault("SUPERTONIC_CACHE_DIR",
+                      str(model_fetch.DEFAULT_SUPERTONIC_CACHE_DIR))
+SUPERTONIC_CACHE_DIR = Path(os.environ["SUPERTONIC_CACHE_DIR"])
+
+# Offline gate. Once every model THIS run loads is cached, the Hub is switched
 # off and every start loads straight from disk with no network request. The set
 # is all-or-nothing, so it must name only what the run really loads: a repo the
-# run never touches would keep the Hub online for every model.
+# run never touches would keep the Hub online for every model. That is why the
+# synthesis model follows the active backend - requiring Kokoro under Supertonic
+# (or the other way round) would keep the Hub online for weights nobody loads.
 _CACHED_REPOS = (
-    models_info.WHISPER_SMALL.repo_id,
-    models_info.KOKORO.repo_id,
+    (models_info.WHISPER_SMALL.repo_id,)
+    + ((models_info.KOKORO.repo_id,) if TTS_BACKEND == "kokoro" else ())
 )
-if loader.models_cached(Path(os.environ["HF_HOME"]) / "hub", _CACHED_REPOS):
+# model_fetch.supertonic_cached() owns this check: it reads the same variable
+# set above and is pure filesystem work, so calling it here pulls in no
+# huggingface_hub import. It matters because the Supertonic download itself goes
+# through huggingface_hub - switching HF_HUB_OFFLINE on before the model exists
+# would block that first download.
+_TTS_MODEL_CACHED = (model_fetch.supertonic_cached()
+                     if TTS_BACKEND == "supertonic"
+                     else True)  # Kokoro is covered by _CACHED_REPOS above
+if _TTS_MODEL_CACHED and loader.models_cached(
+        Path(os.environ["HF_HOME"]) / "hub", _CACHED_REPOS):
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 else:
@@ -104,11 +226,9 @@ else:
     model_fetch.prepare_hf_env()
 
 # =====================================================================
-# Language Pair & Persona Configuration
+# Persona
 # =====================================================================
 NATIVE_LANGUAGE = "Russian"
-TARGET_LANGUAGE = "English"
-TARGET_LANG_CODE = "en"  # ISO code used for Whisper transcription routing
 
 # System prompt shaping the LLM behavior into a specific educational persona
 SYSTEM_PROMPT = (
@@ -125,6 +245,23 @@ SYSTEM_PROMPT = (
 # ("max_record_seconds"). minimum=1: a value of 0 would end every recording
 # at once.
 MAX_RECORD_SECONDS = _num("max_record_seconds", 20, minimum=1)
+
+# A take starts on one press and ends by itself once the speaker falls silent
+# (speakloop/recorder.py runs the detection on the capture thread). These two
+# tune that automatic stop; both come from settings.json, so a room or a
+# microphone can be accommodated without a code change.
+#   silence_timeout   - seconds of continuous silence, after speech has begun,
+#                       before the take is finished automatically.
+#   silence_threshold - RMS level (0..1) strictly above which a block of audio
+#                       counts as speech. Kept low: quiet speech may only reach
+#                       about 0.04 and the level is averaged over a whole
+#                       block, so too high a value never arms the timer. Raise
+#                       it only when a noisy room stops the take from ending.
+#                       The minimum is above zero because at 0 the noise floor
+#                       of the microphone counts as speech and every take runs
+#                       to MAX_RECORD_SECONDS.
+SILENCE_TIMEOUT = _num("silence_timeout", 3.0, minimum=0.5)
+SILENCE_THRESHOLD = _num("silence_threshold", 0.01, minimum=0.001)
 
 # =====================================================================
 # Compute devices
@@ -294,7 +431,8 @@ LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept in short-ter
 # Speech-to-Text (Whisper) Settings
 # =====================================================================
 # Loaded by repo id, the same one model_fetch downloads, so the load cannot go
-# to a repo the installer never fetched.
+# to a repo the installer never fetched. The language is WHISPER_LANGUAGE,
+# resolved from the language profile above.
 WHISPER_MODEL = models_info.WHISPER_SMALL.repo_id
 WHISPER_BEAM_SIZE = 1         # Beam size 1 provides optimal speed at temperature 0.0
 WHISPER_NO_SPEECH_THRESHOLD = 0.45
@@ -307,19 +445,18 @@ WHISPER_INITIAL_PROMPT = (
 )
 
 # =====================================================================
-# Text-to-Speech (Kokoro) Settings
-# =====================================================================
-KOKORO_REPO_ID = models_info.KOKORO.repo_id
-KOKORO_LANG_CODE = "a"        # 'a' = American English, 'b' = British English
-KOKORO_VOICE = "af_heart"     # Voice model identifier
-
-# =====================================================================
 # Shared Audio Device Settings
 # =====================================================================
-# Single lock coordinates PortAudio access between the mic (app.py) and
-# speaker (tts.py) streams. Both modules import this object - do not create
-# separate Lock instances or they will not mutually exclude each other.
+# Single lock coordinates PortAudio access between the microphone
+# (speakloop/recorder.py) and the speaker (speakloop/tts.py). Both modules
+# import this object - do not create separate Lock instances or they will not
+# mutually exclude each other.
 AUDIO_LOCK = threading.Lock()
+
+# Rate of the audio pipeline: the recorder downsamples every take to it and the
+# recognizer needs exactly this rate. NOT the synthesis rate, which belongs to
+# the active TTS backend (TTSManager.sample_rate).
+AUDIO_SAMPLE_RATE = 16_000
 
 AUDIO_CHANNELS = 1           # Mono for both recording and playback
 AUDIO_LATENCY = None         # None -> OS default shared-mode latency

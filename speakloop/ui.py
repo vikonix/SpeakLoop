@@ -50,11 +50,12 @@ from speakloop import config
 # controller never writes the name at all.
 PARTNER_NAME = "Emma"
 
-# The instruction line under the mic button, per state.
+# The instruction line under the mic button, per state. A take starts on one
+# press and ends by itself after a pause, so the wording says press, never hold.
 INSTRUCTION_LOADING = "Loading components..."
-INSTRUCTION_READY_FIRST = "Hold SPACE or click Button to speak. Press ESC to quit."
-INSTRUCTION_READY = "Hold SPACE or click Button to speak."
-INSTRUCTION_RECORDING = "Release key or click button when finished speaking."
+INSTRUCTION_READY_FIRST = "Press SPACE or the button to speak. Press ESC to quit."
+INSTRUCTION_READY = "Press SPACE or the button to speak."
+INSTRUCTION_RECORDING = "Speak. Recording stops after a pause, or press again."
 INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and restart."
 
 # Window title and size. Here with the rest of the wording: the title carries
@@ -69,6 +70,14 @@ _MIC_R_OUTER = 42
 _MIC_R_INNER = 34
 _MIC_RING_WIDTH = 3
 
+# Live-level mapping of the recording indicator: the outer ring stays at full
+# radius and a solid red disc inside it grows with the input level, from
+# _MIC_LEVEL_MIN_R up to the inner radius (just short of the ring). An input RMS
+# at or above _MIC_LEVEL_FULL_RMS fills it to the inner radius; it never shrinks
+# below the minimum radius, so the microphone stays visibly open in silence.
+_MIC_LEVEL_FULL_RMS = 0.08
+_MIC_LEVEL_MIN_R = 10
+
 
 @dataclass(frozen=True)
 class ViewCallbacks:
@@ -79,9 +88,13 @@ class ViewCallbacks:
     each binding is specific enough that the event carries nothing the controller
     needs (the space bindings are already space-only), and a handler without an
     event argument can also be called from the controller itself.
+
+    There is no button-release handler: one press starts a take and the next one
+    ends it, so a release means nothing. The KEY release is still reported, and
+    only because holding a key makes Tk repeat KeyPress - the controller uses it
+    to tell one physical press from the repeats.
     """
     on_mic_pressed: Callable[[], None]
-    on_mic_released: Callable[[], None]
     on_space_pressed: Callable[[], None]
     on_space_released: Callable[[], None]
     on_quit: Callable[[], None]
@@ -259,13 +272,13 @@ class TutorView:
             font=(FONT_FAMILY, FONT_SIZE_CHAT))
 
     def bind_events(self):
-        # Push-to-talk. The bindings are space-only, so the handlers need no
-        # keysym check; holding the key repeats KeyPress, which the controller
-        # filters with its own "already recording" state.
+        # One press starts a take, the next one ends it. The bindings are
+        # space-only, so the handlers need no keysym check; holding the key
+        # repeats KeyPress, which the controller filters with the release
+        # binding below.
         self.root.bind("<KeyPress-space>", lambda _e: self._cb.on_space_pressed())
         self.root.bind("<KeyRelease-space>", lambda _e: self._cb.on_space_released())
         self.btn_canvas.bind("<ButtonPress-1>", lambda _e: self._cb.on_mic_pressed())
-        self.btn_canvas.bind("<ButtonRelease-1>", lambda _e: self._cb.on_mic_released())
         # Both ways out of the application end in the same controller handler.
         self.root.bind("<Escape>", lambda _e: self._cb.on_quit())
         self.root.protocol("WM_DELETE_WINDOW", self._cb.on_quit)
@@ -304,6 +317,42 @@ class TutorView:
         self.btn_canvas.create_text(
             cx, cy, text=emoji, font=(FONT_FAMILY, FONT_SIZE_EMOJI),
             fill=THEME["text_bright"])
+
+    def set_record_level(self, level: float):
+        """Redraw the recording button with a fill driven by the input level.
+
+        The take ends by itself after a pause, so a static red glyph would not
+        tell the learner that the microphone hears them. The outer ring is drawn
+        exactly as in the recording state (full radius, red); inside it a solid
+        red disc follows the live level (``level`` is the RMS in 0..1 reported
+        by the recorder): quiet gives a small disc (the automatic stop is near),
+        louder fills it up to the inner radius, just short of the ring. Leaving
+        the recording state is the next draw_mic_button call, which repaints the
+        button from scratch.
+        """
+        cx = cy = _MIC_CENTER
+        # Map the RMS to a 0..1 fraction, then to the disc radius; clamped, so a
+        # loud peak cannot grow the fill past the inner radius into the ring.
+        fraction = max(0.0, min(1.0, level / _MIC_LEVEL_FULL_RMS))
+        r_level = _MIC_LEVEL_MIN_R + fraction * (_MIC_R_INNER - _MIC_LEVEL_MIN_R)
+
+        self.btn_canvas.delete("all")
+        # Outer ring: identical to draw_mic_button("recording") - fixed, red.
+        self.btn_canvas.create_oval(
+            cx - _MIC_R_OUTER, cy - _MIC_R_OUTER,
+            cx + _MIC_R_OUTER, cy + _MIC_R_OUTER,
+            fill="", outline=THEME["bad"], width=_MIC_RING_WIDTH)
+        # Dark inner track, so the red fill is visible when it shrinks.
+        self.btn_canvas.create_oval(
+            cx - _MIC_R_INNER, cy - _MIC_R_INNER,
+            cx + _MIC_R_INNER, cy + _MIC_R_INNER,
+            fill=THEME["mic_recording_bg"], outline="")
+        # The level indicator itself: a solid red disc from the minimum radius
+        # to the inner radius. No glyph on top - the disc is the indicator, and
+        # the bounding box of an emoji does not share the disc's center.
+        self.btn_canvas.create_oval(
+            cx - r_level, cy - r_level, cx + r_level, cy + r_level,
+            fill=THEME["bad"], outline="")
 
     # ------------------------------------------------------------------
     # Chat transcript
@@ -398,8 +447,13 @@ class TutorView:
         self.update_instruction(INSTRUCTION_READY)
 
     def enter_recording(self):
-        """The microphone is open."""
-        self.draw_mic_button("recording")
+        """The microphone is open.
+
+        The level indicator is drawn at once (at zero), so the button shows the
+        open microphone from the first moment instead of waiting for the first
+        level report from the capture thread.
+        """
+        self.set_record_level(0.0)
         self.update_status("Recording...", THEME["bad"])
         self.update_instruction(INSTRUCTION_RECORDING)
 
@@ -451,5 +505,12 @@ class TutorView:
         self.update_status("Initialization Failed", THEME["bad"])
 
     def recording_failed(self):
-        """The microphone input stream failed."""
+        """The microphone input stream failed: the take is gone.
+
+        The button leaves the recording look, because nothing is being
+        recorded any more and the level indicator would keep the last disc it
+        drew on the screen.
+        """
+        self.draw_mic_button("idle")
         self.update_status("Recording Error", THEME["bad"])
+        self.update_instruction(INSTRUCTION_READY)

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Valeriy Kovalev
 
+"""Speech recognition: faster-whisper on the language of the active profile."""
+
 import numpy as np
 # torch before faster_whisper, and the order must stay: on Windows the CUDA
 # build of torch puts its cuBLAS and cuDNN libraries on the DLL search path when
@@ -14,8 +16,8 @@ from speakloop import config
 
 COMPUTE_TYPE = "float16" if config.STT_DEVICE == "cuda" else "int8"
 
-# Technical transcription configuration
-WHISPER_SAMPLE_RATE = 16_000   # Whisper architecture requires strict 16kHz audio layouts
+# Technical transcription configuration. The audio rate is config.AUDIO_SAMPLE_RATE
+# (16 kHz), which the Whisper architecture requires and the recorder delivers.
 WHISPER_VAD_MIN_SPEECH_MS = 250   # Shortest duration considered as valid spoken word segments
 WHISPER_VAD_MIN_SILENCE_MS = 500  # Silence gap thickness required before triggering split boundaries
 WHISPER_VAD_SPEECH_PAD_MS = 300   # Padding attached around text fragments to avoid chopping words
@@ -39,17 +41,26 @@ class STTManager:
         """Runs a mock inference pass to eliminate initial latency."""
         if self.model is None:
             raise RuntimeError("STT model not loaded. Call load_model() first.")
-        dummy_audio = np.zeros(WHISPER_SAMPLE_RATE, dtype=np.float32)
-        list(self.model.transcribe(dummy_audio, language=config.TARGET_LANG_CODE, beam_size=config.WHISPER_BEAM_SIZE, vad_filter=True)[0])
+        dummy_audio = np.zeros(config.AUDIO_SAMPLE_RATE, dtype=np.float32)
+        list(self.model.transcribe(dummy_audio,
+                                   language=config.WHISPER_LANGUAGE,
+                                   beam_size=config.WHISPER_BEAM_SIZE,
+                                   vad_filter=True)[0])
 
     def transcribe(self, audio: np.ndarray) -> str:
-        """Passes the audio waveform data into Whisper for text extraction."""
+        """Passes the audio waveform data into Whisper for text extraction.
+
+        The language is fixed to the one of the active profile
+        (config.WHISPER_LANGUAGE) and never detected: the learner practices that
+        language, and automatic detection on a short take of a beginner's speech
+        lands on the wrong language often enough to break the lesson.
+        """
         if self.model is None:
             raise RuntimeError("STT model not loaded. Call load_model() first.")
 
         segments, _info = self.model.transcribe(
             audio,
-            language=config.TARGET_LANG_CODE,
+            language=config.WHISPER_LANGUAGE,
             task="transcribe",
             beam_size=config.WHISPER_BEAM_SIZE,
             vad_filter=True,

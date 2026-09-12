@@ -68,16 +68,25 @@ class ModelBindingTests(unittest.TestCase):
     def test_whisper_is_loaded_by_the_catalogue_repo_id(self):
         self.assertEqual(config.WHISPER_MODEL, models_info.WHISPER_SMALL.repo_id)
 
-    def test_kokoro_is_loaded_by_the_catalogue_repo_id(self):
-        self.assertEqual(config.KOKORO_REPO_ID, models_info.KOKORO.repo_id)
-
     def test_the_gguf_path_is_the_catalogue_file_in_models(self):
         self.assertEqual(Path(config.EXTERNAL_MODEL_PATH),
                          paths.models_dir() / models_info.GGUF_CHAT.filename)
 
+    def test_the_offline_gate_names_the_model_of_the_active_backend(self):
+        # The gate is all-or-nothing: a repo that this run never loads would
+        # keep the Hub online forever, and a repo it does load but that is not
+        # listed would be switched offline before it was downloaded.
+        self.assertIn(models_info.WHISPER_SMALL.repo_id, config._CACHED_REPOS)
+        if config.TTS_BACKEND == "kokoro":
+            self.assertIn(models_info.KOKORO.repo_id, config._CACHED_REPOS)
+        else:
+            # Supertonic keeps its weights outside the hub cache, so it is
+            # checked by its own predicate instead.
+            self.assertNotIn(models_info.KOKORO.repo_id, config._CACHED_REPOS)
+
 
 class EnvironmentTests(unittest.TestCase):
-    """What the import leaves behind for huggingface_hub to read."""
+    """What the import leaves behind for the download libraries to read."""
 
     def test_hf_home_is_set(self):
         # setdefault in config: either the model cache or a value the user set
@@ -85,20 +94,96 @@ class EnvironmentTests(unittest.TestCase):
         # imported, because huggingface_hub reads it at its own import.
         self.assertIn("HF_HOME", os.environ)
 
+    def test_the_supertonic_cache_is_pinned(self):
+        # The supertonic package reads this variable on every call; model_fetch
+        # sets the same one, so the installer's download and the app's load
+        # cannot end up in different directories.
+        self.assertIn("SUPERTONIC_CACHE_DIR", os.environ)
+        self.assertEqual(Path(os.environ["SUPERTONIC_CACHE_DIR"]),
+                         config.SUPERTONIC_CACHE_DIR)
+
     def test_logs_go_to_the_log_directory(self):
         self.assertEqual(Path(config.LOG_FILE).parent, paths.log_dir())
         self.assertEqual(Path(config.LLM_SERVER_LOG_FILE).parent,
                          paths.log_dir())
 
 
+class LanguageTests(unittest.TestCase):
+    """Every per-run language constant comes from the active profile."""
+
+    def setUp(self):
+        self.profile = config.LANGUAGE_PROFILES[config.PRACTICE_LANGUAGE]
+        self.variant = self.profile["variants"][config.ACCENT]
+
+    def test_the_practiced_language_has_a_profile(self):
+        self.assertIn(config.PRACTICE_LANGUAGE, config.LANGUAGE_PROFILES)
+
+    def test_english_and_spanish_are_both_assembled(self):
+        self.assertEqual(set(config.LANGUAGE_PROFILES), {"english", "spanish"})
+
+    def test_the_language_is_english_in_this_version(self):
+        # The lesson prompt and the language selector arrive together in stage
+        # 3; until then a Spanish lesson would run on an English prompt.
+        self.assertEqual(config.PRACTICE_LANGUAGE, "english")
+
+    def test_the_display_name_comes_from_the_profile(self):
+        self.assertEqual(config.TARGET_LANGUAGE, self.profile["display_name"])
+
+    def test_the_recognition_language_comes_from_the_profile(self):
+        self.assertEqual(config.WHISPER_LANGUAGE,
+                         self.profile["whisper_language"])
+
+    def test_the_warmup_word_comes_from_the_profile(self):
+        self.assertEqual(config.TTS_WARMUP, self.profile["tts_warmup"])
+
+    def test_the_variant_exists_in_the_profile(self):
+        self.assertIn(config.ACCENT, self.profile["variants"])
+
+    def test_the_synthesis_wiring_comes_from_the_variant(self):
+        self.assertEqual(config.TTS_BACKEND,
+                         self.variant.get("tts_backend", "kokoro"))
+        self.assertEqual(config.TTS_LANG_CODE, self.variant["tts_lang_code"])
+        self.assertEqual(list(config.TTS_VOICES), list(self.variant["voices"]))
+
+    def test_the_backend_is_one_of_the_known_names(self):
+        self.assertIn(config.TTS_BACKEND, config.TTS_BACKEND_CHOICES)
+
+    def test_the_voice_belongs_to_the_active_variant(self):
+        # A voice of another variant would be sent to another backend, or to
+        # the same backend with the wrong language code.
+        self.assertIn(config.TTS_VOICE, config.TTS_VOICES)
+
+    def test_total_steps_is_inside_the_useful_band(self):
+        self.assertGreaterEqual(config.TTS_TOTAL_STEPS, 5)
+        self.assertLessEqual(config.TTS_TOTAL_STEPS, 12)
+
+    def test_accent_and_voice_are_known_keys(self):
+        self.assertIn("accent", config._KNOWN_USER_KEYS)
+        self.assertIn("voice", config._KNOWN_USER_KEYS)
+
+
 class UserSettingTests(unittest.TestCase):
-    """The one settings.json key of this step, validated like Mimora's."""
+    """The settings.json keys of this step, validated like Mimora's."""
 
     def test_max_record_seconds_is_a_known_key(self):
         self.assertIn("max_record_seconds", config._KNOWN_USER_KEYS)
 
     def test_max_record_seconds_is_at_least_one(self):
         self.assertGreaterEqual(config.MAX_RECORD_SECONDS, 1)
+
+    def test_the_silence_keys_are_known(self):
+        self.assertIn("silence_timeout", config._KNOWN_USER_KEYS)
+        self.assertIn("silence_threshold", config._KNOWN_USER_KEYS)
+
+    def test_the_silence_timeout_leaves_room_to_breathe(self):
+        # Below half a second an ordinary pause between two words would end the
+        # take in the middle of a sentence.
+        self.assertGreaterEqual(config.SILENCE_TIMEOUT, 0.5)
+
+    def test_the_silence_threshold_is_above_zero(self):
+        # At zero the noise floor of the microphone counts as speech, the timer
+        # is never armed, and every take runs to the time limit.
+        self.assertGreater(config.SILENCE_THRESHOLD, 0)
 
     def test_the_example_file_names_only_known_keys(self):
         # settings.example.json is what a user copies; a key there that config
@@ -108,6 +193,15 @@ class UserSettingTests(unittest.TestCase):
         data = json.loads(example.read_text(encoding="utf-8"))
         keys = {key for key in data if not key.startswith("_")}
         self.assertLessEqual(keys, config._KNOWN_USER_KEYS)
+
+
+class AudioSettingTests(unittest.TestCase):
+    """The rate of the audio pipeline, which two modules have to agree on."""
+
+    def test_the_pipeline_rate_is_the_one_whisper_needs(self):
+        # The recorder downsamples every take to this rate and faster-whisper
+        # accepts no other one.
+        self.assertEqual(config.AUDIO_SAMPLE_RATE, 16_000)
 
 
 class ColorThemeTests(unittest.TestCase):
