@@ -173,8 +173,8 @@ speakloop = "speakloop.cli:main"
 
 # Discovered rather than listed by hand, so a new subpackage cannot be lost
 # from the list. namespaces = false keeps the search to directories with an
-# __init__.py: the root main.py shim, install.py, llm_server/, tests/ and tools/
-# are not part of the package.
+# __init__.py: the root main.py shim, install.py, tests/ and tools/ are not
+# part of the package.
 [tool.setuptools.packages.find]
 include = ["speakloop*"]
 namespaces = false

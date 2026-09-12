@@ -13,16 +13,51 @@ from speakloop import config
 # Technical configuration parameters
 LLM_TIMEOUT = 30.0
 
+# Model name sent in every request. Both backends ignore it - llama-server
+# serves the one GGUF it was started with and LM Studio the one it has loaded -
+# but the OpenAI client requires the field, so it is a placeholder and not a
+# setting.
+PLACEHOLDER_MODEL = "local-model"
+
 # Compiled once at import time - splits on sentence-ending punctuation only when
 # followed by an uppercase letter, avoiding false splits on "Mr. Smith" or "1.5 sec".
 _SENTENCE_END = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я])')
 
 
+def error_message(error: Exception) -> str:
+    """Short text of a failed request, for the window.
+
+    str() of an OpenAI API error is the whole HTTP problem with the JSON body
+    appended as a Python dict, which is unreadable in a chat window. The
+    server's own sentence ("No models loaded...") is the only part the user
+    can act on, so it is what this returns; the full text stays in the log,
+    where it is the thing that helps.
+
+    The body is read by attribute and not by exception type: every error the
+    OpenAI client raises for an HTTP status carries the parsed JSON as .body,
+    and a transport failure (no server listening) carries none, which is
+    exactly when str(error) is already the short answer.
+
+    Two shapes are read, because the client unwraps the outer "error" key
+    before storing the body: {"message": ..., "type": ...} is what actually
+    arrives here, and {"error": {"message": ...}} is the same answer as the
+    server wrote it. An unwrapped plain string is the third.
+    """
+    detail = getattr(error, "body", None)
+    if isinstance(detail, dict):
+        detail = detail.get("message", detail.get("error"))
+        if isinstance(detail, dict):
+            detail = detail.get("message")
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    return str(error) or error.__class__.__name__
+
+
 class LLMManager:
     def __init__(self, model: str = None):
         self.client = None
-        # Model name sent in API requests; defaults to LM Studio value from config
-        self.model = model or config.LM_STUDIO_MODEL
+        # Model name sent in API requests; see PLACEHOLDER_MODEL
+        self.model = model or PLACEHOLDER_MODEL
         # Chat history buffer starting with the system instructions
         self.messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
         # Protects self.messages from concurrent reads/writes across threads
@@ -70,6 +105,9 @@ class LLMManager:
         """
         Streams text from the LLM, parses sentences using regex on-the-fly,
         and pushes completed strings into the TTS queue.
+
+        Raises the API error when the request fails, with the conversation
+        history rolled back to the state before the call.
         """
         if self.client is None:
             raise RuntimeError("LLM client not initialized. Call init_client() first.")
@@ -83,7 +121,12 @@ class LLMManager:
                 self.messages.append({"role": "user", "content": user_text})
                 messages_snapshot = list(self.messages)
 
-            stream_response = self.client.chat.completions.create(
+            # A context manager and not a bare call: the loop below breaks out
+            # of a stream the server is still generating into. Closing the
+            # response is what tells the server to stop - without it the model
+            # keeps producing an answer nobody will hear, and the next request
+            # waits behind it.
+            with self.client.chat.completions.create(
                 model=self.model,
                 messages=messages_snapshot,
                 temperature=config.LLM_TEMPERATURE,
@@ -91,33 +134,32 @@ class LLMManager:
                 top_p=config.LLM_TOP_P,
                 stream=True,
                 timeout=LLM_TIMEOUT,
-            )
+            ) as stream_response:
+                full_reply = ""
+                sentence_buffer = ""
 
-            full_reply = ""
-            sentence_buffer = ""
+                for chunk in stream_response:
+                    if stop_event.is_set():
+                        logging.info("LLM streaming interrupted by user stop event.")
+                        break
 
-            for chunk in stream_response:
-                if stop_event.is_set():
-                    logging.info("LLM streaming interrupted by user stop event.")
-                    break
+                    token = chunk.choices[0].delta.content or ""
+                    if not token:
+                        continue
 
-                token = chunk.choices[0].delta.content or ""
-                if not token:
-                    continue
+                    if token_callback:
+                        token_callback(token)
+                    full_reply += token
+                    sentence_buffer += token
 
-                if token_callback:
-                    token_callback(token)
-                full_reply += token
-                sentence_buffer += token
-
-                parts = _SENTENCE_END.split(sentence_buffer)
-                if len(parts) > 1:
-                    sentence_buffer = parts.pop()
-                    for item in parts:
-                        text_to_speak = item.strip()
-                        if text_to_speak:
-                            logging.info(f"Queued sentence to TTS: {text_to_speak!r}")
-                            tts_queue.put(text_to_speak)
+                    parts = _SENTENCE_END.split(sentence_buffer)
+                    if len(parts) > 1:
+                        sentence_buffer = parts.pop()
+                        for item in parts:
+                            text_to_speak = item.strip()
+                            if text_to_speak:
+                                logging.info(f"Queued sentence to TTS: {text_to_speak!r}")
+                                tts_queue.put(text_to_speak)
 
             # Flush any residual text remaining inside the buffer
             remaining_text = sentence_buffer.strip()
@@ -139,7 +181,11 @@ class LLMManager:
                 if self.messages and self.messages[-1].get("role") == "user":
                     self.messages.pop()
             logging.exception("LLM Stream error:")
-            return "Sorry, please try again."
+            # Raised, not answered with an apology string: the caller streams
+            # the tokens into the window itself and would otherwise show an
+            # empty reply and a status bar that still says "Thinking". What the
+            # user is told about a failure is the window's decision.
+            raise
 
     def _trim_history(self):
         """Prunes conversation history to the most recent LLM_HISTORY_MAX_PAIRS turns.

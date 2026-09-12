@@ -6,13 +6,13 @@ AI-powered voice tutor for practicing foreign languages through real conversatio
 
 SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Hold Space to speak and release it to get a response: the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
 
-The application is being moved to a new structure step by step. It now runs from the `speakloop/` package; the local model server is still the old `llm_server/` (llama-cpp-python) until it is replaced by the official `llama-server`.
+The application is being moved to a new structure step by step. It runs from the `speakloop/` package and serves the local model with the official `llama-server` binary from llama.cpp.
 
 ## Tech Stack
 
 - **GUI**: Tkinter
 - **STT**: faster-whisper (Whisper small)
-- **LLM**: local GGUF model via `llm_server/` or LM Studio
+- **LLM**: local GGUF model via `llama-server` (llama.cpp) or LM Studio
 - **TTS**: Kokoro (hexgrad/Kokoro-82M)
 - **Python**: 3.11 or 3.12
 
@@ -65,14 +65,6 @@ Useful flags:
 - `--skip-models`, `--skip-gguf`, `--skip-llm`: skip the model downloads, the GGUF download, or the whole LLM part (for LM Studio)
 
 On Windows, **Developer Mode** lets the model cache use symlinks. Without it the model downloads copy files instead, which uses more disk.
-
-**The current application also needs** the dependencies of its model server, until the application moves to `llama-server`:
-
-```bash
-pip install -r llm_server/requirements.txt
-```
-
-For CUDA-enabled `llama-cpp-python`, see [`llm_server/README.md`](llm_server/README.md).
 
 ### Manual installation
 
@@ -145,15 +137,13 @@ The configuration has three layers, lowest priority first:
 2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`), GPU layers and context size of the local model, audio devices.
 3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
    - `max_record_seconds`: limit of one recording, in seconds (default 20).
+   - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
+   - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
+   - `llama_server_path`: the `llama-server` binary to start. Empty (default) means `bin/llama/`, then a `llama-server` on PATH.
+   - `external_model_path`: a GGUF model of your own. Absent (default) means the downloaded model in `models/`.
+   - `external_n_ctx`: context size of the local model. Absent (default) means the value hardware detection wrote.
 
 Both files are optional. A broken or missing file leaves the lower layers in effect, and the problem is printed to the console. Restart the app to apply a change.
-
-The LLM backend is still selected in `speakloop/config.py`:
-
-```python
-LLM_BACKEND = "local_server"   # recommended: starts llm_server/server.py
-# LLM_BACKEND = "lm-studio"   # if using LM Studio
-```
 
 Models are loaded from `model_cache/`. When all models of a run are there, the app does not connect to the Hugging Face Hub at all.
 
@@ -169,7 +159,7 @@ speakloop                # console script, after `pip install -e .`
 
 `speakloop --version` prints the version, `speakloop --detect-hardware` rewrites `config/hardware_config.json`.
 
-With `LLM_BACKEND = "local_server"` the server starts automatically. With `LLM_BACKEND = "lm-studio"` start LM Studio first.
+With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first.
 
 Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_server.log` (the model server), `install.log` and `hwdetect.log` (kept across runs).
 
@@ -199,6 +189,7 @@ SpeakLoop/
 │   ├── app.py               GUI, thread orchestration, run()
 │   ├── stt.py               Speech-to-Text (faster-whisper)
 │   ├── llm.py               LLM client (OpenAI-compatible)
+│   ├── llm_server_ctl.py    starts and stops the llama-server subprocess
 │   ├── tts.py               Text-to-Speech (Kokoro)
 │   ├── config.py            configuration layers
 │   ├── bootstrap.py         early process setup, logging
@@ -210,7 +201,6 @@ SpeakLoop/
 │   ├── gguf_fetch.py        GGUF model download
 │   ├── llama_server_fetch.py  pinned llama-server binary
 │   └── detect_hardware.py   hardware probe, config/hardware_config.json
-├── llm_server/          standalone process for the local LLM (llama-cpp-python)
 ├── config/              settings.example.json (settings.json, hardware_config.json are local)
 ├── tests/               unit tests
 ├── tools/               maintainer tools (measure_model_sizes.py)

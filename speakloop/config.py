@@ -22,12 +22,13 @@ import it.
 """
 
 import os
+import shutil
 import sys
 import threading
 from functools import partial
 from pathlib import Path
 
-from speakloop import loader, model_fetch, models_info, paths
+from speakloop import llama_server_fetch, loader, model_fetch, models_info, paths
 
 # What this machine writes (settings, downloads, logs). In a clone this is the
 # project directory; installed as a package it is the OS user-data directory.
@@ -56,15 +57,22 @@ _USER = loader.read_json(CONFIG_DIR / "settings.json")
 # a typo in a hand-edited file otherwise changes nothing and says nothing.
 _KNOWN_USER_KEYS = {
     "max_record_seconds",
+    "llm_backend",
+    "lm_studio_host",
+    "llama_server_path",
+    "external_model_path",
+    "external_n_ctx",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
         print(f"[config] settings.json: unknown key {_key!r} ignored",
               file=sys.stderr)
 
-# Validated accessor for numeric settings.json values (reports and falls back
-# instead of raising).
+# Validated accessors for settings.json values (they report the problem and
+# fall back instead of raising). _path resolves a relative value against
+# CONFIG_DIR, the directory settings.json itself is in.
 _num = partial(loader.user_number, _USER)
+_path = partial(loader.user_path, _USER, CONFIG_DIR)
 
 # =====================================================================
 # Local model cache (Hugging Face) - download once, then load offline
@@ -147,45 +155,131 @@ STT_DEVICE = _model_device("STT_DEVICE", DEVICE)
 # =====================================================================
 # LLM Backend Settings
 # =====================================================================
-# Backend selection:
+# Backend selection, read from settings.json ("llm_backend"):
+#   "llama-server" - the official llama.cpp binary started automatically as a
+#                    subprocess (see resolve_llama_server_path() below)
 #   "lm-studio"    - external LM Studio app (must be running separately)
-#   "local_server" - llm_server/server.py started automatically as a subprocess
-LLM_BACKEND = "local_server"
+# There is no "no model" choice: a dialogue lesson cannot run without one.
+LLM_BACKEND_CHOICES = ("llama-server", "lm-studio")
+LLM_BACKEND = _USER.get("llm_backend", "llama-server")
+if LLM_BACKEND not in LLM_BACKEND_CHOICES:
+    print(f"[config] settings.json: unknown llm_backend {LLM_BACKEND!r} "
+          f"(expected one of {', '.join(LLM_BACKEND_CHOICES)}); "
+          f"using 'llama-server'", file=sys.stderr)
+    LLM_BACKEND = "llama-server"
 
 # =====================================================================
-# LM Studio backend (for "lm-studio" backend)
+# LM Studio backend (for the "lm-studio" backend)
 # =====================================================================
-LM_STUDIO_URL = "http://localhost:1234/v1"
+# Server address, read from settings.json ("lm_studio_host") so LM Studio can
+# run on another machine in the local network. Accepts "host", "host:port" or
+# a full "http://host:port" URL; the port defaults to LM Studio's 1234
+# (loader.server_url normalizes every spelling to the same base URL).
+LM_STUDIO_DEFAULT_PORT = 1234
+LM_STUDIO_HOST = _USER.get("lm_studio_host", "localhost:1234")
+if not isinstance(LM_STUDIO_HOST, str) or not LM_STUDIO_HOST.strip():
+    print(f"[config] settings.json: lm_studio_host must be a non-empty "
+          f"string, got {LM_STUDIO_HOST!r}; using 'localhost:1234'",
+          file=sys.stderr)
+    LM_STUDIO_HOST = "localhost:1234"
+LM_STUDIO_URL = loader.server_url(LM_STUDIO_HOST, LM_STUDIO_DEFAULT_PORT)
+# LM Studio checks no key, but the OpenAI client refuses to send an empty one.
 LM_STUDIO_API_KEY = "lm-studio"
-LM_STUDIO_MODEL = "local-model"
+# The model name is not here: LM Studio serves whatever is loaded and ignores
+# the field, so it configures nothing - see llm.PLACEHOLDER_MODEL.
 
 # =====================================================================
-# Local LLM Server (for "local_server" backend)
+# Local LLM Server (the "llama-server" backend)
 # =====================================================================
-LOCAL_SERVER_HOST = "127.0.0.1"
-LOCAL_SERVER_PORT = 8765
-LOCAL_SERVER_URL = f"http://{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}/v1"
-LOCAL_SERVER_API_KEY = "local"
-LOCAL_SERVER_MODEL = "local-model"
+# Address and credentials of the server SpeakLoop starts itself. It is
+# OpenAI-compatible and ignores the model name, so the client path is the same
+# one the "lm-studio" backend uses - only the address and the key differ.
+LLM_SERVER_HOST = "127.0.0.1"
+LLM_SERVER_PORT = 8765
+LLM_SERVER_URL = f"http://{LLM_SERVER_HOST}:{LLM_SERVER_PORT}/v1"
+# Shared secret between the two halves of this backend, NOT a placeholder:
+# llm_server_ctl passes it to the binary as --api-key and llm.py sends it back
+# as the bearer token. Without a key llama-server accepts every CORS origin, so
+# any page open in a browser could call 127.0.0.1:8765 and read the answer.
+LLM_SERVER_API_KEY = "local"
 
 # How long (seconds) to wait for the server to become ready after launching
-LOCAL_SERVER_STARTUP_TIMEOUT = 60
-
-# The server script. It exists only in a source checkout, next to the package:
-# llm_server/ is not part of the package.
-LOCAL_SERVER_SCRIPT = str(Path(__file__).resolve().parent.parent
-                          / "llm_server" / "server.py")
+LLM_SERVER_STARTUP_TIMEOUT = 60
 
 # =====================================================================
-# GGUF Model Settings (for the "local_server" backend)
+# llama-server binary (for the "llama-server" backend)
 # =====================================================================
-# The file gguf_fetch downloads; models_info is the single place its name is
-# written down.
-EXTERNAL_MODEL_PATH = str(paths.models_dir() / models_info.GGUF_CHAT.filename)
+# The official llama.cpp server is launched as a subprocess and uses the
+# LLM_SERVER_* constants above plus the GGUF settings below
+# (speakloop/llm_server_ctl.py builds its command line).
+#
+# settings.json ("llama_server_path") names the binary. An empty value - the
+# default - resolves in this order:
+#   1. bin/llama/llama-server[.exe], i.e. whatever
+#      speakloop/llama_server_fetch.py installed from the pinned llama.cpp
+#      release;
+#   2. "llama-server" on PATH, for a build the user manages themselves.
+# An empty result is NOT reported here: the binary only matters when this
+# backend is actually selected, and LLMServerController says so at start time.
+#
+# Deliberately a function and NOT a module constant, unlike every other path in
+# this file: the binary can be installed while the app is not running, and a
+# value frozen at import would also hide a binary removed since, so the answer
+# is taken from the disk at the moment the server is started.
+def _resolve_llama_server(setting) -> str:
+    """Absolute path of the llama-server binary to launch, or "" if none."""
+    if setting is None:
+        setting = ""
+    if not isinstance(setting, str):
+        print(f"[config] settings.json: llama_server_path must be a string, "
+              f"got {setting!r}; searching for the binary instead",
+              file=sys.stderr)
+        setting = ""
+    if setting.strip():
+        # A relative path resolves against the directory settings.json is in,
+        # like every other path setting (pathlib keeps an absolute value
+        # unchanged). Spelled out here rather than taken from loader.user_path
+        # because this setting has its own fallback chain below, not a single
+        # default path.
+        return str(CONFIG_DIR / setting.strip())
+    bundled = llama_server_fetch.installed_exe()
+    if bundled is not None:
+        return str(bundled)
+    return shutil.which("llama-server") or ""
+
+
+def resolve_llama_server_path() -> str:
+    """Where the llama-server binary is right now, or "" if there is none.
+
+    The single answer to that question in the app: llm_server_ctl builds its
+    command line from it.
+    """
+    return _resolve_llama_server(_USER.get("llama_server_path", ""))
+
+
+# =====================================================================
+# GGUF Model Settings (used by the "llama-server" backend)
+# =====================================================================
+# The model llama-server loads and the parameters it loads it with. Unused by
+# "lm-studio", which manages its own model.
+# GGUF file, read from settings.json ("external_model_path"); a relative path
+# resolves against the directory settings.json is in. The default is the file
+# gguf_fetch downloads, and models_info is the single place its name is written
+# down.
+EXTERNAL_MODEL_PATH = _path(
+    "external_model_path",
+    paths.models_dir() / models_info.GGUF_CHAT.filename,
+)
 # GPU offload and context size from hardware detection; the literals are the
 # conservative fallbacks for a machine without hardware_config.json.
 EXTERNAL_N_GPU_LAYERS = _HW.get("EXTERNAL_N_GPU_LAYERS", 20)  # -1 = all layers
-EXTERNAL_N_CTX = _HW.get("EXTERNAL_N_CTX", 2048)
+# Context window size (n_ctx). settings.json ("external_n_ctx") wins over the
+# detected value, per the usual layering. int() because the value is passed to
+# the server as a command-line argument (a float would break it). minimum=256:
+# anything below breaks generation outright (the system prompt alone would not
+# fit), so treat it as a typo rather than passing it through.
+EXTERNAL_N_CTX = int(_num("external_n_ctx",
+                          _HW.get("EXTERNAL_N_CTX", 2048), minimum=256))
 
 # Generation tuning parameters
 LLM_TEMPERATURE = 0.3
@@ -239,5 +333,5 @@ AUDIO_OUTPUT_DEVICE = _HW.get("AUDIO_OUTPUT_DEVICE")
 # handlers can open their files at once.
 LOG_DIR = paths.log_dir()
 LOG_FILE = str(LOG_DIR / "main.log")
-# Output of the llm_server subprocess (see app.py _start_llm_server).
+# Output of the llama-server subprocess (see speakloop/llm_server_ctl.py).
 LLM_SERVER_LOG_FILE = str(LOG_DIR / "llm_server.log")

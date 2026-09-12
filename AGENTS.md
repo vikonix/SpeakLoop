@@ -10,8 +10,8 @@ in the comment next to that line.
 
 SpeakLoop is a local desktop **voice dialogue tutor** for language learning
 (Python 3.11/3.12, Tkinter GUI). Push-to-talk (Space or the mic button) ->
-faster-whisper speech recognition -> a local LLM (GGUF model through
-`llm_server/`, or LM Studio) -> Kokoro speech synthesis.
+faster-whisper speech recognition -> a local LLM (a GGUF model served by
+`llama-server`, or LM Studio) -> Kokoro speech synthesis.
 
 The project is in the middle of a planned refactoring into a voice dialogue
 trainer. The plan, the step order and the open questions are in
@@ -23,7 +23,6 @@ rewrite them without a reason from the plan.
 
 ```bash
 python install.py        # guided setup: dependencies, models, llama-server, hardware probe
-pip install -r llm_server/requirements.txt   # until llm_server/ is replaced
 python main.py
 ```
 
@@ -31,10 +30,11 @@ Three launch forms, identical after `speakloop/cli.py`'s `main()`: the root
 `main.py` shim, `python -m speakloop`, and the `speakloop` console script
 (after `pip install -e .`).
 
-**Default backend**: `local_server` - `llm_server/server.py` (FastAPI +
-llama-cpp-python) is launched as a subprocess. **Alternative**:
-`LLM_BACKEND = "lm-studio"` in `speakloop/config.py`, with LM Studio on
-`http://localhost:1234`.
+**Default backend**: `llama-server` - the official llama.cpp binary from
+`bin/llama/` is launched as a subprocess. **Alternative**:
+`"llm_backend": "lm-studio"` in `config/settings.json`, with LM Studio running
+separately. Both speak the same OpenAI-compatible API, so only the address and
+the key differ.
 
 ## Architecture
 
@@ -59,7 +59,8 @@ llama-cpp-python) is launched as a subprocess. **Alternative**:
 ### Application
 
 - [`speakloop/app.py`](speakloop/app.py) - `VoiceTutorGUI`: Tkinter window,
-  audio recording, threading orchestration, llm_server subprocess management.
+  audio recording, threading orchestration, and the owner of the
+  `LLMServerController`.
   Module-level `run(append_log)` configures logging, logs
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
@@ -68,12 +69,23 @@ llama-cpp-python) is launched as a subprocess. **Alternative**:
   faster_whisper**: on Windows the CUDA build of torch provides the cuBLAS and
   cuDNN libraries ctranslate2 needs.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
-  streaming client with conversation history; used by both backends.
+  streaming client with conversation history; used by both backends. The
+  response is streamed inside a `with`, so an interrupt closes it and the
+  server stops generating. A failed request **raises** after rolling the user
+  message back out of the history: the window owns what the user is told.
+  `error_message()` is that text - the server's own sentence out of the JSON
+  body, since `str()` of an API error is the whole HTTP problem.
+- [`speakloop/llm_server_ctl.py`](speakloop/llm_server_ctl.py) -
+  `LLMServerController`: starts and stops the llama-server subprocess (own
+  process, so the model server and Kokoro do not contend for the GPU).
+  `llama_server_command()` is pure and holds the tuning that must not be left
+  to the binary's defaults (`--ctx-size`, `--parallel 1`, `--cache-reuse 256`,
+  `--api-key`, `--no-ui`); `log_compute_devices()` records `--list-devices`
+  before the launch, which is the only thing that reveals a silent CPU
+  fallback. `start()` and `shutdown()` share one lock, so a quit during
+  startup cannot orphan a server.
 - [`speakloop/tts.py`](speakloop/tts.py) - `TTSManager`: Kokoro on
   `config.DEVICE`, winsound playback on Windows, sounddevice elsewhere.
-- [`llm_server/server.py`](llm_server/server.py) - standalone FastAPI server
-  loading the GGUF with llama-cpp-python; a separate process to avoid GPU
-  contention with Kokoro. To be replaced by the official llama-server.
 
 ### Configuration and paths
 
@@ -81,8 +93,12 @@ llama-cpp-python) is launched as a subprocess. **Alternative**:
   import. Layers, lowest first: literals in the file ->
   `config/hardware_config.json` (`"config"` section) ->
   `config/settings.json`. Known settings.json keys are listed in
-  `_KNOWN_USER_KEYS` (today only `max_record_seconds`); keep
-  `config/settings.example.json` in step (a test checks it). Also sets
+  `_KNOWN_USER_KEYS` (`max_record_seconds`, `llm_backend`, `lm_studio_host`,
+  `llama_server_path`, `external_model_path`, `external_n_ctx`); keep
+  `config/settings.example.json` in step (a test checks it).
+  `resolve_llama_server_path()` is a function and not a constant on purpose:
+  the binary can be installed or removed while the app is not running, so the
+  answer is taken from the disk when the server is started. Also sets
   `HF_HOME` to `model_cache/` and switches `HF_HUB_OFFLINE=1` once the repos
   this run loads are cached - which is why it must be imported before anything
   imports huggingface_hub. `_model_device()` caps a per-model device by
@@ -116,7 +132,9 @@ can use them before the requirements step:
   into `models/`.
 - [`speakloop/llama_server_fetch.py`](speakloop/llama_server_fetch.py) - the
   pinned llama.cpp release into `bin/llama/`, sha256 per asset, then
-  `--version` and `--list-devices` probes. Not used by the app yet.
+  `--version` and `--list-devices` probes. `installed_exe()`, `list_devices()`
+  and `installed_variant()` are also what config and llm_server_ctl use at run
+  time.
 
 - [`speakloop/models_info.py`](speakloop/models_info.py) - model catalogue,
   the single place a repo id is written. Imports only `typing` (a test
@@ -145,14 +163,17 @@ can use them before the requirements step:
 - **Windows audio**: TTS plays through `winsound` to bypass PortAudio/MME
   driver issues, with a 150 ms silence lead-in. `config.AUDIO_LOCK`
   serialises PortAudio init/teardown between the recording and playback paths.
-- **LLM server subprocess**: started in `_start_llm_server()` with layers and
-  context from `config` (hardware detection), polled with
+- **LLM server subprocess**: started in `LLMServerController.start()` with
+  layers and context from `config` (hardware detection), polled with
   `LLMManager.check_connection()`, terminated in `quit_app()` with a 5-second
   kill fallback, output in `logs/llm_server.log`.
-- **Known v0 issues** (interrupt race, invisible LLM errors, stream not closed
-  on interrupt, orphan server, 20 s record limit, recording during loading) are
-  listed in `docs/refactoring.md` with the step that fixes each. Do not fix
-  them outside their step.
+- **Aborting speech** (`app.py` `_abort_tts`): clearing the queue is not
+  enough, because the TTS thread buffers the sentences it has already taken
+  from it. The sentinel is what makes that thread drop them; without it a
+  failed exchange is spoken after the next reply.
+- **Known v0 issues** (interrupt race, 20 s record limit, recording during
+  loading) are listed in `docs/refactoring.md` with the step that fixes each.
+  Do not fix them outside their step.
 
 ## Testing
 

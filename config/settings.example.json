@@ -1,5 +1,13 @@
 {
   "_readme": "SpeakLoop user settings. Copy this file to settings.json in the same directory and edit it by hand; restart the app to apply. Delete a key (or the whole file) to use the built-in default. Keys starting with '_' are ignored and may be used as comments.",
   "_max_record_seconds": "Hard limit on a single recording, in seconds (a safety stop for a stuck key). Minimum 1.",
-  "max_record_seconds": 20
+  "max_record_seconds": 20,
+  "_llm_backend": "Which model server the app talks to: 'llama-server' (the default) starts the official llama.cpp binary itself with the GGUF model in models/; 'lm-studio' uses an already-running LM Studio app (see lm_studio_host).",
+  "llm_backend": "llama-server",
+  "_lm_studio_host": "Address of the LM Studio server, used by the 'lm-studio' backend only. Accepts 'host', 'host:port' or a full 'http://host:port' URL; the port defaults to 1234. Point it at another machine to run LM Studio on it.",
+  "lm_studio_host": "localhost:1234",
+  "_llama_server_path": "The llama-server binary to start, for a build you manage yourself. An empty value (the default) uses bin/llama/, where 'python -m speakloop.llama_server_fetch' installs it, and falls back to a llama-server on PATH. A relative path is resolved against this directory.",
+  "llama_server_path": "",
+  "_external_model_path": "GGUF model file for the 'llama-server' backend (unused with 'lm-studio'). Add this key only to point the app at a model of your own: with the key absent it finds the downloaded one in models/ by itself. A relative path is resolved against this directory.",
+  "_external_n_ctx": "Context window size (--ctx-size) of the local GGUF model. Add this key only to override the value hardware detection wrote into hardware_config.json. Minimum 256."
 }

@@ -11,11 +11,9 @@ heavy imports below, for the reason given in bootstrap.setup_logging.
 
 import time
 import queue
-import subprocess
 import threading
 from typing import Optional
 import os
-import sys
 import logging
 import tkinter as tk
 from tkinter import ttk
@@ -28,7 +26,8 @@ import sounddevice as sd
 from speakloop import config
 from speakloop import bootstrap, detect_hardware, lifecycle
 from speakloop.stt import STTManager, WHISPER_SAMPLE_RATE
-from speakloop.llm import LLMManager
+from speakloop.llm import LLMManager, error_message
+from speakloop.llm_server_ctl import LLMServerController
 from speakloop.tts import TTSManager
 
 # Sentinel object pushed to the TTS queue after LLM finishes streaming.
@@ -85,23 +84,16 @@ class VoiceTutorGUI:
         self.stt_mgr = STTManager()
         self.tts_mgr = TTSManager()
 
-        # Select LLM backend
+        # LLM backend. config validates the name and falls back to the default,
+        # so only the two known values reach this point.
         self.llm_backend = config.LLM_BACKEND
-        # Holds the subprocess.Popen handle when local_server is auto-started
-        self._llm_server_process: Optional[subprocess.Popen] = None
-        # File handle for the LLM server log (kept open for the lifetime of the subprocess)
-        self._llm_server_log_file = None
-
-        if self.llm_backend == "local_server":
-            logging.info("Using local_server LLM backend (llm_server/server.py subprocess).")
-            self.llm_mgr = LLMManager(model=config.LOCAL_SERVER_MODEL)
-        else:
-            # Covers "lm-studio" and any unknown values
-            if self.llm_backend != "lm-studio":
-                logging.warning(f"Unknown LLM_BACKEND '{self.llm_backend}', falling back to lm-studio.")
-                self.llm_backend = "lm-studio"
-            logging.info("Using LM Studio LLM backend (LLMManager).")
-            self.llm_mgr = LLMManager()
+        logging.info(f"Using the {self.llm_backend} LLM backend.")
+        # One client for both backends: they speak the same OpenAI API and only
+        # the address differs, which init_client is told at connection time.
+        self.llm_mgr = LLMManager()
+        # Owns the llama-server subprocess. Built for every backend and left
+        # untouched by "lm-studio": all of its methods are no-ops until start().
+        self._llm_server = LLMServerController()
 
         # Setup custom dark styles for UI elements
         self.setup_styles()
@@ -307,59 +299,6 @@ class VoiceTutorGUI:
     def update_stats(self, stt_ms: float, llm_ms: float):
         self.stats_label.configure(text=f"STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms")
 
-    def _start_llm_server(self) -> bool:
-        """
-        Launch llm_server/server.py as a subprocess and wait until it responds.
-        Returns True if the server became ready within the timeout, False otherwise.
-        """
-        model_path = config.EXTERNAL_MODEL_PATH
-        if not model_path:
-            logging.error("EXTERNAL_MODEL_PATH is empty - cannot start local server.")
-            return False
-
-        cmd = [
-            sys.executable,
-            config.LOCAL_SERVER_SCRIPT,
-            "--model", model_path,
-            "--host", config.LOCAL_SERVER_HOST,
-            "--port", str(config.LOCAL_SERVER_PORT),
-            "--n-gpu-layers", str(config.EXTERNAL_N_GPU_LAYERS),
-            "--n-ctx", str(config.EXTERNAL_N_CTX),
-        ]
-        log_path = config.LLM_SERVER_LOG_FILE
-        logging.info(f"Starting LLM server: {' '.join(cmd)}")
-        logging.info(f"LLM server output → {log_path}")
-        # bootstrap.log_file_mode() rather than "w": after an in-session restart
-        # the server log continues together with main.log.
-        self._llm_server_log_file = open(log_path, bootstrap.log_file_mode(),
-                                         encoding="utf-8", buffering=1)
-        self._llm_server_process = subprocess.Popen(
-            cmd,
-            stdout=self._llm_server_log_file,
-            stderr=self._llm_server_log_file,
-        )
-
-        # Poll until server is ready or timeout expires
-        deadline = time.time() + config.LOCAL_SERVER_STARTUP_TIMEOUT
-        self.llm_mgr.init_client(
-            base_url=config.LOCAL_SERVER_URL,
-            api_key=config.LOCAL_SERVER_API_KEY,
-        )
-        while time.time() < deadline:
-            # Check if the process has already exited (e.g. model not found, OOM)
-            if self._llm_server_process.poll() is not None:
-                exit_code = self._llm_server_process.returncode
-                logging.error(f"LLM server process exited unexpectedly (code {exit_code}).")
-                return False
-
-            if self.llm_mgr.check_connection(silent=True):
-                logging.info("LLM server is ready.")
-                return True
-            time.sleep(1.0)
-
-        logging.error("LLM server did not become ready within the timeout.")
-        return False
-
     def load_components(self):
         logging.info("Starting model loading thread...")
         self.root.after(0, self.update_status, "Loading models...", "#ffb86c")
@@ -372,13 +311,13 @@ class VoiceTutorGUI:
             self.tts_mgr.load_model()
             logging.info("TTS Model loaded successfully.")
 
-            if self.llm_backend == "local_server":
+            if self.llm_backend == "llama-server":
                 model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
-                self.root.after(0, self.append_system_msg, f"Starting LLM server with {model_name}...")
+                self.root.after(0, self.append_system_msg, f"Starting llama-server with {model_name}...")
                 self.root.after(0, self.update_status, "Starting LLM server...", "#ffb86c")
-                ready = self._start_llm_server()
+                ready = self._llm_server.start(self.llm_mgr)
                 if not ready:
-                    self.root.after(0, self.append_system_msg, "Error: LLM server failed to start. Check model path and GPU memory.")
+                    self.root.after(0, self.append_system_msg, "Error: LLM server failed to start. Check logs/llm_server.log, the model path and GPU memory.")
                     self.root.after(0, self.update_status, "LLM Server Error", "#ff5555")
                     self.root.after(0, self.update_instruction, "LLM server failed to start. Check the log and restart.")
                     # Do not call make_app_ready - keep the button in loading/disabled state
@@ -616,12 +555,27 @@ class VoiceTutorGUI:
             def token_cb(token):
                 self.root.after(0, self.append_emma_token, token)
 
-            self.llm_mgr.stream_and_queue_tts(
-                user_text,
-                self.tts_queue,
-                self.tts_stop_event,
-                token_callback=token_cb
-            )
+            try:
+                self.llm_mgr.stream_and_queue_tts(
+                    user_text,
+                    self.tts_queue,
+                    self.tts_stop_event,
+                    token_callback=token_cb
+                )
+            except Exception as llm_error:
+                # Handled here and not by the outer handler, which cannot know
+                # that a reply line is already open in the chat. Without this
+                # the window keeps an empty "Emma:" line and a status bar that
+                # still says "Thinking", and the failure is only in the log.
+                # llm.py has logged the traceback already.
+                self.root.after(0, self.append_emma_end)
+                self.root.after(0, self.append_system_msg,
+                                f"LLM error: {error_message(llm_error)}")
+                self._abort_tts()
+                self.root.after(0, self.draw_mic_button, "idle")
+                self.root.after(0, self.update_status, "LLM Error", "#ff5555")
+                self.root.after(0, self.update_instruction, "Hold SPACE or click Button to speak.")
+                return
 
             llm_ms = (time.perf_counter() - llm_start) * 1000
             logging.info(f"LLM complete streaming and queuing. Duration: {llm_ms:.0f}ms")
@@ -631,7 +585,7 @@ class VoiceTutorGUI:
 
             # Signal TTS thread that LLM has finished and GPU is free.
             # The TTS thread buffers sentences until it receives this sentinel,
-            # preventing GPU contention between llama_cpp and Kokoro.
+            # preventing GPU contention between the model server and Kokoro.
             if not self.tts_stop_event.is_set():
                 self.tts_queue.put(_TTS_START_SENTINEL)
                 with self.tts_state_lock:
@@ -660,6 +614,18 @@ class VoiceTutorGUI:
         self.tts_stop_event.set()
         self.clear_tts_queue()
         self.tts_mgr.stop_playback()
+
+    def _abort_tts(self):
+        """Drop everything queued for speech after a failed exchange.
+
+        stop_current_tts() empties the queue, but sentences the TTS thread has
+        already taken from it are buffered inside that thread and are dropped
+        only when it sees another item. The sentinel is that item: with the
+        stop event set it clears the buffer and plays nothing. Without it those
+        sentences would be spoken after the NEXT reply.
+        """
+        self.stop_current_tts()
+        self.tts_queue.put(_TTS_START_SENTINEL)
 
     def clear_tts_queue(self):
         while True:
@@ -726,18 +692,10 @@ class VoiceTutorGUI:
         self.shutdown_event.set()
         self.stop_current_tts()
 
-        # Terminate the LLM server subprocess if we started it
-        if self._llm_server_process is not None:
-            logging.info("Terminating LLM server subprocess...")
-            self._llm_server_process.terminate()
-            try:
-                self._llm_server_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logging.warning("LLM server did not exit cleanly - killing it.")
-                self._llm_server_process.kill()
-
-        if self._llm_server_log_file is not None:
-            self._llm_server_log_file.close()
+        # Terminate the llama-server subprocess if this app started one. A
+        # no-op for the "lm-studio" backend and safe to reach while the loader
+        # thread is still in start(): see LLMServerController.shutdown.
+        self._llm_server.shutdown()
 
         self.root.destroy()
         # Not the interpreter's normal exit: with CUDA torch loaded, tearing the
