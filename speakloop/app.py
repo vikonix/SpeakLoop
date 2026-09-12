@@ -38,7 +38,7 @@ from speakloop import bootstrap, detect_hardware, lifecycle
 from speakloop.llm import LLMManager, error_message
 from speakloop.llm_server_ctl import LLMServerController
 from speakloop.playback import PlaybackController
-from speakloop.recorder import AudioRecorder, normalize_audio
+from speakloop.recorder import AudioRecorder, normalize_audio, warm_up_resampler
 from speakloop.stt import STTManager
 from speakloop.tts import TTSManager
 from speakloop.ui import TutorView, ViewCallbacks
@@ -205,6 +205,10 @@ class VoiceTutorController:
             self.root.after(0, self.view.enter_warming_up)
             self.stt_mgr.warm_up()
             self.tts_mgr.warm_up()
+            # Warmed up here with the models, and for the same reason: the first
+            # call compiles, and left to the first take the learner pays those
+            # seconds between their phrase and the answer.
+            warm_up_resampler()
             logging.info("Models warmed up successfully.")
 
             # Start TTS background thread

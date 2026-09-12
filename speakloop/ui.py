@@ -61,7 +61,8 @@ INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and resta
 # Window title and size. Here with the rest of the wording: the title carries
 # the partner's name, which has one spelling in this module.
 WINDOW_TITLE = f"{PARTNER_NAME} - Voice Tutor"
-WINDOW_GEOMETRY = "500x700"
+WINDOW_WIDTH = 500
+WINDOW_HEIGHT = 700
 
 # Mic button geometry (canvas is 100x100, so the center is at 50,50).
 _MIC_CANVAS_SIZE = 100
@@ -77,6 +78,22 @@ _MIC_RING_WIDTH = 3
 # below the minimum radius, so the microphone stays visibly open in silence.
 _MIC_LEVEL_FULL_RMS = 0.08
 _MIC_LEVEL_MIN_R = 10
+
+
+def centered_geometry(screen_width: int, screen_height: int,
+                      width: int = WINDOW_WIDTH,
+                      height: int = WINDOW_HEIGHT) -> str:
+    """The Tk geometry string that puts a window of *width* x *height* in the
+    middle of a screen of *screen_width* x *screen_height*.
+
+    Pure, so the arithmetic can be tested without a display. The offsets never
+    go below zero: a window larger than the screen would otherwise be placed at
+    a negative offset, which moves its title bar off the top edge and leaves the
+    window impossible to drag back.
+    """
+    x = max((screen_width - width) // 2, 0)
+    y = max((screen_height - height) // 2, 0)
+    return f"{width}x{height}+{x}+{y}"
 
 
 @dataclass(frozen=True)
@@ -164,7 +181,13 @@ class TutorView:
         # wherever no widget covers it. The view owns the chrome, so the
         # controller needs to know neither the palette nor the wording.
         self.root.title(WINDOW_TITLE)
-        self.root.geometry(WINDOW_GEOMETRY)
+        # Size and position in one call, before the window is shown: the
+        # winfo_screen* values are already valid at this point, so the window
+        # appears in the middle of the screen instead of being drawn in a corner
+        # and then jumping. On several monitors Tk reports the primary one,
+        # which is where a window the user did not place belongs.
+        self.root.geometry(centered_geometry(self.root.winfo_screenwidth(),
+                                             self.root.winfo_screenheight()))
         self.root.configure(bg=THEME["bg_main"])
         self._build_header()
         self._build_status_bar()

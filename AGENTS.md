@@ -87,7 +87,9 @@ the key differ.
   the `ViewCallbacks` passed in, so the view never references the controller.
   Every status string, instruction line and the partner's name (`PARTNER_NAME`)
   live here - do not move wording or colors back into the controller. Its
-  methods must run on the Tk main thread. `set_record_level()` repaints the mic
+  methods must run on the Tk main thread. `centered_geometry()` is pure on
+  purpose, so where the window opens is tested without a display
+  (`tests/test_ui.py`). `set_record_level()` repaints the mic
   button from the live input level while a take runs; the recording state has no
   glyph of its own any more, because the level disc IS the indicator.
 - [`speakloop/ui_theme.py`](speakloop/ui_theme.py) - the palette (`THEME` from
@@ -258,6 +260,15 @@ can use them before the requirements step:
   driver issues, with a 150 ms silence lead-in. `config.AUDIO_LOCK` serialises
   PortAudio init and teardown between the recording and the sounddevice
   playback path only - the winsound path takes no lock at all (see tts.py).
+  **Known limit**: `winsound.PlaySound(None, 0)` does not cut a synchronous
+  playback started by another thread, it waits for it, so an interrupt costs up
+  to the length of the sentence being spoken and the window is blocked for that
+  time (problem 12 in `docs/refactoring.md`, with the two candidate fixes). The
+  stop-guard thread in `play_array` cannot help with this.
+- **Resampler warm-up** (`recorder.warm_up_resampler`, called from
+  `load_components`): the first `librosa.resample` cost 9.6 s, paid by the
+  learner between their first phrase and the answer. Do not drop the call
+  without moving that cost somewhere else.
 - **LLM server subprocess**: started in `LLMServerController.start()` with
   layers and context from `config` (hardware detection), polled with
   `LLMManager.check_connection()`, terminated in `quit_app()` with a 5-second

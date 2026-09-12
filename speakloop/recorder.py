@@ -34,6 +34,12 @@ AUDIO_NORMALIZATION_CEILING = 0.9    # Scales the peak to 90% of full scale
 # How long to wait for the capture thread to finish after a stop.
 RECORD_THREAD_JOIN_TIMEOUT_SEC = 1.5
 
+# Capture rate the start-up warm-up prepares the resampler for. Not a setting:
+# the real rate belongs to the device and is only known when a take opens the
+# stream (see _select_capture_device), and 48 kHz is what almost every input
+# device reports.
+_TYPICAL_DEVICE_RATE = 48_000
+
 
 def normalize_audio(audio: np.ndarray) -> np.ndarray:
     """Scale the waveform so its peak hits the normalization ceiling.
@@ -48,6 +54,30 @@ def normalize_audio(audio: np.ndarray) -> np.ndarray:
         return audio.astype(np.float32)
     audio = audio / peak * AUDIO_NORMALIZATION_CEILING
     return np.nan_to_num(audio).astype(np.float32)
+
+
+def warm_up_resampler(source_rate: int = _TYPICAL_DEVICE_RATE):
+    """Load and compile the resampler before the first take needs it.
+
+    get_audio() resamples every take from the device's own rate to
+    config.AUDIO_SAMPLE_RATE. The FIRST such call imports librosa and pays for
+    its compilation: measured at 9.6 s on 2026-09-12, and the learner paid it
+    between the end of their first phrase and the recognition, with the window
+    showing "Processing" the whole time. Called during the start-up warm-up
+    instead, the same seconds are spent where the window already says that the
+    models are loading.
+
+    The rate only decides which ratio is prepared; the cost is in the import,
+    so the default is the usual device rate rather than the real one, which is
+    known only once a take opens the stream.
+    """
+    started = time.perf_counter()
+    import librosa
+    librosa.resample(np.zeros(source_rate // 10, dtype=np.float32),
+                     orig_sr=source_rate,
+                     target_sr=config.AUDIO_SAMPLE_RATE)
+    logging.info("Resampler warmed up in %.0f ms.",
+                 (time.perf_counter() - started) * 1000)
 
 
 class AudioRecorder:
@@ -298,6 +328,12 @@ class AudioRecorder:
                                 logging.exception("on_level callback failed:")
                         # Stop only after the speaker has actually begun, so
                         # the pause before the first word is never counted.
+                        # The check sits inside this branch on purpose: a
+                        # running stream always delivers blocks, silent ones
+                        # included, so the timer is re-evaluated on every one of
+                        # them. A stream that delivers nothing at all is a stuck
+                        # device, and the time limit below is what ends such a
+                        # take.
                         if speech_started and \
                                 now - last_voice_time >= config.SILENCE_TIMEOUT:
                             logging.info("Silence timeout reached; "

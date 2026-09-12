@@ -13,6 +13,7 @@ Run from the project root with:
     python -m unittest tests.test_recorder
 """
 
+import sys
 import threading
 import time
 import unittest
@@ -73,6 +74,22 @@ class NormalizeAudioTests(unittest.TestCase):
     def test_the_result_is_float32(self):
         audio = np.array([0.0, 0.5], dtype=np.float64)
         self.assertEqual(recorder.normalize_audio(audio).dtype, np.float32)
+
+
+class ResamplerWarmUpTests(unittest.TestCase):
+    """The start-up warm-up must prepare the conversion a take really needs."""
+
+    def test_the_warm_up_prepares_the_pipeline_rate(self):
+        # librosa is replaced rather than imported: the real import is the very
+        # cost this warm-up exists to move out of the first phrase, and the test
+        # suite must not pay it either.
+        fake_librosa = mock.Mock()
+        with mock.patch.dict(sys.modules, {"librosa": fake_librosa}):
+            recorder.warm_up_resampler(48_000)
+        fake_librosa.resample.assert_called_once()
+        arguments = fake_librosa.resample.call_args.kwargs
+        self.assertEqual(arguments["orig_sr"], 48_000)
+        self.assertEqual(arguments["target_sr"], config.AUDIO_SAMPLE_RATE)
 
 
 class CaptureDeviceTests(unittest.TestCase):
