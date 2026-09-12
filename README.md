@@ -161,6 +161,8 @@ speakloop                # console script, after `pip install -e .`
 
 With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first.
 
+If a `llama-server` already answers on `127.0.0.1:8765` (the usual case is one left behind by a session that ended abnormally), the app uses that server as it is, says so in the chat and does not stop it on exit. Such a server keeps the model, context size and GPU layers it was started with, not the ones in the current settings, so `logs/main.log` records which model it serves and how large its context is, and warns when the model is not the configured one or the context is smaller. If the port is held by a program that does not answer the API, the app says the port is busy instead of starting a second server.
+
 Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_server.log` (the model server), `install.log` and `hwdetect.log` (kept across runs).
 
 ## Controls

@@ -312,17 +312,41 @@ class VoiceTutorGUI:
             logging.info("TTS Model loaded successfully.")
 
             if self.llm_backend == "llama-server":
-                model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
-                self.root.after(0, self.append_system_msg, f"Starting llama-server with {model_name}...")
-                self.root.after(0, self.update_status, "Starting LLM server...", "#ffb86c")
+                # Neutral until start() has decided. It uses a server that
+                # already listens instead of launching one, and a line that
+                # named the model and the launch would then describe something
+                # that did not happen. Both are said below, once it is known
+                # which of the two it was.
+                self.root.after(0, self.append_system_msg, "Connecting to the LLM server...")
+                self.root.after(0, self.update_status, "Connecting to LLM server...", "#ffb86c")
                 ready = self._llm_server.start(self.llm_mgr)
                 if not ready:
-                    self.root.after(0, self.append_system_msg, "Error: LLM server failed to start. Check logs/llm_server.log, the model path and GPU memory.")
+                    # The controller's own sentence, because only it knows which
+                    # of several failures happened (no binary, a busy port, an
+                    # early exit). Both logs are named: the reason is in
+                    # main.log and the server's own output in llm_server.log,
+                    # and a failure before the launch writes nothing to the
+                    # second one.
+                    reason = (self._llm_server.last_error
+                              or "The LLM server did not start.")
+                    self.root.after(0, self.append_system_msg, f"Error: {reason}")
+                    self.root.after(0, self.append_system_msg, "See logs/main.log and logs/llm_server.log.")
                     self.root.after(0, self.update_status, "LLM Server Error", "#ff5555")
                     self.root.after(0, self.update_instruction, "LLM server failed to start. Check the log and restart.")
                     # Do not call make_app_ready - keep the button in loading/disabled state
                     return
-                self.root.after(0, self.append_system_msg, "LLM server is ready.")
+                if self._llm_server.adopted:
+                    # Said in the window and not only in the log: the answers
+                    # now come from a server this run did not configure, which
+                    # explains a model or a speed the settings do not.
+                    self.root.after(0, self.append_system_msg,
+                                    f"Using the llama-server already running on "
+                                    f"{config.LLM_SERVER_HOST}:{config.LLM_SERVER_PORT}. "
+                                    f"It keeps the model it was started with.")
+                else:
+                    model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
+                    self.root.after(0, self.append_system_msg,
+                                    f"llama-server is ready with {model_name}.")
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():

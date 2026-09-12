@@ -83,7 +83,17 @@ the key differ.
   `--api-key`, `--no-ui`); `log_compute_devices()` records `--list-devices`
   before the launch, which is the only thing that reveals a silent CPU
   fallback. `start()` and `shutdown()` share one lock, so a quit during
-  startup cannot orphan a server.
+  startup cannot orphan a server. `_use_running_server()` is the fork before
+  the launch: a server already listening on the port is used as it is (and
+  never terminated on exit), because an app that died without `quit_app` left
+  it there and a second one could not bind the port; a port held by anything
+  that does not answer the API is refused instead. Every refusal leaves one
+  sentence in `last_error`, which is what the window shows. An adopted server
+  is then described in the log: its model ids, and its per-slot context from
+  `server_properties()` (a plain GET of llama.cpp's `/props`, which is outside
+  the `/v1` prefix, hence not through the OpenAI client). Both are diagnostic
+  and warn on a mismatch with the configured model or a smaller context; a
+  server that answers is never refused over them.
 - [`speakloop/tts.py`](speakloop/tts.py) - `TTSManager`: Kokoro on
   `config.DEVICE`, winsound playback on Windows, sounddevice elsewhere.
 
@@ -166,7 +176,9 @@ can use them before the requirements step:
 - **LLM server subprocess**: started in `LLMServerController.start()` with
   layers and context from `config` (hardware detection), polled with
   `LLMManager.check_connection()`, terminated in `quit_app()` with a 5-second
-  kill fallback, output in `logs/llm_server.log`.
+  kill fallback, output in `logs/llm_server.log`. An **adopted** server (one
+  that was already listening) has no subprocess behind it, so `shutdown()` is
+  a no-op for it by construction - do not "fix" that into terminating it.
 - **Aborting speech** (`app.py` `_abort_tts`): clearing the queue is not
   enough, because the TTS thread buffers the sentences it has already taken
   from it. The sentinel is what makes that thread drop them; without it a
