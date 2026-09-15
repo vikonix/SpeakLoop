@@ -69,6 +69,33 @@ def error_message(error: Exception) -> str:
     return str(error) or error.__class__.__name__
 
 
+def request_extra_body(backend: str):
+    """Fields outside the OpenAI API to send with a chat request, or None.
+
+    Only llama-server gets them, and both are llama.cpp request fields:
+
+    - chat_template_kwargs.enable_thinking=False. llama-server passes
+      enable_thinking=true to Gemma's chat template by default, and the model
+      then thinks for 40 s or more before a one-line reply; the thinking goes
+      to reasoning_content, which this module never reads
+      (docs/model-parameters.md, section 4.8). A template without the
+      variable ignores it, so the fallback model is not affected.
+    - top_k, which the OpenAI API does not have.
+
+    LM Studio gets None: it has its own thinking switch and model settings,
+    and an unknown field there is a risk with nothing to gain.
+
+    A new dict on every call, so no caller can change what the next request
+    sends.
+    """
+    if backend != "llama-server":
+        return None
+    return {
+        "top_k": config.LLM_TOP_K,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
 class LLMManager:
     def __init__(self, model: str = None):
         self.client = None
@@ -151,6 +178,7 @@ class LLMManager:
                 top_p=config.LLM_TOP_P,
                 stream=True,
                 timeout=LLM_TIMEOUT,
+                extra_body=request_extra_body(config.LLM_BACKEND),
             ) as stream_response:
                 full_reply = ""
                 sentence_buffer = ""

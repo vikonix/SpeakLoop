@@ -21,7 +21,7 @@ The application is being moved to a new structure step by step. It runs from the
 - **Python 3.11 or 3.12.** Newer versions need a C++ compiler for some dependencies, so `pip` refuses them.
 - **Windows, Linux or macOS.** The current application is used on Windows.
 - A microphone and speakers.
-- **NVIDIA GPU**: optional. It needs a CUDA build of PyTorch (see [Platform notes](#platform-notes)). For a conversational pace the chat model (about 7 GB) has to fit into the video memory completely; on a smaller card a reply takes tens of seconds. [`docs/model-parameters.md`](docs/model-parameters.md) (Russian) has the measurements and what the owner of a small card can do.
+- **NVIDIA GPU**: optional. It needs a CUDA build of PyTorch (see [Platform notes](#platform-notes)). For a conversational pace the chat model (about 7 GB) has to fit into the video memory completely; on a smaller card a reply takes several seconds more. [`docs/model-parameters.md`](docs/model-parameters.md) (Russian) has the measurements and what the owner of a small card can do.
 - **Disk**: about 9 GB for the models.
 - **tkinter** (Linux only): the Tk GUI toolkit is packaged apart from the interpreter (`python3-tk` on Debian/Ubuntu). It is not on PyPI.
 - **PortAudio** (Linux only): the native audio library (`libportaudio2` on Debian/Ubuntu). The Windows and macOS wheels of `sounddevice` include it, the Linux wheels do not.
@@ -170,7 +170,9 @@ speakloop                # console script, after `pip install -e .`
 
 With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first.
 
-Known limit of this version: `llama-server` runs Gemma with its thinking mode on, and the app does not show the thinking. On a 4 GB card a short reply therefore takes 40-60 seconds, most of it spent on text nobody sees. The next step of the plan turns thinking off.
+With `llama-server` the app turns Gemma's thinking mode off in every request (the server turns it on by default), and it starts the server with `GGML_OP_OFFLOAD_MIN_BATCH=16` so that short prompts are computed on the GPU when the model does not fit into the video memory; set the variable before the start to try another value. The sampling values are the ones recommended for Gemma (temperature 1.0, top_p 0.95, top_k 64). With LM Studio, use its own thinking switch.
+
+On a 4 GB card (GTX 1650 Ti) a short reply of the model takes about 6-7 seconds; from your last word to the spoken reply it is about 12-13 seconds, 3 of them the wait for silence (`silence_timeout`).
 
 If a `llama-server` already answers on `127.0.0.1:8765` (the usual case is one left behind by a session that ended abnormally), the app uses that server as it is, says so in the chat and does not stop it on exit. Such a server keeps the model, context size and GPU layers it was started with, not the ones in the current settings, so `logs/main.log` records which model it serves and how large its context is, and warns when the model is not the configured one or the context is smaller. If the port is held by a program that does not answer the API, the app says the port is busy instead of starting a second server.
 

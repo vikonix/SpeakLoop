@@ -60,6 +60,29 @@ LLAMA_SERVER_CACHE_REUSE = 256
 # config.GPU_LAYERS_WORDS).
 AUTO_GPU_LAYERS = "auto"
 
+# Smallest prompt batch that ggml computes on the GPU when some layers stay on
+# the CPU ("op offload"; ggml's own default is 32). llama-server holds back the
+# last few tokens of a prompt, so a learner's reply of about 34 tokens arrives
+# as a batch of 30 and ran on the CPU: 2.5 s instead of 1.5 s on the reference
+# laptop. At 16 tokens both paths cost the same, so a lower value gains
+# nothing (docs/model-parameters.md, section 4.9). No effect when every layer
+# is on the GPU or on a CPU build.
+OP_OFFLOAD_MIN_BATCH_VAR = "GGML_OP_OFFLOAD_MIN_BATCH"
+OP_OFFLOAD_MIN_BATCH = 16
+
+
+def server_environment() -> dict:
+    """Environment of the llama-server subprocess.
+
+    A copy of this process's environment, so the server still finds its
+    CUDA runtime on PATH. The batch threshold is set with setdefault: a value
+    the owner exported before the start wins, which is how another threshold
+    can be tried without a code change.
+    """
+    environment = dict(os.environ)
+    environment.setdefault(OP_OFFLOAD_MIN_BATCH_VAR, str(OP_OFFLOAD_MIN_BATCH))
+    return environment
+
 
 def llama_server_command(exe_path: str, model_path: str, host: str, port: int,
                          n_gpu_layers: str, n_ctx: int, api_key: str) -> list:
@@ -399,7 +422,12 @@ class LLMServerController:
         log_compute_devices(cmd[0])
 
         log_path = config.LLM_SERVER_LOG_FILE
+        environment = server_environment()
         logging.info(f"Starting LLM server: {' '.join(cmd)}")
+        # Logged because it is not on the command line, and a run with an
+        # owner-exported value is otherwise impossible to tell apart.
+        logging.info("LLM server environment: %s=%s", OP_OFFLOAD_MIN_BATCH_VAR,
+                     environment[OP_OFFLOAD_MIN_BATCH_VAR])
         logging.info(f"LLM server output -> {log_path}")
         # Creation runs under the same lock as shutdown(), so the two cannot
         # interleave: either shutdown() runs first and the flag stops the
@@ -426,7 +454,8 @@ class LLMServerController:
                     "-----\n")
             try:
                 self._process = subprocess.Popen(
-                    cmd, stdout=self._log_file, stderr=self._log_file)
+                    cmd, stdout=self._log_file, stderr=self._log_file,
+                    env=environment)
             except Exception:
                 # Don't leak the just-opened log file when the launch itself
                 # fails (e.g. a binary that is not executable); the exception

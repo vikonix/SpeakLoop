@@ -460,13 +460,21 @@ EXTERNAL_N_GPU_LAYERS = _gpu_layers_setting(
 # treat it as a typo rather than passing it through.
 EXTERNAL_N_CTX = int(_num("external_n_ctx", 16384, minimum=256))
 
-# Generation tuning parameters
-LLM_TEMPERATURE = 0.3
+# Sampling. The values Google recommends for Gemma, which its GGUF also carries
+# as the server defaults (docs/model-parameters.md, section 9). They replace
+# temperature 0.3 / top_p 0.9, which were chosen for Llama 3.2 3B; a Gemma
+# lesson with the old values is the comparison to make if the replies turn
+# out too loose.
+LLM_TEMPERATURE = 1.0
+LLM_TOP_P = 0.95
+# Not a field of the OpenAI API: llm.py sends it only to llama-server. Without
+# it the server takes the default of the loaded GGUF or its own, which is not
+# 64 for every model.
+LLM_TOP_K = 64
 # Long enough for the multi-line SUMMARY of stage 3. At about 5 tokens per
 # second on a weak machine a reply this long takes close to two minutes, so
 # the limit is a safety stop and not the expected length.
 LLM_MAX_TOKENS = 512
-LLM_TOP_P = 0.9
 
 # Context buffer constraints
 LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept in short-term memory

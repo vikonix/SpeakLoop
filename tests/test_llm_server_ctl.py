@@ -429,6 +429,37 @@ class RunningServerTests(unittest.TestCase):
         manager.check_connection.assert_not_called()
 
 
+class ServerEnvironmentTests(unittest.TestCase):
+    """server_environment: this process's environment plus the threshold."""
+
+    VAR = llm_server_ctl.OP_OFFLOAD_MIN_BATCH_VAR
+
+    def test_the_threshold_is_set_by_default(self):
+        # 16: a learner's reply arrives as a batch of about 30 tokens, which
+        # the ggml default (32) leaves on the CPU (model-parameters.md, 4.9).
+        with patch.dict(llm_server_ctl.os.environ, clear=False) as environ:
+            environ.pop(self.VAR, None)
+            environment = llm_server_ctl.server_environment()
+        self.assertEqual(environment[self.VAR], "16")
+
+    def test_a_value_set_by_the_owner_is_kept(self):
+        with patch.dict(llm_server_ctl.os.environ, {self.VAR: "24"}):
+            environment = llm_server_ctl.server_environment()
+        self.assertEqual(environment[self.VAR], "24")
+
+    def test_the_rest_of_the_environment_is_passed_on(self):
+        # The server needs PATH to find its CUDA runtime.
+        with patch.dict(llm_server_ctl.os.environ, {"SPEAKLOOP_TEST": "x"}):
+            environment = llm_server_ctl.server_environment()
+        self.assertEqual(environment["SPEAKLOOP_TEST"], "x")
+
+    def test_this_process_is_not_changed(self):
+        with patch.dict(llm_server_ctl.os.environ, clear=False) as environ:
+            environ.pop(self.VAR, None)
+            llm_server_ctl.server_environment()
+            self.assertNotIn(self.VAR, llm_server_ctl.os.environ)
+
+
 class LaunchedServerContextTests(unittest.TestCase):
     """A server this run started is asked for its context too.
 
@@ -453,7 +484,7 @@ class LaunchedServerContextTests(unittest.TestCase):
                 patch.object(llm_server_ctl, "server_properties",
                              return_value=props) as read_props, \
                 patch.object(llm_server_ctl.subprocess, "Popen",
-                             return_value=process), \
+                             return_value=process) as popen, \
                 patch.object(llm_server_ctl.bootstrap, "log_file_mode",
                              return_value="w"), \
                 patch.multiple(config, LLM_SERVER_HOST=HOST,
@@ -470,7 +501,18 @@ class LaunchedServerContextTests(unittest.TestCase):
                 started = controller.start(manager)
             # Closes the log file before the directory is removed.
             controller._log_file.close()
+        self.popen = popen
         return controller, started, read_props, "\n".join(captured.output)
+
+    def test_the_server_gets_the_batch_threshold(self):
+        with patch.dict(llm_server_ctl.os.environ, clear=False) as environ:
+            environ.pop(llm_server_ctl.OP_OFFLOAD_MIN_BATCH_VAR, None)
+            _, _, _, log = self._start(None)
+        environment = self.popen.call_args.kwargs["env"]
+        self.assertEqual(environment[llm_server_ctl.OP_OFFLOAD_MIN_BATCH_VAR],
+                         "16")
+        # Not on the command line, so the log is the only record of it.
+        self.assertIn(f"{llm_server_ctl.OP_OFFLOAD_MIN_BATCH_VAR}=16", log)
 
     def test_the_launched_server_is_asked_for_its_context(self):
         controller, started, read_props, _ = self._start(

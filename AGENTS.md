@@ -138,9 +138,13 @@ the key differ.
   body, since `str()` of an API error is the whole HTTP problem.
   `LLM_TIMEOUT` (360 s) is the longest pause before the first token on a weak
   machine, and the client makes **no retries** (a retry repeats the prompt
-  processing); `check_connection` has its own short timeout. Known limit of
-  this step: llama-server runs Gemma with thinking on, and the thinking arrives
-  in `reasoning_content`, which is not read (step 2b).
+  processing); `check_connection` has its own short timeout.
+  `request_extra_body()` adds fields outside the OpenAI API **for llama-server
+  only**: `chat_template_kwargs.enable_thinking=false` (llama-server turns
+  Gemma's thinking on by default, and it cost 40 s per one-line reply in
+  `reasoning_content`, which this module never reads) and `top_k`. Do not drop
+  it or send it to LM Studio. Sampling values are Gemma's recommended ones
+  (`LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K` in config).
 - [`speakloop/llm_server_ctl.py`](speakloop/llm_server_ctl.py) -
   `LLMServerController`: starts and stops the llama-server subprocess (own
   process, so the model server and Kokoro do not contend for the GPU).
@@ -167,7 +171,11 @@ the key differ.
   GPU layers: with `EXTERNAL_N_GPU_LAYERS == "auto"` **no `--n-gpu-layers` is
   passed** - an explicit value switches the fit (`-fit`) off - and `-fitc`
   always equals `--ctx-size`, so the fit gives up layers, not context
-  (`docs/model-parameters.md`).
+  (`docs/model-parameters.md`). The subprocess runs with
+  `server_environment()`: this process's environment plus
+  `GGML_OP_OFFLOAD_MIN_BATCH=16` (`setdefault`, so an exported value wins), so
+  a learner's reply of about 30 tokens is computed on the GPU under partial
+  offload; the value is logged because it is not on the command line.
 - [`speakloop/tts.py`](speakloop/tts.py) - two roles: a **synthesis backend**
   per engine (`KokoroBackend` on torch at 24 kHz, `SupertonicBackend` on ONNX at
   44.1 kHz), selected from the `TTS_BACKENDS` registry by the active variant's
