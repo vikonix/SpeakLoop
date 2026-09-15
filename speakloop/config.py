@@ -74,6 +74,7 @@ _KNOWN_USER_KEYS = {
     "llama_server_path",
     "external_model_path",
     "external_n_ctx",
+    "external_n_gpu_layers",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
@@ -290,6 +291,12 @@ def _model_device(hw_key: str, default: str) -> str:
 # own rule.
 STT_DEVICE = _model_device("STT_DEVICE", DEVICE)
 
+# Device of Kokoro. A key of its own and not DEVICE: detect_hardware moves the
+# speech models to the CPU when the chat model needs the whole card, and
+# writing "cpu" into DEVICE instead would make warn_if_gpu_unused report a
+# CUDA problem that does not exist.
+TTS_DEVICE = _model_device("TTS_DEVICE", DEVICE)
+
 # =====================================================================
 # LLM Backend Settings
 # =====================================================================
@@ -341,8 +348,11 @@ LLM_SERVER_URL = f"http://{LLM_SERVER_HOST}:{LLM_SERVER_PORT}/v1"
 # any page open in a browser could call 127.0.0.1:8765 and read the answer.
 LLM_SERVER_API_KEY = "local"
 
-# How long (seconds) to wait for the server to become ready after launching
-LLM_SERVER_STARTUP_TIMEOUT = 60
+# How long (seconds) to wait for the server to become ready after launching.
+# The measured load of the 7 GB Gemma file was 16 s with the file in the OS
+# cache; a cold disk and the memory fit (-fit) come on top of that, and a
+# timeout here terminates a server that was about to answer.
+LLM_SERVER_STARTUP_TIMEOUT = 120
 
 # =====================================================================
 # llama-server binary (for the "llama-server" backend)
@@ -408,20 +418,54 @@ EXTERNAL_MODEL_PATH = _path(
     "external_model_path",
     paths.models_dir() / models_info.GGUF_CHAT.filename,
 )
-# GPU offload and context size from hardware detection; the literals are the
-# conservative fallbacks for a machine without hardware_config.json.
-EXTERNAL_N_GPU_LAYERS = _HW.get("EXTERNAL_N_GPU_LAYERS", 20)  # -1 = all layers
-# Context window size (n_ctx). settings.json ("external_n_ctx") wins over the
-# detected value, per the usual layering. int() because the value is passed to
-# the server as a command-line argument (a float would break it). minimum=256:
-# anything below breaks generation outright (the system prompt alone would not
-# fit), so treat it as a typo rather than passing it through.
-EXTERNAL_N_CTX = int(_num("external_n_ctx",
-                          _HW.get("EXTERNAL_N_CTX", 2048), minimum=256))
+# Neither value below is read from hardware_config.json any more (see
+# docs/model-parameters.md). A file written before stage 2 still holds
+# EXTERNAL_N_GPU_LAYERS and EXTERNAL_N_CTX; reading them would pass -ngl and
+# switch the memory fit off, and would cut the lesson context to 2048 tokens.
+
+# Words llama-server's --n-gpu-layers accepts besides a number. "auto" is
+# the default and passes no argument at all, so llama.cpp fits the layers
+# into the free VRAM itself (-fit); "all" offloads every layer.
+GPU_LAYERS_WORDS = ("auto", "all")
+
+
+def _gpu_layers_setting(value) -> str:
+    """The "external_n_gpu_layers" value as llama-server takes it, or "auto".
+
+    A string because the result goes to the command line unchanged. A number
+    or "all" is a manual override: it switches the memory fit off, which is
+    the point for an owner who has measured that more layers fit than the fit
+    chooses (docs/model-parameters.md, section 7.3).
+    """
+    if value in GPU_LAYERS_WORDS:
+        return value
+    # bool is a subclass of int - exclude it so `true` is not taken as 1.
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return str(value)
+    print(f"[config] settings.json: external_n_gpu_layers must be "
+          f"{' or '.join(repr(word) for word in GPU_LAYERS_WORDS)} or a whole "
+          f"number from 0, got {value!r}; using 'auto'", file=sys.stderr)
+    return "auto"
+
+
+EXTERNAL_N_GPU_LAYERS = _gpu_layers_setting(
+    _USER.get("external_n_gpu_layers", "auto"))
+
+# Context window size (n_ctx), from settings.json ("external_n_ctx"). The
+# default holds the lesson prompt (about 2300 tokens) and a long conversation.
+# It is also passed as -fitc, so the memory fit takes GPU layers away rather
+# than shrink the context. int() because the value is passed to the server as
+# a command-line argument (a float would break it). minimum=256: anything
+# below breaks generation outright (the system prompt alone would not fit), so
+# treat it as a typo rather than passing it through.
+EXTERNAL_N_CTX = int(_num("external_n_ctx", 16384, minimum=256))
 
 # Generation tuning parameters
 LLM_TEMPERATURE = 0.3
-LLM_MAX_TOKENS = 50
+# Long enough for the multi-line SUMMARY of stage 3. At about 5 tokens per
+# second on a weak machine a reply this long takes close to two minutes, so
+# the limit is a safety stop and not the expected length.
+LLM_MAX_TOKENS = 512
 LLM_TOP_P = 0.9
 
 # Context buffer constraints

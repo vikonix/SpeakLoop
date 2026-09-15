@@ -195,6 +195,63 @@ class UserSettingTests(unittest.TestCase):
         self.assertLessEqual(keys, config._KNOWN_USER_KEYS)
 
 
+class GpuLayersSettingTests(unittest.TestCase):
+    """external_n_gpu_layers: "auto", "all" or a whole number, as a string.
+
+    Every rejected value prints a line to stderr; mock.patch keeps it out of
+    the test report.
+    """
+
+    def _parse(self, value):
+        with mock.patch("sys.stderr"):
+            return config._gpu_layers_setting(value)
+
+    def test_the_key_is_known(self):
+        self.assertIn("external_n_gpu_layers", config._KNOWN_USER_KEYS)
+
+    def test_the_two_words_are_kept(self):
+        self.assertEqual(self._parse("auto"), "auto")
+        self.assertEqual(self._parse("all"), "all")
+
+    def test_a_whole_number_becomes_a_string(self):
+        # The value goes to the command line unchanged.
+        self.assertEqual(self._parse(20), "20")
+        self.assertEqual(self._parse(0), "0")
+
+    def test_invalid_values_fall_back_to_auto(self):
+        # A typo must not switch the memory fit off: "auto" is the safe value.
+        for value in (-1, 2.5, True, "20", "Auto", "", None, [20]):
+            with self.subTest(value=value):
+                self.assertEqual(self._parse(value), "auto")
+
+    def test_the_resolved_value_is_a_valid_one(self):
+        # Whatever the checkout's settings.json says.
+        value = config.EXTERNAL_N_GPU_LAYERS
+        self.assertTrue(value in config.GPU_LAYERS_WORDS or value.isdigit(),
+                        value)
+
+
+class LlmSettingTests(unittest.TestCase):
+    """The stage 2 values of the chat model (docs/model-parameters.md)."""
+
+    def test_the_context_is_a_whole_number_of_at_least_256(self):
+        # It goes to the command line twice (--ctx-size and -fitc), where a
+        # float would break the launch.
+        self.assertIsInstance(config.EXTERNAL_N_CTX, int)
+        self.assertGreaterEqual(config.EXTERNAL_N_CTX, 256)
+
+    def test_the_reply_limit_leaves_room_for_a_summary(self):
+        self.assertGreaterEqual(config.LLM_MAX_TOKENS, 512)
+
+    def test_the_speech_devices_are_capped_by_device(self):
+        # Both come from _model_device, so neither can be "cuda" on a machine
+        # where torch runs on the CPU.
+        if config.DEVICE != "cuda":
+            self.assertEqual(config.STT_DEVICE, "cpu")
+            self.assertEqual(config.TTS_DEVICE, "cpu")
+        self.assertIn(config.TTS_DEVICE, ("cuda", "cpu"))
+
+
 class AudioSettingTests(unittest.TestCase):
     """The rate of the audio pipeline, which two modules have to agree on."""
 

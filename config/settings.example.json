@@ -18,6 +18,8 @@
   "lm_studio_host": "localhost:1234",
   "_llama_server_path": "The llama-server binary to start, for a build you manage yourself. An empty value (the default) uses bin/llama/, where 'python -m speakloop.llama_server_fetch' installs it, and falls back to a llama-server on PATH. A relative path is resolved against this directory.",
   "llama_server_path": "",
-  "_external_model_path": "GGUF model file for the 'llama-server' backend (unused with 'lm-studio'). Add this key only to point the app at a model of your own: with the key absent it finds the downloaded one in models/ by itself. A relative path is resolved against this directory.",
-  "_external_n_ctx": "Context window size (--ctx-size) of the local GGUF model. Add this key only to override the value hardware detection wrote into hardware_config.json. Minimum 256."
+  "_external_model_path": "GGUF model file for the 'llama-server' backend (unused with 'lm-studio'). Add this key only to point the app at a model of your own: with the key absent it finds the downloaded one in models/ by itself. For the smaller fallback model, run 'python -m speakloop.gguf_fetch --fallback' and set this key to '../models/llama-3.2-3b-instruct-q4_k_m.gguf'. A relative path is resolved against this directory.",
+  "_external_n_ctx": "Context window size (--ctx-size) of the local GGUF model. The default is 16384. llama.cpp is told not to shrink it when it fits the model into the free video memory. Minimum 256.",
+  "_external_n_gpu_layers": "Model layers on the GPU (--n-gpu-layers). 'auto' (the default) lets llama.cpp choose from the free video memory at every start. A whole number (0 or more) or 'all' sets the value by hand and turns that choice off: use it only after you measured your computer (docs/model-parameters.md, section 7.3) and keep at least 500 MiB of video memory free, or the driver silently moves weights to system memory and the answers become much slower.",
+  "external_n_gpu_layers": "auto"
 }

@@ -52,15 +52,28 @@ PROPS_TIMEOUT_SEC = 2.0
 #   --cache-reuse 256: keeps prefix reuse at the level llama-cpp-python gave,
 #                      which the stable system prompt of llm.py relies on.
 # --ctx-size is passed explicitly for the same reason: the default (0) takes
-# the model's own training context (131072 for Llama 3.2) and inflates the KV
-# cache to fill free VRAM.
+# the model's own training context and inflates the KV cache to fill free VRAM.
 LLAMA_SERVER_PARALLEL_SLOTS = 1
 LLAMA_SERVER_CACHE_REUSE = 256
 
+# The --n-gpu-layers value that passes no argument at all (see
+# config.GPU_LAYERS_WORDS).
+AUTO_GPU_LAYERS = "auto"
+
 
 def llama_server_command(exe_path: str, model_path: str, host: str, port: int,
-                         n_gpu_layers: int, n_ctx: int, api_key: str) -> list:
+                         n_gpu_layers: str, n_ctx: int, api_key: str) -> list:
     """Command line for the llama.cpp binary (the "llama-server" backend).
+
+    GPU layers: with *n_gpu_layers* "auto" no --n-gpu-layers is passed, so
+    llama.cpp fits the layers into the free VRAM itself (-fit, on by
+    default). Any other value is passed as it is, and an explicit value
+    switches that fit off (docs/model-parameters.md, section 3).
+
+    -fitc equals the context: without it the fit shrinks the context, with no
+    error, when the VRAM is short. The lesson needs its context more than a few
+    GPU layers, so the fit has to give up layers instead. Passed with a manual
+    layer count too, where it has no effect, so the command has one shape.
 
     --no-ui drops the bundled browser UI: the app talks HTTP only, and not
     serving the assets keeps the surface small. (--no-webui is the same switch
@@ -71,18 +84,23 @@ def llama_server_command(exe_path: str, model_path: str, host: str, port: int,
     a browser could call this port and read the answer. The value is the one
     LLMManager already sends, so requiring it costs nothing.
     """
-    return [
+    command = [
         exe_path,
         "-m", model_path,
         "--host", host,
         "--port", str(port),
-        "--n-gpu-layers", str(n_gpu_layers),
+    ]
+    if n_gpu_layers != AUTO_GPU_LAYERS:
+        command += ["--n-gpu-layers", str(n_gpu_layers)]
+    command += [
         "--ctx-size", str(n_ctx),
+        "-fitc", str(n_ctx),
         "--parallel", str(LLAMA_SERVER_PARALLEL_SLOTS),
         "--cache-reuse", str(LLAMA_SERVER_CACHE_REUSE),
         "--api-key", api_key,
         "--no-ui",
     ]
+    return command
 
 
 def port_is_busy(host: str, port: int) -> bool:
@@ -190,6 +208,11 @@ class LLMServerController:
         # The full reason is always in the log; this is the part of it a user
         # can act on (see app.py, which shows it in the chat).
         self.last_error: Optional[str] = None
+        # Per-slot context the ready server reports through /props, or None
+        # when it did not say. Read for a launched server as well as for an
+        # adopted one: -fitc should keep the configured value, and app.py
+        # tells the user when the server still has less.
+        self.served_n_ctx: Optional[int] = None
 
     def _build_command(self) -> Optional[list]:
         """Command line for llama-server, or None on a bad setup.
@@ -271,7 +294,7 @@ class LLMServerController:
             "context size and GPU layers are the ones it was started with, "
             "not the ones this run configured.", host, port)
         self._log_served_model(llm_mgr)
-        self._log_served_context(host, port)
+        self.served_n_ctx = self._log_served_context(host, port)
         return True
 
     @staticmethod
@@ -304,14 +327,18 @@ class LLMServerController:
                 "loaded.", expected)
 
     @staticmethod
-    def _log_served_context(host: str, port: int) -> None:
-        """Record the context size of the adopted server; warn if it is small.
+    def _log_served_context(host: str, port: int) -> Optional[int]:
+        """Record the context size of the ready server; warn if it is small.
+
+        Returns that size, or None when the server did not report one.
 
         The number that matters most about a server this run did not start: a
         conversation sized for a larger context is truncated by a smaller one
         silently, on the server, and nothing else in the app would report it.
-        A larger context than configured costs only VRAM, so only the harmful
-        direction is a warning.
+        A server this run started is asked too, because llama.cpp's memory fit
+        can shrink the context without an error, and -fitc is the only guard
+        against that. A larger context than configured costs only VRAM, so
+        only the harmful direction is a warning.
 
         The value read is the per-slot context (`n_ctx` of
         default_generation_settings), which is the one a request actually gets.
@@ -323,12 +350,13 @@ class LLMServerController:
         """
         props = server_properties(host, port, config.LLM_SERVER_API_KEY)
         if props is None:
-            return
+            return None
         settings = props.get("default_generation_settings")
         n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
-        if not isinstance(n_ctx, int):
+        # bool is a subclass of int, and a JSON true is not a context size.
+        if not isinstance(n_ctx, int) or isinstance(n_ctx, bool):
             logging.info("The running server did not report a context size.")
-            return
+            return None
         logging.info("The running server has a context size of %s tokens; "
                      "this run is configured for %s.",
                      n_ctx, config.EXTERNAL_N_CTX)
@@ -337,6 +365,7 @@ class LLMServerController:
                 "The running server has a smaller context (%s tokens) than "
                 "this run configured (%s). A long conversation is cut by that "
                 "server, not by SpeakLoop.", n_ctx, config.EXTERNAL_N_CTX)
+        return n_ctx
 
     def start(self, llm_mgr: LLMManager) -> bool:
         """Launch the server subprocess and block until it responds.
@@ -353,6 +382,7 @@ class LLMServerController:
         """
         self.adopted = False
         self.last_error = None
+        self.served_n_ctx = None
         if self._use_running_server(llm_mgr):
             return True
         if self.last_error is not None:
@@ -427,6 +457,8 @@ class LLMServerController:
                 return False
             if llm_mgr.check_connection(silent=True):
                 logging.info("LLM server is ready.")
+                self.served_n_ctx = self._log_served_context(
+                    config.LLM_SERVER_HOST, config.LLM_SERVER_PORT)
                 return True
             time.sleep(1.0)
 

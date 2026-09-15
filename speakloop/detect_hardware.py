@@ -7,10 +7,12 @@ Probes the machine (RAM, CPU, GPU/VRAM, audio devices) and writes
 config/hardware_config.json with two sections:
 
   "hardware" - raw facts about the machine, for diagnostics;
-  "config"   - ready-to-use parameter values (EXTERNAL_N_GPU_LAYERS,
-               DEVICE, STT_DEVICE etc.) picked from the detected hardware.
+  "config"   - ready-to-use parameter values (DEVICE, STT_DEVICE,
+               TTS_DEVICE, audio devices) picked from the detected hardware.
                The app reads these instead of the hard-coded defaults in
-               config.py.
+               config.py. The chat model's GPU layers and context are NOT
+               here: llama.cpp fits them into the free VRAM itself at launch
+               (docs/model-parameters.md).
 
 Run it manually whenever the hardware changes:
 
@@ -121,8 +123,13 @@ def _setup_logging() -> None:
     bootstrap.open_log_section(handler, LOG_FILE)
     logger.addHandler(handler)
 
-# llama-3.2-3b-instruct has 28 transformer layers; -1 below means "offload all".
-MODEL_TOTAL_LAYERS = 28
+# Smallest card, in GB as vram_gb reports it, on which the speech models stay
+# on the GPU next to the chat model. Gemma 4 12B Q4_0 takes about 6.5 GiB, its
+# 16k context and compute buffers add more, and faster-whisper and Kokoro each
+# open a CUDA context of their own (about 1-1.5 GB together). Below this size
+# the chat model needs the whole card, and the speech models lose little on
+# the CPU next to its answer time (docs/model-parameters.md, section 7.2).
+SPEECH_GPU_MIN_VRAM_GB = 12
 
 
 # =====================================================================
@@ -323,7 +330,7 @@ def _probe_llama_offload(warnings: list, gpu_present: bool) -> bool | None:
     then fall back to physical GPU presence, which is what build_config does.
     *gpu_present* only decides whether a negative answer is worth a warning: on
     a machine without a GPU "the LLM cannot use the GPU" is not news, and
-    build_config zeroes the LLM's VRAM budget on absence anyway.
+    build_config treats an absent GPU as one the LLM does not use anyway.
     """
     # Deferred rather than imported at the top: an unimportable fetcher is a
     # recorded warning here, not a failure to detect the rest of the machine.
@@ -357,7 +364,7 @@ def _probe_llama_offload(warnings: list, gpu_present: bool) -> bool | None:
     if pattern is None:
         # A CPU build cannot offload, full stop. This is the one branch that
         # answers a definite False rather than None, which is what lets
-        # build_config zero the LLM's VRAM budget.
+        # build_config leave the whole card to the speech models.
         if gpu_present:
             # Deliberately not naming the build a retry would land on: that
             # depends on the platform (llama.cpp publishes CUDA binaries for
@@ -479,41 +486,32 @@ def build_config(hardware: dict) -> dict:
     """Pick concrete app parameters from the detected hardware.
 
     The names match the constants in config.py so the app can apply them
-    directly. LLM parameters (N_GPU_LAYERS, N_CTX) follow the physical GPU and
-    the installed llama-server build's own device probe - NOT torch or
-    ctranslate2, which are separate stacks used by the speech models. Threshold
-    rationale: the GGUF model weighs ~2 GB at Q4_K_M and Kokoro and Whisper
-    also claim VRAM when they run on the GPU, so full offload needs a
-    comfortable margin.
+    directly. The chat model gets no values here: llama-server fits its GPU
+    layers into the free VRAM at launch, and its context is a setting.
+
+    The chat model is still what decides the speech devices. It shares the
+    card with them, and on a card below SPEECH_GPU_MIN_VRAM_GB it needs all of
+    it, so faster-whisper and Kokoro go to the CPU there. A card the chat
+    model cannot use (a CPU build of llama-server) is free for them whatever
+    its size. The LLM side follows the physical GPU and llama-server's own
+    device probe - NOT torch or ctranslate2, which are the speech stacks.
     """
     gpu = hardware["gpu"]
 
     # LLM side: usable unless llama-server explicitly reported no usable device
     # (None = nothing to ask, assume a present GPU is usable).
-    llm_vram = gpu["vram_gb"] or 0
-    if not gpu["present"] or gpu["llama_gpu_offload"] is False:
-        llm_vram = 0
+    llm_uses_gpu = gpu["present"] and gpu["llama_gpu_offload"] is not False
+    speech_fits_on_gpu = (not llm_uses_gpu
+                          or (gpu["vram_gb"] or 0) >= SPEECH_GPU_MIN_VRAM_GB)
 
-    if llm_vram >= 6:
-        n_gpu_layers = -1  # all MODEL_TOTAL_LAYERS layers
-    elif llm_vram >= 4:
-        n_gpu_layers = 20
-    elif llm_vram >= 3:
-        n_gpu_layers = 12
-    elif llm_vram >= 2:
-        n_gpu_layers = 8
-    else:
-        n_gpu_layers = 0
-
-    # Speech side. Neither device carries a VRAM headroom rule: Kokoro
-    # (~360 MB) and Whisper small (~500 MB at float16) are small next to the
-    # GGUF, so a card that runs the LLM runs them too. What decides is whether
-    # the stack can reach CUDA at all.
+    # DEVICE stays the plain answer to "does torch see CUDA": config caps the
+    # per-model devices by it, and warn_if_gpu_unused reads it as that answer.
     return {
         "DEVICE": "cuda" if gpu["torch_cuda"] else "cpu",
-        "STT_DEVICE": "cuda" if gpu["stt_cuda"] else "cpu",
-        "EXTERNAL_N_GPU_LAYERS": n_gpu_layers,
-        "EXTERNAL_N_CTX": 4096 if llm_vram >= 8 else 2048,
+        "STT_DEVICE": ("cuda" if gpu["stt_cuda"] and speech_fits_on_gpu
+                       else "cpu"),
+        "TTS_DEVICE": ("cuda" if gpu["torch_cuda"] and speech_fits_on_gpu
+                       else "cpu"),
         # null = system default device, which is the right choice on most
         # machines; the indices of all devices are listed under "hardware".
         "AUDIO_INPUT_DEVICE": None,

@@ -5,8 +5,8 @@
 
 Three things are worth testing without a machine to probe: the decision table
 of the llama-server offload probe (which of True/False/None each situation
-deserves), the speech-recognition CUDA probe, and the thresholds build_config
-turns the answers into. Everything
+deserves), the speech-recognition CUDA probe, and the speech-device rule
+build_config turns the answers into. Everything
 that would touch a disk or spawn a process is stubbed. Run from the project
 root with:
 
@@ -144,49 +144,30 @@ class ProbeLlamaOffloadTests(unittest.TestCase):
 
 
 class BuildConfigLlmTests(unittest.TestCase):
-    """How the probe's verdict and the card's VRAM become LLM parameters."""
+    """The chat model gets no values from the probe any more."""
 
-    def test_offload_capable_card_gets_every_layer(self):
+    def test_no_llm_values_are_written(self):
+        # llama.cpp fits the GPU layers itself and the context is a setting.
+        # A written value would be read by an older config.py and pass -ngl.
         config = detect_hardware.build_config(
-            hardware(vram_gb=24.0, offload=True))
-        self.assertEqual(config["EXTERNAL_N_GPU_LAYERS"], -1)
-        self.assertEqual(config["EXTERNAL_N_CTX"], 4096)
+            hardware(vram_gb=24.0, offload=True, torch_cuda=True,
+                     stt_cuda=True))
+        self.assertNotIn("EXTERNAL_N_GPU_LAYERS", config)
+        self.assertNotIn("EXTERNAL_N_CTX", config)
 
     def test_unknown_verdict_trusts_the_physical_card(self):
         # None must behave exactly like True here - this is what lets
         # detect_hardware run before the binary is installed without changing
-        # the numbers it writes.
-        self.assertEqual(
-            detect_hardware.build_config(hardware(vram_gb=24.0, offload=None)),
-            detect_hardware.build_config(hardware(vram_gb=24.0, offload=True)))
-
-    def test_negative_verdict_zeroes_the_llm_budget(self):
-        config = detect_hardware.build_config(
-            hardware(vram_gb=24.0, offload=False))
-        self.assertEqual(config["EXTERNAL_N_GPU_LAYERS"], 0)
-        self.assertEqual(config["EXTERNAL_N_CTX"], 2048)
-
-    def test_absent_gpu_zeroes_the_llm_budget(self):
-        config = detect_hardware.build_config(
-            hardware(vram_gb=None, present=False, offload=None))
-        self.assertEqual(config["EXTERNAL_N_GPU_LAYERS"], 0)
-        self.assertEqual(config["EXTERNAL_N_CTX"], 2048)
-
-    def test_layer_count_follows_the_vram_ladder(self):
-        for vram, expected in ((8.0, -1), (6.0, -1), (5.0, 20), (4.0, 20),
-                               (3.0, 12), (2.0, 8), (1.0, 0)):
+        # the values it writes.
+        for vram in (4.0, 24.0):
             with self.subTest(vram=vram):
-                config = detect_hardware.build_config(
-                    hardware(vram_gb=vram, offload=True))
-                self.assertEqual(config["EXTERNAL_N_GPU_LAYERS"], expected)
-
-    def test_context_size_needs_eight_gigabytes(self):
-        self.assertEqual(
-            detect_hardware.build_config(
-                hardware(vram_gb=8.0, offload=True))["EXTERNAL_N_CTX"], 4096)
-        self.assertEqual(
-            detect_hardware.build_config(
-                hardware(vram_gb=6.0, offload=True))["EXTERNAL_N_CTX"], 2048)
+                self.assertEqual(
+                    detect_hardware.build_config(hardware(
+                        vram_gb=vram, offload=None, torch_cuda=True,
+                        stt_cuda=True)),
+                    detect_hardware.build_config(hardware(
+                        vram_gb=vram, offload=True, torch_cuda=True,
+                        stt_cuda=True)))
 
 
 class ProbeSttCudaTests(unittest.TestCase):
@@ -241,37 +222,61 @@ class ProbeSttCudaTests(unittest.TestCase):
 
 
 class BuildConfigSpeechTests(unittest.TestCase):
-    """The speech devices are independent of the LLM verdict, by design."""
+    """The speech devices: their own probes, and the room the chat model leaves."""
 
-    def test_devices_follow_their_own_probes_not_the_llm_probe(self):
-        config = detect_hardware.build_config(
-            hardware(vram_gb=24.0, offload=False, torch_cuda=True,
-                     stt_cuda=True))
-        self.assertEqual(config["DEVICE"], "cuda")
-        self.assertEqual(config["STT_DEVICE"], "cuda")
+    LARGE = detect_hardware.SPEECH_GPU_MIN_VRAM_GB
+    SMALL = 4.0  # the reference laptop (docs/model-parameters.md, section 2)
+
+    def _devices(self, **kwargs):
+        config = detect_hardware.build_config(hardware(**kwargs))
+        return config["DEVICE"], config["STT_DEVICE"], config["TTS_DEVICE"]
+
+    def test_a_large_card_keeps_the_speech_models_on_the_gpu(self):
+        self.assertEqual(
+            self._devices(vram_gb=self.LARGE, offload=True, torch_cuda=True,
+                          stt_cuda=True),
+            ("cuda", "cuda", "cuda"))
+
+    def test_a_small_card_is_left_to_the_chat_model(self):
+        # DEVICE stays "cuda": it answers whether torch sees CUDA, and a "cpu"
+        # there would make warn_if_gpu_unused report a broken install.
+        self.assertEqual(
+            self._devices(vram_gb=self.SMALL, offload=True, torch_cuda=True,
+                          stt_cuda=True),
+            ("cuda", "cpu", "cpu"))
+
+    def test_a_card_just_below_the_threshold_is_small(self):
+        just_below = self.LARGE - 0.1
+        self.assertEqual(
+            self._devices(vram_gb=just_below, offload=True, torch_cuda=True,
+                          stt_cuda=True)[1:],
+            ("cpu", "cpu"))
+
+    def test_a_card_the_chat_model_cannot_use_is_free_for_speech(self):
+        # A CPU build of llama-server leaves even a small card to the speech
+        # models.
+        self.assertEqual(
+            self._devices(vram_gb=self.SMALL, offload=False, torch_cuda=True,
+                          stt_cuda=True),
+            ("cuda", "cuda", "cuda"))
 
     def test_cpu_only_torch_build_falls_back(self):
-        config = detect_hardware.build_config(
-            hardware(vram_gb=24.0, offload=True, torch_cuda=False))
-        self.assertEqual(config["DEVICE"], "cpu")
-        self.assertEqual(config["STT_DEVICE"], "cpu")
+        self.assertEqual(
+            self._devices(vram_gb=24.0, offload=True, torch_cuda=False),
+            ("cpu", "cpu", "cpu"))
 
     def test_the_two_speech_devices_are_decided_separately(self):
         # torch can reach CUDA while ctranslate2 cannot; Kokoro should still
         # get the card.
-        config = detect_hardware.build_config(
-            hardware(vram_gb=24.0, offload=True, torch_cuda=True,
-                     stt_cuda=False))
-        self.assertEqual(config["DEVICE"], "cuda")
-        self.assertEqual(config["STT_DEVICE"], "cpu")
+        self.assertEqual(
+            self._devices(vram_gb=24.0, offload=True, torch_cuda=True,
+                          stt_cuda=False),
+            ("cuda", "cpu", "cuda"))
 
-    def test_small_card_keeps_the_speech_models_on_the_gpu(self):
-        # No VRAM headroom rule: the speech models are small next to the GGUF.
-        config = detect_hardware.build_config(
-            hardware(vram_gb=4.0, offload=True, torch_cuda=True,
-                     stt_cuda=True))
-        self.assertEqual(config["DEVICE"], "cuda")
-        self.assertEqual(config["STT_DEVICE"], "cuda")
+    def test_no_gpu_means_cpu_everywhere(self):
+        self.assertEqual(
+            self._devices(vram_gb=None, present=False, offload=None),
+            ("cpu", "cpu", "cpu"))
 
 
 class UnwritableDataRootTests(unittest.TestCase):

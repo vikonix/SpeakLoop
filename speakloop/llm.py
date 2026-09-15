@@ -10,8 +10,24 @@ from openai import OpenAI
 
 from speakloop import config
 
-# Technical configuration parameters
-LLM_TIMEOUT = 30.0
+# Seconds the client waits for the server. For a streamed reply this is the
+# longest pause between two chunks, and the longest pause is the prompt
+# processing before the first token. On a weak machine that is about 44 s for
+# the lesson prompt, and a full re-read of a 16384-token context at the
+# measured 52.8 tokens per second is about 310 s (docs/model-parameters.md).
+# A shorter value ends a reply that was about to come.
+LLM_TIMEOUT = 360.0
+
+# The client repeats a timed-out or failed request twice by default. A repeat
+# costs the whole prompt processing again, and the server-start poll in
+# llm_server_ctl already repeats on its own schedule, so none is made here.
+LLM_MAX_RETRIES = 0
+
+# Seconds check_connection waits for the model list. Much shorter than
+# LLM_TIMEOUT: a loading llama-server answers 503 at once, and a program on
+# the port that accepts the connection but never answers must not hold the
+# startup for the six minutes a reply may take.
+LLM_CHECK_TIMEOUT = 10.0
 
 # Model name sent in every request. Both backends ignore it - llama-server
 # serves the one GGUF it was started with and LM Studio the one it has loaded -
@@ -77,6 +93,7 @@ class LLMManager:
             base_url=url,
             api_key=key,
             timeout=LLM_TIMEOUT,
+            max_retries=LLM_MAX_RETRIES,
         )
 
     def check_connection(self, silent: bool = False) -> bool:
@@ -89,7 +106,7 @@ class LLMManager:
         try:
             if self.client is None:
                 raise RuntimeError("LLM client not initialized. Call init_client() first.")
-            self.client.models.list()
+            self.client.models.list(timeout=LLM_CHECK_TIMEOUT)
             logging.info("Successfully connected to LLM server.")
             return True
         except Exception as error:

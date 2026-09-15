@@ -16,20 +16,23 @@ sentence the window can show. Run from the project root with:
 import io
 import json
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from speakloop import config, llama_server_fetch, llm_server_ctl
 from speakloop.llm_server_ctl import LLMServerController, llama_server_command
 
-MODEL = "/models/llama-3.2-3b-instruct-q4_k_m.gguf"
-MODEL_FILE = "llama-3.2-3b-instruct-q4_k_m.gguf"
+MODEL = "/models/gemma-4-12B-it-QAT-Q4_0.gguf"
+MODEL_FILE = "gemma-4-12B-it-QAT-Q4_0.gguf"
 HOST = "127.0.0.1"
 PORT = 8765
 URL = f"http://{HOST}:{PORT}/v1"
-NGL = 20
-NCTX = 2048
+# A manual override, as config.EXTERNAL_N_GPU_LAYERS holds it (a string).
+NGL = "20"
+NCTX = 16384
 API_KEY = "local"
 
 
@@ -72,10 +75,34 @@ class LlamaServerCommandTests(unittest.TestCase):
 
     def test_context_size_is_explicit(self):
         # Never leave it to the default (-c 0): that takes the model's own
-        # training context (131072 for Llama 3.2) and inflates the KV cache.
+        # training context and inflates the KV cache.
         self.assertEqual(flag_value(self.cmd, "--ctx-size"), str(NCTX))
         # --n-ctx is llama-cpp-python's spelling and llama-server rejects it.
         self.assertNotIn("--n-ctx", self.cmd)
+
+    def test_the_memory_fit_may_not_shrink_the_context(self):
+        # Without -fitc the fit cuts the context silently on a small card.
+        self.assertEqual(flag_value(self.cmd, "-fitc"), str(NCTX))
+
+    def _command(self, n_gpu_layers):
+        return llama_server_command("/opt/llama/llama-server", MODEL, HOST,
+                                    PORT, n_gpu_layers, NCTX, API_KEY)
+
+    def test_auto_passes_no_layer_count(self):
+        # An explicit -ngl switches llama.cpp's memory fit off, so "auto"
+        # must leave the flag out entirely - in both spellings.
+        cmd = self._command("auto")
+        self.assertNotIn("--n-gpu-layers", cmd)
+        self.assertNotIn("-ngl", cmd)
+        self.assertNotIn("auto", cmd)
+        self.assertEqual(flag_value(cmd, "-fitc"), str(NCTX))
+
+    def test_a_manual_value_is_passed_as_it_is(self):
+        for value in ("all", "0", "18"):
+            with self.subTest(value=value):
+                cmd = self._command(value)
+                self.assertEqual(flag_value(cmd, "--n-gpu-layers"), value)
+                self.assertEqual(flag_value(cmd, "-fitc"), str(NCTX))
 
     def test_single_slot_and_prefix_reuse_are_explicit(self):
         # Both defaults are actively harmful here: several slots fragment the
@@ -133,8 +160,14 @@ class BuildCommandTests(unittest.TestCase):
         self.assertEqual(flag_value(cmd, "-m"), MODEL)
         self.assertEqual(flag_value(cmd, "--port"), str(PORT))
         self.assertEqual(flag_value(cmd, "--ctx-size"), str(NCTX))
+        self.assertEqual(flag_value(cmd, "-fitc"), str(NCTX))
+        self.assertEqual(flag_value(cmd, "--n-gpu-layers"), NGL)
         self.assertEqual(flag_value(cmd, "--api-key"), API_KEY)
         self.assertIn("--no-ui", cmd)
+
+    def test_the_configured_auto_reaches_the_command(self):
+        cmd = self._build(EXTERNAL_N_GPU_LAYERS="auto")
+        self.assertNotIn("--n-gpu-layers", cmd)
 
     def test_the_binary_is_located_when_the_command_is_built(self):
         # Not read from a value frozen at config's import: the binary can be
@@ -353,6 +386,16 @@ class RunningServerTests(unittest.TestCase):
         self.assertIn("smaller context", log)
         self.assertIn(str(NCTX // 2), log)
 
+    def test_the_context_of_the_adopted_server_is_kept_for_the_window(self):
+        controller, _, _, _ = self._start(
+            fake_manager(),
+            props={"default_generation_settings": {"n_ctx": NCTX // 2}})
+        self.assertEqual(controller.served_n_ctx, NCTX // 2)
+
+    def test_an_unreported_context_is_none(self):
+        controller, _, _, _ = self._start(fake_manager(), props=None)
+        self.assertIsNone(controller.served_n_ctx)
+
     def test_a_larger_context_is_not_a_warning(self):
         # It only costs VRAM on the other server, which is not our business.
         log = self._start(
@@ -384,6 +427,71 @@ class RunningServerTests(unittest.TestCase):
         self.assertFalse(controller.adopted)
         self.assertIsNone(controller.last_error)
         manager.check_connection.assert_not_called()
+
+
+class LaunchedServerContextTests(unittest.TestCase):
+    """A server this run started is asked for its context too.
+
+    llama.cpp's memory fit can shrink the context without an error, so the
+    launched server gets the same /props check as an adopted one.
+    """
+
+    def _start(self, props):
+        """start() through a launch, with every outside effect stubbed.
+
+        The subprocess is a stub that never exits, the port is free, the
+        device probe and /props are replaced, and the server log goes to a
+        temporary directory.
+        """
+        process = Mock()
+        process.poll.return_value = None
+        manager = fake_manager()
+        with tempfile.TemporaryDirectory() as log_dir, \
+                patch.object(llm_server_ctl, "port_is_busy",
+                             return_value=False), \
+                patch.object(llm_server_ctl, "log_compute_devices"), \
+                patch.object(llm_server_ctl, "server_properties",
+                             return_value=props) as read_props, \
+                patch.object(llm_server_ctl.subprocess, "Popen",
+                             return_value=process), \
+                patch.object(llm_server_ctl.bootstrap, "log_file_mode",
+                             return_value="w"), \
+                patch.multiple(config, LLM_SERVER_HOST=HOST,
+                               LLM_SERVER_PORT=PORT, LLM_SERVER_URL=URL,
+                               LLM_SERVER_API_KEY=API_KEY,
+                               EXTERNAL_MODEL_PATH=MODEL,
+                               EXTERNAL_N_GPU_LAYERS="auto",
+                               EXTERNAL_N_CTX=NCTX,
+                               LLM_SERVER_LOG_FILE=str(
+                                   Path(log_dir) / "llm_server.log"),
+                               resolve_llama_server_path=lambda: __file__):
+            controller = LLMServerController()
+            with self.assertLogs(level="INFO") as captured:
+                started = controller.start(manager)
+            # Closes the log file before the directory is removed.
+            controller._log_file.close()
+        return controller, started, read_props, "\n".join(captured.output)
+
+    def test_the_launched_server_is_asked_for_its_context(self):
+        controller, started, read_props, _ = self._start(
+            {"default_generation_settings": {"n_ctx": NCTX}})
+        self.assertTrue(started)
+        self.assertFalse(controller.adopted)
+        read_props.assert_called_once_with(HOST, PORT, API_KEY)
+        self.assertEqual(controller.served_n_ctx, NCTX)
+
+    def test_a_shrunk_context_is_a_warning_and_not_a_failure(self):
+        # docs/model-parameters.md, section 3.3: warn and go on.
+        controller, started, _, log = self._start(
+            {"default_generation_settings": {"n_ctx": NCTX // 4}})
+        self.assertTrue(started)
+        self.assertEqual(controller.served_n_ctx, NCTX // 4)
+        self.assertIn("smaller context", log)
+
+    def test_an_unreadable_answer_does_not_fail_the_start(self):
+        controller, started, _, _ = self._start(None)
+        self.assertTrue(started)
+        self.assertIsNone(controller.served_n_ctx)
 
 
 class LogComputeDevicesTests(unittest.TestCase):

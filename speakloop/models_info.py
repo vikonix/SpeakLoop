@@ -152,9 +152,25 @@ SUPERTONIC = PackagedModel(
 # The GGUF chat model the llama-server backend loads. The filename matches the
 # file the application loads from models/, so the app finds it without a
 # settings change.
+#
+# Only the Q4_0 weights are fetched. The repo also holds a multimodal
+# projection (mmproj-*.gguf), which a voice lesson does not use; hf_hub_download
+# takes one file, so it is never downloaded.
 GGUF_CHAT = HfFile(
+    "lmstudio-community/gemma-4-12B-it-QAT-GGUF",
+    "gemma-4-12B-it-QAT-Q4_0.gguf",
+    "Gemma 4 12B IT QAT Q4_0 (chat model for llama-server)",
+    # 6 975 878 560 bytes, docs/model-parameters.md section 1.
+    size_mb=6976,  # measured 2026-09-14
+)
+
+# The previous chat model, kept for a machine that cannot run GGUF_CHAT at a
+# usable speed. The installer does not fetch it: the owner downloads it with
+# `python -m speakloop.gguf_fetch --fallback` and names the file in
+# settings.json ("external_model_path").
+GGUF_CHAT_FALLBACK = HfFile(
     "hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF",
     "llama-3.2-3b-instruct-q4_k_m.gguf",
-    "Llama 3.2 3B Instruct Q4_K_M (chat model for llama-server)",
+    "Llama 3.2 3B Instruct Q4_K_M (fallback chat model for llama-server)",
     size_mb=2019,  # measured 2026-07-28
 )

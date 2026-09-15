@@ -1180,11 +1180,11 @@ def step_llama_server(
     was compiled for.
 
     Returns False in exactly that case, so the caller can skip
-    step_download_gguf: the GGUF model is a 2 GB download for a server that
-    will not exist. Every other outcome returns True, including the user
-    skipping the download - declining a binary is a decision about this run,
-    not a fact about the platform, and the model may well be wanted for a
-    build they install themselves.
+    step_download_gguf: the GGUF model is a download of several gigabytes for
+    a server that will not exist. Every other outcome returns True, including
+    the user skipping the download - declining a binary is a decision about
+    this run, not a fact about the platform, and the model may well be wanted
+    for a build they install themselves.
     """
     log.banner("Step 7 - LLM stack: llama-server binary")
     fetch = _import_fetcher("speakloop.llama_server_fetch", log, report,
@@ -1531,12 +1531,13 @@ def main() -> int:
         # Steps 7-8: the LLM stack - the llama-server binary and the GGUF model
         # it loads. Both are skipped together under --skip-llm: the lm-studio
         # backend needs neither. The binary comes first because step 9 probes
-        # it, and both come after pip because a 2 GB download is a bad place to
-        # discover that the dependency install fails.
+        # it, and both come after pip because a download of several gigabytes
+        # is a bad place to discover that the dependency install fails.
         #
         # Step 7 also decides whether step 8 runs at all. Keep them coupled:
-        # independently, a platform with no pinned build is offered a 2 GB
-        # model right after being told that nothing here can load it.
+        # independently, a platform with no pinned build is offered a
+        # multi-gigabyte model right after being told that nothing here can
+        # load it.
         if args.skip_llm:
             report.add("llama-server binary", SKIPPED, "--skip-llm")
             report.add("GGUF model", SKIPPED, "--skip-llm")

@@ -12,7 +12,7 @@ The application is being moved to a new structure step by step. It runs from the
 
 - **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
 - **STT**: faster-whisper (Whisper small)
-- **LLM**: local GGUF model via `llama-server` (llama.cpp) or LM Studio
+- **LLM**: Gemma 4 12B (GGUF, Q4_0 QAT) via `llama-server` (llama.cpp), or any model loaded in LM Studio
 - **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish
 - **Python**: 3.11 or 3.12
 
@@ -21,7 +21,8 @@ The application is being moved to a new structure step by step. It runs from the
 - **Python 3.11 or 3.12.** Newer versions need a C++ compiler for some dependencies, so `pip` refuses them.
 - **Windows, Linux or macOS.** The current application is used on Windows.
 - A microphone and speakers.
-- **NVIDIA GPU**: optional. It needs a CUDA build of PyTorch (see [Platform notes](#platform-notes)).
+- **NVIDIA GPU**: optional. It needs a CUDA build of PyTorch (see [Platform notes](#platform-notes)). For a conversational pace the chat model (about 7 GB) has to fit into the video memory completely; on a smaller card a reply takes tens of seconds. [`docs/model-parameters.md`](docs/model-parameters.md) (Russian) has the measurements and what the owner of a small card can do.
+- **Disk**: about 9 GB for the models.
 - **tkinter** (Linux only): the Tk GUI toolkit is packaged apart from the interpreter (`python3-tk` on Debian/Ubuntu). It is not on PyPI.
 - **PortAudio** (Linux only): the native audio library (`libportaudio2` on Debian/Ubuntu). The Windows and macOS wheels of `sounddevice` include it, the Linux wheels do not.
 
@@ -79,6 +80,7 @@ pip install -e .
 python -m speakloop.model_fetch         # faster-whisper small, Kokoro, Supertonic 3
 python -m speakloop.llama_server_fetch  # pinned llama.cpp build into bin/llama/
 python -m speakloop.gguf_fetch          # GGUF chat model into models/
+# python -m speakloop.gguf_fetch --fallback   # optional smaller model, see Models
 
 # Hardware detection
 python -m speakloop.detect_hardware
@@ -126,7 +128,8 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 | `Systran/faster-whisper-small` | speech recognition | 486 MB | `python -m speakloop.model_fetch --hf` |
 | Kokoro-82M (`hexgrad/Kokoro-82M`) | speech output (English) | 363 MB | `python -m speakloop.model_fetch --hf` |
 | Supertonic 3 (`Supertone/supertonic-3`) | speech output (Spanish) | 404 MB | `python -m speakloop.model_fetch --supertonic`. The weights have the **OpenRAIL-M** license, so they are downloaded, not included |
-| `llama-3.2-3b-instruct-q4_k_m.gguf` | conversation | 2019 MB | `python -m speakloop.gguf_fetch` |
+| `gemma-4-12B-it-QAT-Q4_0.gguf` (`lmstudio-community/gemma-4-12B-it-QAT-GGUF`) | conversation | 6976 MB | `python -m speakloop.gguf_fetch` |
+| `llama-3.2-3b-instruct-q4_k_m.gguf` | conversation on a slow machine (optional, not installed by `install.py`) | 2019 MB | `python -m speakloop.gguf_fetch --fallback`, then set `external_model_path` |
 | `llama-server` (pinned llama.cpp release) | runs the GGUF model | 641 MB CUDA, 18 MB CPU (Windows) | `python -m speakloop.llama_server_fetch` |
 
 ## Configuration
@@ -134,7 +137,7 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 The configuration has three layers, lowest priority first:
 
 1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): the language profile ([`speakloop/languages/`](speakloop/languages)), persona prompt, LLM backend and server address, generation parameters, recognition and synthesis settings.
-2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`), GPU layers and context size of the local model, audio devices.
+2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`, `TTS_DEVICE`) and audio devices. On a card smaller than 12 GB the speech models run on the CPU, so the chat model gets all the video memory. The GPU layers of the chat model are not here: `llama-server` fits them into the free video memory at each start. Run the detection again after changing the hardware; a file written before stage 2 still holds layer and context values, which the app now ignores.
 3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
    - `max_record_seconds`: limit of one recording, in seconds (default 20).
    - `silence_timeout`: seconds of silence, after you have started to speak, before the recording stops by itself (default 3).
@@ -145,8 +148,9 @@ The configuration has three layers, lowest priority first:
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
    - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
    - `llama_server_path`: the `llama-server` binary to start. Empty (default) means `bin/llama/`, then a `llama-server` on PATH.
-   - `external_model_path`: a GGUF model of your own. Absent (default) means the downloaded model in `models/`.
-   - `external_n_ctx`: context size of the local model. Absent (default) means the value hardware detection wrote.
+   - `external_model_path`: a GGUF model of your own. Absent (default) means the downloaded model in `models/`. For the fallback model: `"../models/llama-3.2-3b-instruct-q4_k_m.gguf"`.
+   - `external_n_ctx`: context size of the local model (default 16384). `llama-server` is told not to make it smaller when it fits the model into the video memory; if the server still reports a smaller context, the chat shows a warning.
+   - `external_n_gpu_layers`: model layers on the GPU. `"auto"` (default) lets `llama-server` choose from the free video memory. A whole number or `"all"` sets the value by hand and turns that choice off; use it only after measuring your computer and keep at least 500 MiB of video memory free.
 
 Both files are optional. A broken or missing file leaves the lower layers in effect, and the problem is printed to the console. Restart the app to apply a change.
 
@@ -165,6 +169,8 @@ speakloop                # console script, after `pip install -e .`
 `speakloop --version` prints the version, `speakloop --detect-hardware` rewrites `config/hardware_config.json`.
 
 With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first.
+
+Known limit of this version: `llama-server` runs Gemma with its thinking mode on, and the app does not show the thinking. On a 4 GB card a short reply therefore takes 40-60 seconds, most of it spent on text nobody sees. The next step of the plan turns thinking off.
 
 If a `llama-server` already answers on `127.0.0.1:8765` (the usual case is one left behind by a session that ended abnormally), the app uses that server as it is, says so in the chat and does not stop it on exit. Such a server keeps the model, context size and GPU layers it was started with, not the ones in the current settings, so `logs/main.log` records which model it serves and how large its context is, and warns when the model is not the configured one or the context is smaller. If the port is held by a program that does not answer the API, the app says the port is busy instead of starting a second server.
 

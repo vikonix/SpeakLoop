@@ -94,8 +94,10 @@ class KokoroBackend:
         # .eval() carries weight. KModel is a plain nn.Module built here rather
         # than loaded through from_pretrained, so it starts in TRAINING mode,
         # and kokoro applies nn.Dropout unconditionally in forward().
+        # config.TTS_DEVICE and not config.DEVICE: on a card the chat model
+        # needs whole, Kokoro runs on the CPU although torch sees CUDA.
         self.model = KModel(repo_id=models_info.KOKORO.repo_id).to(
-            config.DEVICE).eval()
+            config.TTS_DEVICE).eval()
         # Both keyword arguments carry weight:
         #
         # repo_id, because KPipeline otherwise substitutes a default of its
@@ -104,7 +106,7 @@ class KokoroBackend:
         #
         # model, because it defaults to True, which makes KPipeline build a
         # SECOND KModel on a device it picks itself (cuda when available), past
-        # config.DEVICE. Nothing reads that copy - every call passes
+        # config.TTS_DEVICE. Nothing reads that copy - every call passes
         # model=self.model - so it is 82M parameters parked on the card for the
         # whole session, on the machine that also has to fit the model server
         # and the recognizer.

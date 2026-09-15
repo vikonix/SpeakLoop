@@ -18,6 +18,11 @@ The language of the lesson is data: `speakloop/languages/` holds one profile per
 language and `config.py` derives every per-run language constant from the active
 one. English is fixed until stage 3 of the plan.
 
+The chat model is Gemma 4 12B (stage 2). How its server parameters were chosen,
+and what it does on a small card, is in
+[`docs/model-parameters.md`](docs/model-parameters.md) (Russian): read it before
+touching GPU layers, context size or the speech devices.
+
 The window and the logic are **separate**: `speakloop/ui.py` owns every widget,
 color and piece of wording, `speakloop/app.py` owns the threads and the voice
 loop and drives the window through the view's intent methods.
@@ -131,12 +136,19 @@ the key differ.
   message back out of the history: the window owns what the user is told.
   `error_message()` is that text - the server's own sentence out of the JSON
   body, since `str()` of an API error is the whole HTTP problem.
+  `LLM_TIMEOUT` (360 s) is the longest pause before the first token on a weak
+  machine, and the client makes **no retries** (a retry repeats the prompt
+  processing); `check_connection` has its own short timeout. Known limit of
+  this step: llama-server runs Gemma with thinking on, and the thinking arrives
+  in `reasoning_content`, which is not read (step 2b).
 - [`speakloop/llm_server_ctl.py`](speakloop/llm_server_ctl.py) -
   `LLMServerController`: starts and stops the llama-server subprocess (own
   process, so the model server and Kokoro do not contend for the GPU).
   `llama_server_command()` is pure and holds the tuning that must not be left
-  to the binary's defaults (`--ctx-size`, `--parallel 1`, `--cache-reuse 256`,
-  `--api-key`, `--no-ui`); `log_compute_devices()` records `--list-devices`
+  to the binary's defaults (`--ctx-size`, `-fitc`, `--parallel 1`,
+  `--cache-reuse 256`, `--api-key`, `--no-ui`; llama.cpp disables
+  `--cache-reuse` for Gemma with a warning, and it stays for the fallback
+  model); `log_compute_devices()` records `--list-devices`
   before the launch, which is the only thing that reveals a silent CPU
   fallback. `start()` and `shutdown()` share one lock, so a quit during
   startup cannot orphan a server. `_use_running_server()` is the fork before
@@ -149,7 +161,13 @@ the key differ.
   `server_properties()` (a plain GET of llama.cpp's `/props`, which is outside
   the `/v1` prefix, hence not through the OpenAI client). Both are diagnostic
   and warn on a mismatch with the configured model or a smaller context; a
-  server that answers is never refused over them.
+  server that answers is never refused over them. The context is read for a
+  launched server too and kept in `served_n_ctx`, because llama.cpp's memory
+  fit can shrink it silently; app.py shows a chat warning when it is smaller.
+  GPU layers: with `EXTERNAL_N_GPU_LAYERS == "auto"` **no `--n-gpu-layers` is
+  passed** - an explicit value switches the fit (`-fit`) off - and `-fitc`
+  always equals `--ctx-size`, so the fit gives up layers, not context
+  (`docs/model-parameters.md`).
 - [`speakloop/tts.py`](speakloop/tts.py) - two roles: a **synthesis backend**
   per engine (`KokoroBackend` on torch at 24 kHz, `SupertonicBackend` on ONNX at
   44.1 kHz), selected from the `TTS_BACKENDS` registry by the active variant's
@@ -170,9 +188,13 @@ the key differ.
   `_KNOWN_USER_KEYS` (`max_record_seconds`, `silence_timeout`,
   `silence_threshold`, `accent`, `voice`, `color_theme`, `llm_backend`,
   `lm_studio_host`, `llama_server_path`, `external_model_path`,
-  `external_n_ctx`); keep `config/settings.example.json` in step (a test checks
-  it). The **language section comes before the download section on purpose**:
-  the offline gate has to know the active synthesis backend, because only that
+  `external_n_ctx`, `external_n_gpu_layers`); keep
+  `config/settings.example.json` in step (a test checks it).
+  `EXTERNAL_N_GPU_LAYERS` is a **string** (`"auto"`, `"all"` or digits, from
+  `_gpu_layers_setting`) and `EXTERNAL_N_CTX` defaults to 16384; neither is
+  read from hardware_config.json. `TTS_DEVICE` and `STT_DEVICE` come from
+  `_model_device`, capped by `DEVICE`. The **language section comes before
+  the download section on purpose**: the offline gate has to know the active synthesis backend, because only that
   backend's model has to be cached before the Hub is switched off. Every
   language constant (`TARGET_LANGUAGE`, `WHISPER_LANGUAGE`, `TTS_BACKEND`,
   `TTS_LANG_CODE`, `TTS_VOICE`, `TTS_VOICES`, `TTS_TOTAL_STEPS`, `TTS_WARMUP`)
@@ -200,10 +222,13 @@ the key differ.
   package). **Stdlib-only** - install.py reads it before the requirements
   exist.
 - [`speakloop/detect_hardware.py`](speakloop/detect_hardware.py) - machine probe
-  writing `config/hardware_config.json`: `DEVICE` (torch CUDA), `STT_DEVICE`
-  (torch CUDA and a ctranslate2 CUDA device), `EXTERNAL_N_GPU_LAYERS` and
-  `EXTERNAL_N_CTX` (from VRAM and the installed llama-server's
-  `--list-devices`), audio devices. **Must not import config.**
+  writing `config/hardware_config.json`: `DEVICE` (torch CUDA - only that,
+  `warn_if_gpu_unused` reads it so), `STT_DEVICE` (a ctranslate2 CUDA device)
+  and `TTS_DEVICE` (Kokoro), audio devices. Both speech devices drop to the CPU
+  on a card below `SPEECH_GPU_MIN_VRAM_GB` (12) that the chat model uses (the
+  installed llama-server's `--list-devices` decides that). It writes no LLM
+  layers or context any more, and config ignores those keys in an older
+  file. **Must not import config.**
 
 ### Downloads
 
@@ -216,7 +241,8 @@ can use them before the requirements step:
   and Kokoro (hub cache), Supertonic 3 (own cache directory). Owns
   `prepare_hf_env()` (Windows symlink and hf-xet workarounds).
 - [`speakloop/gguf_fetch.py`](speakloop/gguf_fetch.py) - the GGUF chat model
-  into `models/`.
+  into `models/`; `--fallback` (or `ensure_gguf(model=...)`) fetches
+  `GGUF_CHAT_FALLBACK` instead, which the installer never does.
 - [`speakloop/llama_server_fetch.py`](speakloop/llama_server_fetch.py) - the
   pinned llama.cpp release into `bin/llama/`, sha256 per asset, then
   `--version` and `--list-devices` probes. `installed_exe()`, `list_devices()`
@@ -224,7 +250,8 @@ can use them before the requirements step:
   time.
 
 - [`speakloop/models_info.py`](speakloop/models_info.py) - model catalogue,
-  the single place a repo id is written. Imports only `typing` (a test
+  the single place a repo id is written. `GGUF_CHAT` is Gemma 4 12B QAT Q4_0,
+  `GGUF_CHAT_FALLBACK` is Llama 3.2 3B. Imports only `typing` (a test
   enforces it). Sizes are re-snapped with
   [`tools/measure_model_sizes.py`](tools/measure_model_sizes.py).
 - [`install.py`](install.py) - interactive installer, a thin wrapper around the
@@ -270,8 +297,9 @@ can use them before the requirements step:
   learner between their first phrase and the answer. Do not drop the call
   without moving that cost somewhere else.
 - **LLM server subprocess**: started in `LLMServerController.start()` with
-  layers and context from `config` (hardware detection), polled with
-  `LLMManager.check_connection()`, terminated in `quit_app()` with a 5-second
+  layers and context from `config` (settings.json; see llm_server_ctl above),
+  polled with `LLMManager.check_connection()`, then asked for its context
+  (`/props`), terminated in `quit_app()` with a 5-second
   kill fallback, output in `logs/llm_server.log`. An **adopted** server (one
   that was already listening) has no subprocess behind it, so `shutdown()` is
   a no-op for it by construction - do not "fix" that into terminating it.

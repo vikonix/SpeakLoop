@@ -196,6 +196,18 @@ class VoiceTutorController:
                     model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
                     self.root.after(0, self.view.append_system_msg,
                                     f"llama-server is ready with {model_name}.")
+                served_n_ctx = self._llm_server.served_n_ctx
+                if (served_n_ctx is not None
+                        and served_n_ctx < config.EXTERNAL_N_CTX):
+                    # A warning and not a refusal (docs/model-parameters.md,
+                    # section 3.3): a short lesson still works. In the chat
+                    # and not in the status bar, which the next state change
+                    # overwrites at once.
+                    self.root.after(0, self.view.append_system_msg,
+                                    f"Warning: the model has a context of "
+                                    f"{served_n_ctx} tokens instead of "
+                                    f"{config.EXTERNAL_N_CTX}. A long lesson "
+                                    f"may not fit. See logs/main.log.")
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
