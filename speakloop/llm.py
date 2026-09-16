@@ -96,6 +96,20 @@ def request_extra_body(backend: str):
     }
 
 
+def usage_log_line(usage) -> str:
+    """Log line about the context a finished request used.
+
+    total_tokens is the whole conversation the server holds after the reply
+    (system prompt, history, new message and reply), which is the number to
+    compare with the context size. usage is None when the stream ended before
+    the server sent its report, which is what an interrupt does.
+    """
+    if usage is None:
+        return "Context tokens: unknown (no usage report in the stream)."
+    return (f"Context tokens: {usage.total_tokens} "
+            f"(prompt {usage.prompt_tokens}, reply {usage.completion_tokens}).")
+
+
 class LLMManager:
     def __init__(self, model: str = None):
         self.client = None
@@ -177,16 +191,28 @@ class LLMManager:
                 max_tokens=config.LLM_MAX_TOKENS,
                 top_p=config.LLM_TOP_P,
                 stream=True,
+                # A streamed reply has no usage unless it is asked for. With
+                # this option the server sends one more chunk at the end: the
+                # usage and an empty choices list. Both backends support it.
+                stream_options={"include_usage": True},
                 timeout=LLM_TIMEOUT,
                 extra_body=request_extra_body(config.LLM_BACKEND),
             ) as stream_response:
                 full_reply = ""
                 sentence_buffer = ""
+                usage = None
 
                 for chunk in stream_response:
                     if stop_event.is_set():
                         logging.info("LLM streaming interrupted by user stop event.")
                         break
+
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                    # The usage chunk has no choices; choices[0] would raise
+                    # IndexError after the whole reply had arrived.
+                    if not chunk.choices:
+                        continue
 
                     token = chunk.choices[0].delta.content or ""
                     if not token:
@@ -213,11 +239,17 @@ class LLMManager:
                 tts_queue.put(remaining_text)
 
             final_reply = full_reply.strip() if full_reply.strip() else "Sorry, I did not get a response."
+            # The whole history is kept, without trimming. The lesson SUMMARY
+            # needs its start, and a trimmed start changes the prompt prefix,
+            # so the server processes the whole history again on every
+            # request (docs/refactoring.md, section 7.2). A history that no
+            # longer fits the context makes the server refuse the request,
+            # and that error goes to the window like any other.
             with self._messages_lock:
                 self.messages.append({"role": "assistant", "content": final_reply})
-                self._trim_history()
 
             logging.info(f"LLM full response: {final_reply!r}")
+            logging.info(usage_log_line(usage))
             return final_reply
 
         except Exception:
@@ -231,13 +263,3 @@ class LLMManager:
             # empty reply and a status bar that still says "Thinking". What the
             # user is told about a failure is the window's decision.
             raise
-
-    def _trim_history(self):
-        """Prunes conversation history to the most recent LLM_HISTORY_MAX_PAIRS turns.
-
-        Must be called with self._messages_lock held.
-        """
-        system_message = self.messages[0]
-        conversation = self.messages[1:]
-        max_messages = config.LLM_HISTORY_MAX_PAIRS * 2
-        self.messages = [system_message] + conversation[-max_messages:]

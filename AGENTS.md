@@ -136,6 +136,11 @@ the key differ.
   message back out of the history: the window owns what the user is told.
   `error_message()` is that text - the server's own sentence out of the JSON
   body, since `str()` of an API error is the whole HTTP problem.
+  Every request asks for the usage report
+  (`stream_options.include_usage`): the last chunk of the stream then has the
+  usage and **no choices**, so the loop must skip it, and `usage_log_line()`
+  writes the context size to `logs/main.log` after each reply ("unknown"
+  after an interrupt, which ends the stream before the report).
   `LLM_TIMEOUT` (360 s) is the longest pause before the first token on a weak
   machine, and the client makes **no retries** (a retry repeats the prompt
   processing); `check_connection` has its own short timeout.
@@ -285,7 +290,11 @@ can use them before the requirements step:
   (problem 1 of the plan). Never reintroduce a shared, cleared event.
 - **LLM history rollback** (`llm.py`): the user message is appended inside
   `try`; on exception it is popped to keep user/assistant pairs consistent.
-  History is trimmed to `LLM_HISTORY_MAX_PAIRS` pairs after each exchange.
+- **Whole history** (`llm.py`): the conversation is never trimmed. The lesson
+  SUMMARY needs its start, and a trimmed start changes the prompt prefix, so
+  the server processes the whole history again on every request. A history
+  that does not fit the context makes the server refuse the request, and the
+  window shows that error; a rule of its own for this case is stage 5.
 - **Sentence streaming** (`llm.py`): output is split on sentence-ending
   punctuation followed by whitespace and an uppercase letter
   (`(?<=[.!?])\s+(?=[A-ZА-Я])`); the rest is flushed at the end of the stream.

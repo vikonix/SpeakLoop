@@ -476,9 +476,6 @@ LLM_TOP_K = 64
 # the limit is a safety stop and not the expected length.
 LLM_MAX_TOKENS = 512
 
-# Context buffer constraints
-LLM_HISTORY_MAX_PAIRS = 4  # Number of full conversation turns kept in short-term memory
-
 # =====================================================================
 # Speech-to-Text (Whisper) Settings
 # =====================================================================
