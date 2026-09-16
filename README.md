@@ -4,7 +4,7 @@ AI-powered voice tutor for practicing foreign languages through real conversatio
 
 ## About
 
-SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Press Space to speak: the recording stops by itself once you stop talking, then the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
+SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. The tutor opens the lesson with a question. Press Space to answer: the recording stops by itself once you stop talking, then the app transcribes your speech, sends it to an LLM, shows the reply and reads its spoken part aloud. The lesson language is English; Spanish is not available yet.
 
 The application is being moved to a new structure step by step. It runs from the `speakloop/` package and serves the local model with the official `llama-server` binary from llama.cpp.
 
@@ -13,7 +13,7 @@ The application is being moved to a new structure step by step. It runs from the
 - **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
 - **STT**: faster-whisper (Whisper small)
 - **LLM**: Gemma 4 12B (GGUF, Q4_0 QAT) via `llama-server` (llama.cpp), or any model loaded in LM Studio
-- **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish
+- **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish (the Spanish lesson is not available yet)
 - **Python**: 3.11 or 3.12
 
 ## Requirements
@@ -136,7 +136,7 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 
 The configuration has three layers, lowest priority first:
 
-1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): the language profile ([`speakloop/languages/`](speakloop/languages)), persona prompt, LLM backend and server address, generation parameters, recognition and synthesis settings.
+1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): the language profile ([`speakloop/languages/`](speakloop/languages)), the lesson settings (the explanation language is Russian), LLM backend and server address, generation parameters, recognition and synthesis settings.
 2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`, `TTS_DEVICE`) and audio devices. On a card smaller than 12 GB the speech models run on the CPU, so the chat model gets all the video memory. The GPU layers of the chat model are not here: `llama-server` fits them into the free video memory at each start. Run the detection again after changing the hardware; a file written before stage 2 still holds layer and context values, which the app now ignores.
 3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
    - `max_record_seconds`: limit of one recording, in seconds (default 20).
@@ -145,6 +145,8 @@ The configuration has three layers, lowest priority first:
    - `accent`: variant of the practiced language, `"american"` (default) or `"british"`. It selects the synthesis language code and the list of voices.
    - `voice`: voice of the partner. It must belong to the variant above; absent (default) means the variant default (`af_heart` for american, `bf_emma` for british).
    - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
+   - `first_topic`: the first topic of the lesson, in your own words. Empty (default) lets the tutor choose an everyday situation.
+   - `prompt_file`: the lesson prompt. Absent (default) means [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). Use it to try a changed copy; the copy must keep the three `SETTINGS` lines, or the app does not start.
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
    - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
    - `llama_server_path`: the `llama-server` binary to start. Empty (default) means `bin/llama/`, then a `llama-server` on PATH.
@@ -180,6 +182,17 @@ If a `llama-server` already answers on `127.0.0.1:8765` (the usual case is one l
 
 Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_server.log` (the model server), `install.log` and `hwdetect.log` (kept across runs).
 
+## The Lesson
+
+The lesson follows the free-talk prompt in [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). When the models are loaded, the tutor asks the first question by itself. Each reply of the tutor has up to two lines:
+
+- **Note**: a correction of your last phrase, with a short reason in Russian. It is shown and never read aloud. The tutor corrects only words that change or hide your meaning, not grammar.
+- **Tutor**: the tutor's line, shown and read aloud.
+
+Voice commands (say the word alone): **simpler** makes the current question smaller, **hint** gives the first words of an answer, **new topic** changes the topic, **finish** ends the lesson. After "finish" the tutor shows a **Summary** in Russian; it is not read aloud. If you say goodbye in other words, the tutor asks whether to finish. The lesson never ends by itself. There is no grading.
+
+A reply that does not follow this format is shown as it is and not read aloud.
+
 ## Controls
 
 - **Space** or the microphone button: start a recording. It stops by itself after `silence_timeout` seconds of silence, on the next press, or at `max_record_seconds`. While it runs, the button shows the live microphone level.
@@ -209,7 +222,11 @@ SpeakLoop/
 │   ├── ui_theme.py          palette and fonts of the window
 │   ├── themes/              dark_schema.json, light_schema.json
 │   ├── stt.py               Speech-to-Text (faster-whisper)
-│   ├── llm.py               LLM client (OpenAI-compatible)
+│   ├── prompts/             free_talk.md, the lesson prompt
+│   ├── prompt.py            builds the system message from the prompt file
+│   ├── contract.py          splits a reply into NOTE, SAY and SUMMARY
+│   ├── conversation.py      the lesson: opening and answers
+│   ├── llm.py               LLM client (OpenAI-compatible) and history
 │   ├── llm_server_ctl.py    starts and stops the llama-server subprocess
 │   ├── tts.py               Text-to-Speech (Kokoro, Supertonic) and playback
 │   ├── recorder.py          microphone capture and the automatic stop

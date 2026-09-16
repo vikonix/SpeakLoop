@@ -45,10 +45,18 @@ import ttkbootstrap as ttk
 
 from speakloop import config
 
-# The dialogue partner's name, as the chat labels it. One spelling, here: the
-# persona itself is set in the system prompt (config.SYSTEM_PROMPT), and the
-# controller never writes the name at all.
-PARTNER_NAME = "Emma"
+# The application name, as the title bar and the header show it.
+APP_NAME = "SpeakLoop"
+
+# The dialogue partner's label in the chat. A role and not a person's name:
+# the lesson prompt gives the model no name, and a name in the window that the
+# model does not know would contradict its answers. The controller never
+# writes the label at all.
+PARTNER_NAME = "Tutor"
+
+# Labels of the two lines that are shown and never spoken.
+NOTE_LABEL = "Note"
+SUMMARY_LABEL = "Summary"
 
 # The instruction line under the mic button, per state. A take starts on one
 # press and ends by itself after a pause, so the wording says press, never hold.
@@ -58,9 +66,8 @@ INSTRUCTION_READY = "Press SPACE or the button to speak."
 INSTRUCTION_RECORDING = "Speak. Recording stops after a pause, or press again."
 INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and restart."
 
-# Window title and size. Here with the rest of the wording: the title carries
-# the partner's name, which has one spelling in this module.
-WINDOW_TITLE = f"{PARTNER_NAME} - Voice Tutor"
+# Window title and size. Here with the rest of the wording.
+WINDOW_TITLE = f"{APP_NAME} - Voice Tutor"
 WINDOW_WIDTH = 500
 WINDOW_HEIGHT = 700
 
@@ -200,12 +207,12 @@ class TutorView:
         header_frame = tk.Frame(self.root, bg=THEME["bg_main"], height=60)
         header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=10)
 
-        tk.Label(header_frame, text=f"{PARTNER_NAME.upper()} • Voice Tutor",
+        tk.Label(header_frame, text=f"{APP_NAME.upper()} • Voice Tutor",
                  font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"),
                  fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
 
         tk.Label(header_frame,
-                 text=f"{config.NATIVE_LANGUAGE} ➔ {config.TARGET_LANGUAGE}",
+                 text=f"{config.EXPLANATION_LANGUAGE} ➔ {config.TARGET_LANGUAGE}",
                  font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
                  fg=THEME["text_dim"], bg=THEME["bg_panel"],
                  padx=10, pady=4, bd=0).pack(side=tk.RIGHT)
@@ -293,6 +300,17 @@ class TutorView:
         self.chat_display.tag_configure(
             "text_partner", foreground=THEME["text_emph"],
             font=(FONT_FAMILY, FONT_SIZE_CHAT))
+        # NOTE and SUMMARY take colors of existing palette keys, so a user
+        # theme written before them still has every color it needs.
+        self.chat_display.tag_configure(
+            "note", foreground=THEME["warn"],
+            font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
+        self.chat_display.tag_configure(
+            "text_note", foreground=THEME["text_dim"],
+            font=(FONT_FAMILY, FONT_SIZE_CHAT))
+        self.chat_display.tag_configure(
+            "summary", foreground=THEME["good"],
+            font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
 
     def bind_events(self):
         # One press starts a take, the next one ends it. The bindings are
@@ -404,21 +422,26 @@ class TutorView:
         """Add what the learner said, as recognized."""
         self._append(("You: ", "user"), (f"{text}\n", "text_user"))
 
-    def append_reply_start(self):
-        """Open the partner's line, before the first token of the reply."""
-        self._append((f"{PARTNER_NAME}: ", "partner"))
+    def append_partner_msg(self, text: str):
+        """Add what the partner says (the SAY line of a reply).
 
-    def append_reply_token(self, token: str):
-        """Add one streamed token to the open partner line."""
-        self._append((token, "text_partner"))
-
-    def append_reply_end(self):
-        """Close the partner's line.
-
-        Called for a failed exchange too: a line opened by append_reply_start
-        must be closed, or the next message continues it.
+        Also used for a reply outside the contract, which is shown whole.
         """
-        self._append(("\n", None))
+        self._append((f"{PARTNER_NAME}: ", "partner"),
+                     (f"{text}\n", "text_partner"))
+
+    def append_note(self, text: str):
+        """Add a correction (the NOTE line of a reply). It is never spoken."""
+        self._append((f"{NOTE_LABEL}: ", "note"), (f"{text}\n", "text_note"))
+
+    def append_summary(self, text: str):
+        """Add the lesson summary. It may have several lines and is never spoken.
+
+        The label stands on a line of its own, so the summary lines start at
+        the same edge.
+        """
+        self._append((f"{SUMMARY_LABEL}:\n", "summary"),
+                     (f"{text}\n", "text_partner"))
 
     # ------------------------------------------------------------------
     # Status bar

@@ -75,6 +75,8 @@ _KNOWN_USER_KEYS = {
     "external_model_path",
     "external_n_ctx",
     "external_n_gpu_layers",
+    "first_topic",
+    "prompt_file",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
@@ -101,9 +103,8 @@ LANGUAGE_PROFILES = {
 }
 
 # The practiced language is FIXED to English in this version. Both profiles are
-# complete, but the lesson prompt and the language selector arrive together in
-# stage 3 of docs/refactoring.md, and a language the prompt does not know would
-# only produce a lesson in the wrong language. No settings key, so nothing
+# complete, but Spanish is postponed by the owner's decision (docs/refactoring.md,
+# section 8): its lesson has not been checked. No settings key, so nothing
 # promises a choice that does not work yet.
 PRACTICE_LANGUAGE = "english"
 _LANG_PROFILE = LANGUAGE_PROFILES[PRACTICE_LANGUAGE]
@@ -227,17 +228,25 @@ else:
     model_fetch.prepare_hf_env()
 
 # =====================================================================
-# Persona
+# Lesson
 # =====================================================================
-NATIVE_LANGUAGE = "Russian"
+# The language of corrections and of the summary. Fixed, with no settings key:
+# the NOTE example in the prompt is written in Russian, and a prompt that asks
+# for another language with a Russian example gives mixed corrections.
+EXPLANATION_LANGUAGE = "Russian"
 
-# System prompt shaping the LLM behavior into a specific educational persona
-SYSTEM_PROMPT = (
-    f"You are a friendly {TARGET_LANGUAGE} tutor named Emma. "
-    f"The user's native language is {NATIVE_LANGUAGE}, but you should talk to them in simple {TARGET_LANGUAGE}. "
-    "Keep responses very short. Use simple spoken sentences. "
-    "Avoid idioms, abbreviations, complex punctuation, and compressed phrases."
-)
+# First topic of the lesson, read from settings.json ("first_topic"). Empty
+# means the default the prompt itself names in its SETTINGS line.
+FIRST_TOPIC = _USER.get("first_topic", "")
+if not isinstance(FIRST_TOPIC, str):
+    print(f"[config] settings.json: first_topic must be a string, got "
+          f"{FIRST_TOPIC!r}; using the prompt default", file=sys.stderr)
+    FIRST_TOPIC = ""
+
+# The prompt body (speakloop/prompt.py builds the system message from it).
+# settings.json ("prompt_file") can point at a copy to try changes on; the
+# file is read once, when the models are loaded.
+PROMPT_FILE = _path("prompt_file", paths.shipped_root() / "prompts" / "free_talk.md")
 
 # =====================================================================
 # Controls

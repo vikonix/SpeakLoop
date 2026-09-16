@@ -195,6 +195,31 @@ class UserSettingTests(unittest.TestCase):
         self.assertLessEqual(keys, config._KNOWN_USER_KEYS)
 
 
+class LessonSettingTests(unittest.TestCase):
+    """The lesson prompt settings (stage 3)."""
+
+    def test_the_lesson_keys_are_known(self):
+        self.assertIn("first_topic", config._KNOWN_USER_KEYS)
+        self.assertIn("prompt_file", config._KNOWN_USER_KEYS)
+
+    def test_the_explanation_language_is_russian(self):
+        # The NOTE example in the prompt is in Russian; another explanation
+        # language would give mixed corrections.
+        self.assertEqual(config.EXPLANATION_LANGUAGE, "Russian")
+
+    def test_the_first_topic_is_a_string(self):
+        self.assertIsInstance(config.FIRST_TOPIC, str)
+
+    def test_the_prompt_file_is_an_absolute_path(self):
+        self.assertTrue(Path(config.PROMPT_FILE).is_absolute())
+
+    def test_the_default_prompt_file_is_shipped_with_the_package(self):
+        # The default of PROMPT_FILE; without this file the app cannot start.
+        shipped = (Path(config.__file__).resolve().parent
+                   / "prompts" / "free_talk.md")
+        self.assertTrue(shipped.is_file())
+
+
 class GpuLayersSettingTests(unittest.TestCase):
     """external_n_gpu_layers: "auto", "all" or a whole number, as a string.
 

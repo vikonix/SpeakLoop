@@ -3,6 +3,8 @@
 
 """Speech recognition: faster-whisper on the language of the active profile."""
 
+import logging
+
 import numpy as np
 # torch before faster_whisper, and the order must stay: on Windows the CUDA
 # build of torch puts its cuBLAS and cuDNN libraries on the DLL search path when
@@ -36,6 +38,12 @@ class STTManager:
             cpu_threads=config.WHISPER_CPU_THREADS,
             num_workers=1,
         )
+        # The only record of where recognition runs: hardware_config.json can
+        # be edited by hand, and nothing else in the log names the device.
+        # ctranslate2 raises above when the device cannot be used, so the
+        # configured values are the actual ones here.
+        logging.info(f"STT model {config.WHISPER_MODEL} is on "
+                     f"{config.STT_DEVICE} ({COMPUTE_TYPE}).")
 
     def warm_up(self):
         """Runs a mock inference pass to eliminate initial latency."""

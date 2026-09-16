@@ -14,9 +14,17 @@ button) opens the microphone and the take ends on silence -> faster-whisper
 speech recognition -> a local LLM (a GGUF model served by `llama-server`, or LM
 Studio) -> speech synthesis (Kokoro for English, Supertonic for Spanish).
 
+The lesson runs on the free-talk prompt
+([`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md), the main
+copy of it). The model opens the lesson itself and answers in lines that begin
+with `NOTE:` (a correction, shown only), `SAY:` (the partner's line, shown and
+spoken) or `SUMMARY:` (the lesson summary on "finish", shown only). The prompt
+text belongs to the owner: change it only on request.
+
 The language of the lesson is data: `speakloop/languages/` holds one profile per
 language and `config.py` derives every per-run language constant from the active
-one. English is fixed until stage 3 of the plan.
+one. English is fixed; Spanish is postponed (the owner's decision), although its
+profile stays complete.
 
 The chat model is Gemma 4 12B (stage 2). How its server parameters were chosen,
 and what it does on a small card, is in
@@ -82,13 +90,26 @@ the key differ.
   one press starts a take, the next one ends it, and a release only clears the
   key auto-repeat guard. `_exchange_lock` keeps one exchange at a time, so a
   take made during the previous exchange waits instead of being dropped.
+  `load_components` builds the lesson (`prompt.build_system_prompt`, then
+  `Lesson`) before it loads any model, so a bad prompt file stops the start at
+  once. `make_app_ready` opens the lesson (`_open_lesson`): the first model
+  request runs like an exchange, with its own stop event and under the same
+  lock. `_ask_model` is the one path to the model: it shows the reply
+  (`_show_reply`: NOTE, SAY, SUMMARY in this order, or the whole text of a
+  reply outside the contract) and queues only the sentences of SAY.
+  `_enter_if_current` runs a view intent on the Tk thread only for the reply
+  that is still current, so a late worker cannot draw over a new take.
   Module-level `run(append_log)` configures logging, logs
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
 - [`speakloop/ui.py`](speakloop/ui.py) - `TutorView`: the whole window (header,
   chat transcript, mic canvas, status bar) plus the *intent* methods the
   controller calls (`enter_recording`, `enter_thinking`, `enter_error`, …) and
-  the `append_*` transcript writers. Widget bindings call only the callables in
+  the `append_*` transcript writers (`append_partner_msg`, `append_note`,
+  `append_summary`, ...). The partner is labelled `PARTNER_NAME = "Tutor"`,
+  a role and not a name, because the prompt gives the model no name. NOTE and
+  SUMMARY use existing palette keys, so an older user theme still has every
+  color. Widget bindings call only the callables in
   the `ViewCallbacks` passed in, so the view never references the controller.
   Every status string, instruction line and the partner's name (`PARTNER_NAME`)
   live here - do not move wording or colors back into the controller. Its
@@ -109,7 +130,8 @@ the key differ.
   VAD filtering, on `config.STT_DEVICE`, in the language of the active profile
   (`config.WHISPER_LANGUAGE`; never automatic detection). **Imports torch before
   faster_whisper**: on Windows the CUDA build of torch provides the cuBLAS and
-  cuDNN libraries ctranslate2 needs.
+  cuDNN libraries ctranslate2 needs. `load_model()` logs the device and the
+  compute type, the only place the log names where recognition runs.
 - [`speakloop/recorder.py`](speakloop/recorder.py) - `AudioRecorder`: the
   capture thread, the input device choice and the chunk buffer, plus the pure
   `normalize_audio`. It captures at the device's own rate through WASAPI on
@@ -129,11 +151,41 @@ the key differ.
 - [`speakloop/languages/`](speakloop/languages) - one pure-data `PROFILE` per
   language (`english.py`, `spanish.py`), the format documented in its
   `__init__.py`. No imports and no side effects: `config.py` assembles them.
+- [`speakloop/prompt.py`](speakloop/prompt.py) - builds the system message:
+  reads the prompt file (`config.PROMPT_FILE`) and fills its three SETTINGS
+  lines (`Target language: [...]` and so on). An empty value keeps the
+  brackets, which the prompt reads as its own default. A missing or repeated
+  SETTINGS line **raises**: otherwise the lesson silently runs on a default.
+  No config import; the caller passes the values. The system message is built
+  once and never changes during a session (prefix cache).
+- [`speakloop/contract.py`](speakloop/contract.py) - pure code for the output
+  contract: `parse_reply()` gives a `Reply` (`note`, `say`, `summary`, `raw`,
+  `follows_contract`). SUMMARY takes everything from its line to the end,
+  also after a `NOTE:` or `SAY:` prefix on that line (Gemma writes
+  `NOTE: SUMMARY:`, because the prompt says every line begins with one of
+  them), and a `SUMMARY:` label repeated at the start of the summary is
+  dropped; above it the first NOTE and the first SAY are taken. Prefixes are matched
+  in capitals at the start of a line only - a NOTE read as SAY would be spoken
+  in the explanation language. `split_sentences()` cuts SAY for speech. Rules
+  for broken replies are stage 5; until then only `follows_contract` reports
+  them.
+- [`speakloop/conversation.py`](speakloop/conversation.py) - `Lesson` over
+  `LLMManager`: `open()` sends `OPENING_MESSAGE` ("Begin.", a user message the
+  chat template needs before the first question; it stays in the history and
+  is never shown), `answer()` sends the learner's phrase **as recognized**
+  (the prompt commands get no special handling yet, `docs/refactoring.md`
+  10.4). Both return a parsed `Reply`, or None after an interrupt, and log a
+  warning for a reply outside the contract.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
-  streaming client with conversation history; used by both backends. The
-  response is streamed inside a `with`, so an interrupt closes it and the
-  server stops generating. A failed request **raises** after rolling the user
-  message back out of the history: the window owns what the user is told.
+  client with the conversation history; used by both backends.
+  `start_conversation()` sets the system message; `ask()` refuses to run
+  without it. `ask()` returns the **whole** reply as one text (the contract
+  needs all of it), but the response is still streamed inside a `with`: an
+  interrupt closes it and the server stops generating. After an interrupt
+  `ask()` returns None and removes the user message too, so the history is as
+  before the call and never has two user messages in a row. A failed request
+  or an empty reply **raises** after the same rollback: the window owns what
+  the user is told.
   `error_message()` is that text - the server's own sentence out of the JSON
   body, since `str()` of an API error is the whole HTTP problem.
   Every request asks for the usage report
@@ -201,7 +253,8 @@ the key differ.
   `_KNOWN_USER_KEYS` (`max_record_seconds`, `silence_timeout`,
   `silence_threshold`, `accent`, `voice`, `color_theme`, `llm_backend`,
   `lm_studio_host`, `llama_server_path`, `external_model_path`,
-  `external_n_ctx`, `external_n_gpu_layers`); keep
+  `external_n_ctx`, `external_n_gpu_layers`, `first_topic`, `prompt_file`);
+  keep
   `config/settings.example.json` in step (a test checks it).
   `EXTERNAL_N_GPU_LAYERS` is a **string** (`"auto"`, `"all"` or digits, from
   `_gpu_layers_setting`) and `EXTERNAL_N_CTX` defaults to 16384; neither is
@@ -213,7 +266,10 @@ the key differ.
   `TTS_LANG_CODE`, `TTS_VOICE`, `TTS_VOICES`, `TTS_TOTAL_STEPS`, `TTS_WARMUP`)
   is derived from the profile and its variant - add a language by adding a
   profile, never a branch. `PRACTICE_LANGUAGE` is fixed to `"english"` and has
-  no settings key until stage 3. The UI palette is resolved here too: `_DARK_THEME` is the built-in
+  no settings key (Spanish is postponed). The lesson section holds
+  `EXPLANATION_LANGUAGE` (fixed to Russian, no key: the NOTE example in the
+  prompt is Russian), `FIRST_TOPIC` and `PROMPT_FILE` (default: the file in
+  `speakloop/prompts/`). The UI palette is resolved here too: `_DARK_THEME` is the built-in
   palette, the complete list of valid color keys and the fallback for a missing
   file or key, and `THEME` is it overlaid with the selected
   `<name>_schema.json` (tests pin that the shipped dark schema equals
@@ -277,10 +333,11 @@ can use them before the requirements step:
   daemon threads. Always update the window with
   `root.after(0, self.view.<intent>, ...)` - never call a view method straight
   from a worker thread, and never reach for a widget.
-- **Reply marker pattern** (`app.py`): LLM sentences are buffered in the TTS
-  queue processor and synthesized only when the `_ReplyEnd` marker of their
-  reply arrives, so the model server has finished before the synthesis starts.
-  Do not remove it while the model and the synthesis share one GPU. The marker
+- **Reply marker pattern** (`app.py`): the sentences of SAY are queued only
+  after the whole reply has arrived, then the `_ReplyEnd` marker of their
+  reply; the TTS thread synthesizes nothing before the marker. So the model
+  server has finished before the synthesis starts. Do not queue speech before
+  the reply is complete while the model and the synthesis share one GPU. The marker
   **carries the stop event of its own reply**: that is what makes a buffered
   reply drop itself after an interrupt instead of being spoken over the next
   take.
@@ -289,15 +346,17 @@ can use them before the requirements step:
   exchange's worker after a new take had already set it - the interrupt was lost
   (problem 1 of the plan). Never reintroduce a shared, cleared event.
 - **LLM history rollback** (`llm.py`): the user message is appended inside
-  `try`; on exception it is popped to keep user/assistant pairs consistent.
+  `try`; on exception, on an empty reply and on an interrupt it is popped to
+  keep user/assistant pairs consistent.
 - **Whole history** (`llm.py`): the conversation is never trimmed. The lesson
   SUMMARY needs its start, and a trimmed start changes the prompt prefix, so
   the server processes the whole history again on every request. A history
   that does not fit the context makes the server refuse the request, and the
   window shows that error; a rule of its own for this case is stage 5.
-- **Sentence streaming** (`llm.py`): output is split on sentence-ending
-  punctuation followed by whitespace and an uppercase letter
-  (`(?<=[.!?])\s+(?=[A-ZА-Я])`); the rest is flushed at the end of the stream.
+- **Sentence split** (`contract.split_sentences`): SAY is split on
+  sentence-ending punctuation followed by whitespace and an uppercase letter
+  (`(?<=[.!?])\s+(?=[A-ZА-Я])`), and each sentence is synthesized and played
+  on its own.
 - **Audio normalization** (`recorder.py`): peaks are normalized before STT; a
   peak below 0.01 is not boosted.
 - **Windows audio**: TTS plays through `winsound` to bypass PortAudio/MME
@@ -320,12 +379,11 @@ can use them before the requirements step:
   kill fallback, output in `logs/llm_server.log`. An **adopted** server (one
   that was already listening) has no subprocess behind it, so `shutdown()` is
   a no-op for it by construction - do not "fix" that into terminating it.
-- **Aborting speech** (`app.py` `_answer`): emptying the queue is not enough,
-  because the TTS thread buffers the sentences it has already taken from it. A
-  `_ReplyEnd` marker whose event is set is what makes that thread drop them;
-  without it a failed exchange is spoken after the next reply. For the same
-  reason every exchange that opened the model stream must always end with one
-  marker.
+- **Aborting speech** (`app.py` `_ask_model`): emptying the queue is not
+  enough, because the TTS thread buffers the sentences it has already taken
+  from it. A `_ReplyEnd` marker whose event is set is what makes that thread
+  drop them. For the same reason every reply that queued a sentence must end
+  with one marker; a failed or interrupted request queues nothing.
 - **A take during the previous exchange** (`app.py`): it is neither dropped nor
   run in parallel. `_finalize_recording` collects the take BEFORE it waits for
   `_exchange_lock` (a later take would otherwise replace the chunk buffer it is
@@ -348,7 +406,9 @@ and the network, and downloads nothing. `tests/test_config.py` imports the real
 capture thread against a stand-in `sd.InputStream`, so it is the one file with
 short waits in it; `tests/test_tts.py` replaces the synthesis backend and never
 loads a model; `tests/test_languages.py` imports the profile modules alone and
-needs neither config nor torch.
+needs neither config nor torch, and so do `tests/test_prompt.py` (which also
+reads the shipped prompt file), `tests/test_contract.py` and
+`tests/test_conversation.py` (a stand-in for `LLMManager`).
 
 ## Working Rules
 

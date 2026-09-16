@@ -34,7 +34,9 @@ import numpy as np
 # config first: it sets HF_HOME, the Supertonic cache and the offline switch,
 # which huggingface_hub reads when stt and tts import their engines below.
 from speakloop import config
-from speakloop import bootstrap, detect_hardware, lifecycle
+from speakloop import bootstrap, detect_hardware, lifecycle, prompt
+from speakloop.contract import Reply, split_sentences
+from speakloop.conversation import Lesson
 from speakloop.llm import LLMManager, error_message
 from speakloop.llm_server_ctl import LLMServerController
 from speakloop.playback import PlaybackController
@@ -45,11 +47,12 @@ from speakloop.ui import TutorView, ViewCallbacks
 
 
 class _ReplyEnd(NamedTuple):
-    """Queue marker: the model has finished, its sentences may now be spoken.
+    """Queue marker: the last sentence of a reply is in the queue.
 
     The speech thread buffers the sentences of a reply and synthesizes nothing
-    until this marker arrives, so the model server has released the GPU before
-    the synthesis starts (both share one card).
+    until this marker arrives. The sentences are queued only after the model
+    has finished, so the model server has released the GPU before the
+    synthesis starts (both share one card).
 
     The marker carries the stop event of ITS OWN reply. That is what makes an
     interrupt final: a take started meanwhile has already set that event, so the
@@ -72,13 +75,17 @@ class VoiceTutorController:
     the window through ``self.view.*`` and the view forwards its bindings back
     to the handlers passed in ViewCallbacks.
 
+    The lesson opens by itself once everything is loaded: the model asks the
+    first question (_open_lesson).
+
     Flow per exchange (state machine):
         Record     -> one press opens the microphone; the take ends by itself
                       after a pause, or on the next press (recorder.py).
         Process    -> faster-whisper transcribes the take (stt.py).
-        Think      -> the model answers as a stream (llm.py), tokens go to the
-                      window and whole sentences to the speech queue.
-        Speak      -> the queue is spoken once the model is done (_ReplyEnd).
+        Think      -> the model writes its whole reply (conversation.py), which
+                      is split into NOTE / SAY / SUMMARY (contract.py).
+        Show       -> NOTE, SAY and SUMMARY go to the window.
+        Speak      -> the sentences of SAY go to the speech queue (_ReplyEnd).
         Loop       -> back to idle; a new take interrupts the speech.
     """
 
@@ -128,6 +135,9 @@ class VoiceTutorController:
         # One client for both backends: they speak the same OpenAI API and only
         # the address differs, which init_client is told at connection time.
         self.llm_mgr = LLMManager()
+        # The lesson over llm_mgr. Built by load_components, from the prompt
+        # file; no exchange can start before that (app_ready).
+        self.lesson: Optional[Lesson] = None
         # Owns the llama-server subprocess. Built for every backend and left
         # untouched by "lm-studio": all of its methods are no-ops until start().
         self._llm_server = LLMServerController()
@@ -154,6 +164,15 @@ class VoiceTutorController:
                         "Loading the speech models...")
 
         try:
+            # First of all: a missing or edited prompt file stops the start at
+            # once, and not after a minute of model loading.
+            system_prompt = prompt.build_system_prompt(
+                config.PROMPT_FILE, config.TARGET_LANGUAGE,
+                config.EXPLANATION_LANGUAGE, config.FIRST_TOPIC)
+            self.lesson = Lesson(self.llm_mgr, system_prompt)
+            logging.info(f"Lesson prompt loaded from {config.PROMPT_FILE} "
+                         f"({len(system_prompt)} characters).")
+
             self.stt_mgr.load_model()
             logging.info("STT Model loaded successfully.")
 
@@ -242,7 +261,32 @@ class VoiceTutorController:
         self.app_ready = True
         self.view.enter_app_ready()
         self.view.append_system_msg(
-            f"Voice Tutor ready. Practice learning {config.TARGET_LANGUAGE}!")
+            f"Ready. The lesson is in {config.TARGET_LANGUAGE}. "
+            f"Voice commands: simpler, hint, new topic, finish.")
+        self._open_lesson()
+
+    def _open_lesson(self):
+        """Ask the model for the first question of the lesson. (Tk thread.)
+
+        Runs like an exchange: with a stop event of its own and under the
+        exchange lock, so a take started meanwhile interrupts it the same way.
+        """
+        stop_event = self.playback.new_event()
+        threading.Thread(target=self._run_opening, args=(stop_event,),
+                         daemon=True).start()
+
+    def _run_opening(self, stop_event: threading.Event):
+        with self._exchange_lock:
+            if stop_event.is_set():
+                return
+            try:
+                self._ask_model(None, stop_event)
+            except Exception:
+                logging.exception("Error while opening the lesson:")
+                self.root.after(0, self.view.append_system_msg,
+                                "The lesson could not be opened. "
+                                "Speak to start it.")
+                self.root.after(0, self.view.enter_error, "Error")
 
     # ------------------------------------------------------------------
     # Press handlers (called by the view's bindings, on the Tk main thread)
@@ -399,63 +443,93 @@ class VoiceTutorController:
                              "the model is not asked.")
                 return
 
-            self._answer(user_text, stt_ms, stop_event)
+            self._ask_model(user_text, stop_event, stt_ms)
 
         except Exception:
             logging.exception("Error in the exchange:")
             self.root.after(0, self.view.append_system_msg, "Processing Error. Please try again.")
             self.root.after(0, self.view.enter_error, "Error")
 
-    def _answer(self, user_text: str, stt_ms: float,
-                stop_event: threading.Event):
-        """Ask the model and hand its sentences to the speech thread."""
+    def _ask_model(self, learner_text: Optional[str],
+                   stop_event: threading.Event,
+                   stt_ms: Optional[float] = None):
+        """Get one reply of the model, show it and queue its speech.
+
+        *learner_text* None opens the lesson; *stt_ms* is None then too, as
+        there was no take to transcribe.
+        """
         self.root.after(0, self.view.enter_thinking)
-
         llm_start = time.perf_counter()
-        self.root.after(0, self.view.append_reply_start)
-
-        # Streaming callback to append tokens live
-        def token_cb(token):
-            self.root.after(0, self.view.append_reply_token, token)
 
         try:
-            self.llm_mgr.stream_and_queue_tts(
-                user_text,
-                self.tts_queue,
-                stop_event,
-                token_callback=token_cb
-            )
+            if learner_text is None:
+                reply = self.lesson.open(stop_event)
+            else:
+                reply = self.lesson.answer(learner_text, stop_event)
         except Exception as llm_error:
-            # Handled here and not by the caller, which cannot know that a reply
-            # line is already open in the chat. Without this the window keeps an
-            # empty partner line and a status bar that still says "Thinking",
-            # and the failure is only in the log. llm.py has logged the
-            # traceback already.
-            self.root.after(0, self.view.append_reply_end)
+            # Handled here and not by the caller: without this the status bar
+            # keeps saying "Thinking" and the failure is only in the log.
+            # llm.py has logged the traceback already. Nothing of the reply
+            # was queued for speech, so there is nothing to drop.
             self.root.after(0, self.view.append_system_msg,
                             f"LLM error: {error_message(llm_error)}")
-            # Half a reply must not be spoken. Setting the event of this reply
-            # from here is safe: it belongs to this exchange, and only the
-            # reference is main-thread state (see playback.py). The marker is
-            # what makes the speech thread drop the sentences it has already
-            # taken out of the queue.
-            stop_event.set()
-            self.tts_queue.put(_ReplyEnd(stop_event))
             self.root.after(0, self.view.enter_error, "LLM Error")
             return
 
+        if reply is None:
+            # Interrupted by a new take, which owns the window from now on.
+            logging.info("The reply was interrupted and is not shown.")
+            return
+
         llm_ms = (time.perf_counter() - llm_start) * 1000
-        logging.info(f"LLM complete streaming and queuing. Duration: {llm_ms:.0f}ms")
+        logging.info(f"LLM reply received. Duration: {llm_ms:.0f}ms")
 
-        self.root.after(0, self.view.append_reply_end)
-        self.root.after(0, self.view.update_stats, stt_ms, llm_ms)
+        self.root.after(0, self._show_reply, reply)
+        if stt_ms is not None:
+            self.root.after(0, self.view.update_stats, stt_ms, llm_ms)
 
-        # The model has released the GPU, so the sentences may be synthesized.
-        # The marker carries this reply's stop event: an interrupt that arrived
-        # meanwhile drops them instead of speaking them over the new take.
+        sentences = split_sentences(reply.say) if reply.say else []
+        if not sentences:
+            # A SUMMARY or a reply outside the contract: shown, not spoken.
+            self.root.after(0, self._enter_if_current, self.view.enter_idle,
+                            stop_event)
+            return
+        for sentence in sentences:
+            logging.info(f"Queued sentence to TTS: {sentence!r}")
+            self.tts_queue.put(sentence)
+        # The marker carries this reply's stop event: an interrupt that
+        # arrives before the speech drops the sentences instead of speaking
+        # them over the new take.
         self.tts_queue.put(_ReplyEnd(stop_event))
-        if not stop_event.is_set():
-            self.root.after(0, self.view.enter_speaking)
+        self.root.after(0, self._enter_if_current, self.view.enter_speaking,
+                        stop_event)
+
+    def _show_reply(self, reply: Reply):
+        """Write one reply into the chat. (Tk thread.)
+
+        NOTE first, as the prompt orders the lines: the learner reads the
+        correction before the question. A reply outside the contract is shown
+        whole, so the learner still sees what the model wrote.
+        """
+        if not reply.follows_contract:
+            self.view.append_partner_msg(reply.raw)
+            return
+        if reply.note:
+            self.view.append_note(reply.note)
+        if reply.say:
+            self.view.append_partner_msg(reply.say)
+        if reply.summary:
+            self.view.append_summary(reply.summary)
+
+    def _enter_if_current(self, intent, stop_event: threading.Event):
+        """Run a view intent only for the reply that is still current. (Tk thread.)
+
+        Checked on the Tk thread, where a new take changes the window: a check
+        in the worker could pass just before a take starts, and the intent
+        would then draw over the recording state.
+        """
+        if not stop_event.is_set() and self.playback.is_current(stop_event):
+            intent()
 
     # ------------------------------------------------------------------
     # Speech output
@@ -463,9 +537,8 @@ class VoiceTutorController:
     def process_tts_queue(self):
         """Buffer the sentences of a reply, then speak them when it is over.
 
-        The queue holds the sentences llm.py streams into it (plain strings)
-        and one _ReplyEnd marker per reply. Nothing is synthesized before that
-        marker: the model server and the synthesis share one GPU.
+        The queue holds the sentences of each SAY line (plain strings) and one
+        _ReplyEnd marker per reply. Nothing is synthesized before that marker.
         """
         pending_sentences: list = []
 

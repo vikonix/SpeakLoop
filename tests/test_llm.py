@@ -7,10 +7,10 @@ error_message, request_extra_body and usage_log_line are the pure parts of
 the module: the first decides what a user reads in the chat window when a
 request fails, the second what a request sends outside the OpenAI API (the
 thinking switch of Gemma), the third what the log says about the context.
-The streaming tests use a stand-in client to see that those fields reach the
-request, that the usage chunk at the end of the stream is read, and that the
-history is kept whole; how a real server answers belongs to the manual check
-list.
+The ask() tests use a stand-in client to see that those fields reach the
+request, that the usage chunk at the end of the stream is read, that an
+interrupt leaves the history as it was, and that the history is kept whole;
+how a real server answers belongs to the manual check list.
 
 The stubs below stand in for the errors the OpenAI client raises, which carry
 the parsed JSON body as .body - building a real one would need an httpx
@@ -23,7 +23,6 @@ Run from the project root with:
 
 import threading
 import unittest
-from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -129,95 +128,188 @@ def _usage_chunk(prompt_tokens, completion_tokens):
                               total_tokens=prompt_tokens + completion_tokens))
 
 
-def _stream_of(chunks):
-    """A stand-in for the stream context manager the client returns."""
+def _stream_of(chunks, on_chunk=None):
+    """A stand-in for the stream context manager the client returns.
+
+    *on_chunk* runs before each chunk is given out, so a test can set a stop
+    event in the middle of the stream.
+    """
+    def generate():
+        for chunk in chunks:
+            if on_chunk:
+                on_chunk()
+            yield chunk
+
     stream = MagicMock()
-    stream.__enter__.return_value = iter(chunks)
+    stream.__enter__.return_value = generate()
     return stream
 
 
-REPLY_CHUNKS = [_chunk("Hello there. "), _chunk("How are you?")]
+REPLY_CHUNKS = [_chunk("SAY: Hello there. "), _chunk("How are you?")]
+SYSTEM_PROMPT = "You are a tutor."
 
 
-class StreamRequestTests(unittest.TestCase):
-    """The request stream_and_queue_tts sends, with a stand-in client."""
+def _manager():
+    """An LLMManager with a stand-in client and a started conversation."""
+    manager = LLMManager()
+    manager.client = MagicMock()
+    manager.start_conversation(SYSTEM_PROMPT)
+    return manager
 
-    def _stream(self, backend, chunks=REPLY_CHUNKS, stop_event=None):
+
+class StartConversationTests(unittest.TestCase):
+    def test_the_history_starts_with_the_system_prompt(self):
+        manager = LLMManager()
+        manager.start_conversation(SYSTEM_PROMPT)
+        self.assertEqual(manager.messages,
+                         [{"role": "system", "content": SYSTEM_PROMPT}])
+
+    def test_a_new_conversation_drops_the_old_one(self):
+        manager = LLMManager()
+        manager.start_conversation("first")
+        manager.messages.append({"role": "user", "content": "Hi"})
+        manager.start_conversation("second")
+        self.assertEqual(manager.messages,
+                         [{"role": "system", "content": "second"}])
+
+    def test_ask_without_a_conversation_is_refused(self):
+        # A request without the lesson prompt would be a lesson without rules.
         manager = LLMManager()
         manager.client = MagicMock()
-        manager.client.chat.completions.create.return_value = _stream_of(chunks)
-        tts_queue = Queue()
+        with self.assertRaises(RuntimeError):
+            manager.ask("Hi", threading.Event())
+        manager.client.chat.completions.create.assert_not_called()
+
+
+class AskRequestTests(unittest.TestCase):
+    """The request ask() sends and the text it returns, with a stand-in client."""
+
+    def _ask(self, backend, chunks=REPLY_CHUNKS, stop_event=None,
+             on_chunk=None):
+        manager = _manager()
+        manager.client.chat.completions.create.return_value = _stream_of(
+            chunks, on_chunk)
         with patch.object(config, "LLM_BACKEND", backend), \
                 self.assertLogs(level="INFO") as logs:
-            reply = manager.stream_and_queue_tts(
-                "Hi", tts_queue, stop_event or threading.Event())
+            reply = manager.ask("Hi", stop_event or threading.Event())
         kwargs = manager.client.chat.completions.create.call_args.kwargs
         self.log_lines = logs.output
-        return reply, kwargs, tts_queue
+        self.manager = manager
+        return reply, kwargs
 
     def test_llama_server_request_carries_the_extra_fields(self):
-        _, kwargs, _ = self._stream("llama-server")
+        _, kwargs = self._ask("llama-server")
         self.assertEqual(kwargs["extra_body"],
                          request_extra_body("llama-server"))
 
     def test_lm_studio_request_has_no_extra_fields(self):
-        _, kwargs, _ = self._stream("lm-studio")
+        _, kwargs = self._ask("lm-studio")
         self.assertIsNone(kwargs["extra_body"])
 
     def test_the_sampling_values_come_from_config(self):
-        _, kwargs, _ = self._stream("llama-server")
+        _, kwargs = self._ask("llama-server")
         self.assertEqual(kwargs["temperature"], config.LLM_TEMPERATURE)
         self.assertEqual(kwargs["top_p"], config.LLM_TOP_P)
         self.assertEqual(kwargs["max_tokens"], config.LLM_MAX_TOKENS)
 
-    def test_the_reply_is_still_split_into_sentences(self):
-        reply, _, tts_queue = self._stream("llama-server")
-        self.assertEqual(reply, "Hello there. How are you?")
-        self.assertEqual([tts_queue.get_nowait(), tts_queue.get_nowait()],
-                         ["Hello there.", "How are you?"])
+    def test_the_whole_reply_is_returned_as_one_text(self):
+        reply, _ = self._ask("llama-server")
+        self.assertEqual(reply, "SAY: Hello there. How are you?")
 
     def test_the_request_asks_for_the_usage(self):
         # Without the option a streamed reply carries no usage.
-        _, kwargs, _ = self._stream("llama-server")
+        _, kwargs = self._ask("llama-server")
         self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+
+    def test_the_request_starts_with_the_system_prompt(self):
+        _, kwargs = self._ask("llama-server")
+        self.assertEqual(kwargs["messages"],
+                         [{"role": "system", "content": SYSTEM_PROMPT},
+                          {"role": "user", "content": "Hi"}])
 
     def test_the_usage_chunk_does_not_change_the_reply(self):
         # Its choices list is empty; reading choices[0] would raise.
-        reply, _, tts_queue = self._stream(
-            "llama-server", REPLY_CHUNKS + [_usage_chunk(100, 20)])
-        self.assertEqual(reply, "Hello there. How are you?")
-        self.assertEqual(tts_queue.qsize(), 2)
+        reply, _ = self._ask("llama-server",
+                             REPLY_CHUNKS + [_usage_chunk(100, 20)])
+        self.assertEqual(reply, "SAY: Hello there. How are you?")
 
     def test_the_context_size_is_logged(self):
-        self._stream("llama-server", REPLY_CHUNKS + [_usage_chunk(100, 20)])
+        self._ask("llama-server", REPLY_CHUNKS + [_usage_chunk(100, 20)])
         self.assertTrue(any("Context tokens: 120 (prompt 100, reply 20)."
                             in line for line in self.log_lines))
 
-    def test_an_interrupted_stream_logs_an_unknown_size(self):
-        # The stop event ends the loop before the usage chunk arrives.
-        stop_event = threading.Event()
-        stop_event.set()
-        self._stream("llama-server", REPLY_CHUNKS + [_usage_chunk(100, 20)],
-                     stop_event)
+    def test_a_reply_without_a_usage_report_logs_an_unknown_size(self):
+        self._ask("llama-server")
         self.assertTrue(any("Context tokens: unknown" in line
                             for line in self.log_lines))
 
 
+class InterruptTests(unittest.TestCase):
+    """A stop event set before the reply is complete."""
+
+    def _interrupted(self, stop_event, on_chunk=None):
+        manager = _manager()
+        manager.client.chat.completions.create.return_value = _stream_of(
+            REPLY_CHUNKS + [_usage_chunk(100, 20)], on_chunk)
+        with self.assertLogs(level="INFO"):
+            reply = manager.ask("Hi", stop_event)
+        return manager, reply
+
+    def test_an_event_set_before_the_request_gives_no_reply(self):
+        stop_event = threading.Event()
+        stop_event.set()
+        _, reply = self._interrupted(stop_event)
+        self.assertIsNone(reply)
+
+    def test_an_event_set_during_the_stream_gives_no_reply(self):
+        stop_event = threading.Event()
+        _, reply = self._interrupted(stop_event, on_chunk=stop_event.set)
+        self.assertIsNone(reply)
+
+    def test_the_history_is_as_before_the_request(self):
+        # The learner never saw the reply, and a user message left alone
+        # would make two user messages in a row with the next request.
+        stop_event = threading.Event()
+        manager, _ = self._interrupted(stop_event, on_chunk=stop_event.set)
+        self.assertEqual(manager.messages,
+                         [{"role": "system", "content": SYSTEM_PROMPT}])
+
+
+class FailureTests(unittest.TestCase):
+    def test_a_failed_request_is_rolled_back_and_raised(self):
+        manager = _manager()
+        manager.client.chat.completions.create.side_effect = (
+            RuntimeError("context window exceeded"))
+        with self.assertLogs(level="ERROR"), \
+                self.assertRaises(RuntimeError):
+            manager.ask("Hi", threading.Event())
+        self.assertEqual(len(manager.messages), 1)
+
+    def test_an_empty_reply_is_an_error(self):
+        # A stand-in text in the history would be a reply outside the
+        # lesson contract.
+        manager = _manager()
+        manager.client.chat.completions.create.return_value = _stream_of(
+            [_chunk("  "), _usage_chunk(100, 1)])
+        with self.assertLogs(level="ERROR"), \
+                self.assertRaises(RuntimeError):
+            manager.ask("Hi", threading.Event())
+        self.assertEqual(len(manager.messages), 1)
+
+
 class HistoryTests(unittest.TestCase):
-    """The conversation history is kept whole (step 2c)."""
+    """The conversation history is kept whole."""
 
     EXCHANGES = 10
 
     def _talk(self):
-        manager = LLMManager()
-        manager.client = MagicMock()
-        # A new stream for every request: an iterator can be read only once.
+        manager = _manager()
+        # A new stream for every request: a generator can be read only once.
         manager.client.chat.completions.create.side_effect = (
-            lambda **kwargs: _stream_of([_chunk("Fine.")]))
+            lambda **kwargs: _stream_of([_chunk("SAY: Fine.")]))
         with self.assertLogs(level="INFO"):
             for number in range(self.EXCHANGES):
-                manager.stream_and_queue_tts(
-                    f"Message {number}", Queue(), threading.Event())
+                manager.ask(f"Message {number}", threading.Event())
         return manager
 
     def test_no_exchange_is_dropped(self):
@@ -235,18 +327,8 @@ class HistoryTests(unittest.TestCase):
     def test_the_last_request_carries_the_whole_history(self):
         manager = self._talk()
         kwargs = manager.client.chat.completions.create.call_args.kwargs
-        # All earlier pairs plus the new user message.
+        # The system prompt, all earlier pairs and the new user message.
         self.assertEqual(len(kwargs["messages"]), 2 * self.EXCHANGES)
-
-    def test_a_failed_request_is_rolled_back(self):
-        manager = LLMManager()
-        manager.client = MagicMock()
-        manager.client.chat.completions.create.side_effect = (
-            RuntimeError("context window exceeded"))
-        with self.assertLogs(level="ERROR"), \
-                self.assertRaises(RuntimeError):
-            manager.stream_and_queue_tts("Hi", Queue(), threading.Event())
-        self.assertEqual(len(manager.messages), 1)
 
 
 if __name__ == "__main__":

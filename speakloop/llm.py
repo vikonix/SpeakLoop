@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Valeriy Kovalev
 
-import re
 import logging
 import threading
-from queue import Queue
 from threading import Event
+from typing import Optional
+
 from openai import OpenAI
 
 from speakloop import config
@@ -34,10 +34,6 @@ LLM_CHECK_TIMEOUT = 10.0
 # but the OpenAI client requires the field, so it is a placeholder and not a
 # setting.
 PLACEHOLDER_MODEL = "local-model"
-
-# Compiled once at import time - splits on sentence-ending punctuation only when
-# followed by an uppercase letter, avoiding false splits on "Mr. Smith" or "1.5 sec".
-_SENTENCE_END = re.compile(r'(?<=[.!?])\s+(?=[A-ZА-Я])')
 
 
 def error_message(error: Exception) -> str:
@@ -111,14 +107,26 @@ def usage_log_line(usage) -> str:
 
 
 class LLMManager:
+    """OpenAI-compatible client with the conversation history of the lesson.
+
+    Used by both backends. The history holds the system message and then
+    user/assistant pairs, and is never trimmed (see ask()).
+    """
+
     def __init__(self, model: str = None):
         self.client = None
         # Model name sent in API requests; see PLACEHOLDER_MODEL
         self.model = model or PLACEHOLDER_MODEL
-        # Chat history buffer starting with the system instructions
-        self.messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
+        # The conversation: empty until start_conversation() sets the system
+        # message, so no request can go out without the lesson prompt.
+        self.messages = []
         # Protects self.messages from concurrent reads/writes across threads
         self._messages_lock = threading.Lock()
+
+    def start_conversation(self, system_prompt: str):
+        """Begin a new conversation with *system_prompt* as its system message."""
+        with self._messages_lock:
+            self.messages = [{"role": "system", "content": system_prompt}]
 
     def init_client(self, base_url: str = None, api_key: str = None):
         """
@@ -159,16 +167,27 @@ class LLMManager:
                 logging.error(f"LLM server not available: {error}")
             return False
 
-    def stream_and_queue_tts(self, user_text: str, tts_queue: Queue, stop_event: Event, token_callback=None) -> str:
-        """
-        Streams text from the LLM, parses sentences using regex on-the-fly,
-        and pushes completed strings into the TTS queue.
+    def ask(self, user_text: str, stop_event: Event) -> Optional[str]:
+        """Send one user message and return the whole reply.
 
-        Raises the API error when the request fails, with the conversation
-        history rolled back to the state before the call.
+        The reply is returned only when it is complete: the caller splits it
+        into NOTE / SAY / SUMMARY, which needs the whole text. It is still
+        streamed from the server, for two reasons: closing the stream is what
+        stops the server on an interrupt, and the last chunk carries the usage.
+
+        Returns None when stop_event is set before the reply is returned. The
+        learner never saw that reply, so the user message leaves the history
+        with it: the history is then as it was before the call, and it never
+        holds two user messages in a row, which a chat template may refuse.
+
+        Raises when the request fails or the reply is empty, with the history
+        rolled back in the same way.
         """
         if self.client is None:
             raise RuntimeError("LLM client not initialized. Call init_client() first.")
+        with self._messages_lock:
+            if not self.messages:
+                raise RuntimeError("No conversation. Call start_conversation() first.")
 
         logging.info(f"LLM request started for user input: {user_text!r}")
 
@@ -182,7 +201,7 @@ class LLMManager:
             # A context manager and not a bare call: the loop below breaks out
             # of a stream the server is still generating into. Closing the
             # response is what tells the server to stop - without it the model
-            # keeps producing an answer nobody will hear, and the next request
+            # keeps producing an answer nobody will see, and the next request
             # waits behind it.
             with self.client.chat.completions.create(
                 model=self.model,
@@ -198,13 +217,11 @@ class LLMManager:
                 timeout=LLM_TIMEOUT,
                 extra_body=request_extra_body(config.LLM_BACKEND),
             ) as stream_response:
-                full_reply = ""
-                sentence_buffer = ""
+                reply = ""
                 usage = None
 
                 for chunk in stream_response:
                     if stop_event.is_set():
-                        logging.info("LLM streaming interrupted by user stop event.")
                         break
 
                     if chunk.usage is not None:
@@ -214,31 +231,22 @@ class LLMManager:
                     if not chunk.choices:
                         continue
 
-                    token = chunk.choices[0].delta.content or ""
-                    if not token:
-                        continue
+                    reply += chunk.choices[0].delta.content or ""
 
-                    if token_callback:
-                        token_callback(token)
-                    full_reply += token
-                    sentence_buffer += token
+            # Checked after the stream and not only inside it: an event set
+            # during the last chunk also means that nobody waits for the reply.
+            if stop_event.is_set():
+                logging.info("LLM reply interrupted by a stop event; "
+                             "the exchange is removed from the history.")
+                self._roll_back_user_message()
+                return None
 
-                    parts = _SENTENCE_END.split(sentence_buffer)
-                    if len(parts) > 1:
-                        sentence_buffer = parts.pop()
-                        for item in parts:
-                            text_to_speak = item.strip()
-                            if text_to_speak:
-                                logging.info(f"Queued sentence to TTS: {text_to_speak!r}")
-                                tts_queue.put(text_to_speak)
+            final_reply = reply.strip()
+            if not final_reply:
+                # An error and not a stand-in text: a stand-in in the history
+                # would show the model a reply outside the lesson contract.
+                raise RuntimeError("The model returned an empty reply.")
 
-            # Flush any residual text remaining inside the buffer
-            remaining_text = sentence_buffer.strip()
-            if remaining_text and not stop_event.is_set():
-                logging.info(f"Queued final sentence segment to TTS: {remaining_text!r}")
-                tts_queue.put(remaining_text)
-
-            final_reply = full_reply.strip() if full_reply.strip() else "Sorry, I did not get a response."
             # The whole history is kept, without trimming. The lesson SUMMARY
             # needs its start, and a trimmed start changes the prompt prefix,
             # so the server processes the whole history again on every
@@ -253,13 +261,17 @@ class LLMManager:
             return final_reply
 
         except Exception:
-            # Roll back the user message so history stays consistent (user/assistant pairs)
-            with self._messages_lock:
-                if self.messages and self.messages[-1].get("role") == "user":
-                    self.messages.pop()
-            logging.exception("LLM Stream error:")
-            # Raised, not answered with an apology string: the caller streams
-            # the tokens into the window itself and would otherwise show an
-            # empty reply and a status bar that still says "Thinking". What the
-            # user is told about a failure is the window's decision.
+            self._roll_back_user_message()
+            logging.exception("LLM request error:")
+            # Raised, not answered with an apology string: what the user is
+            # told about a failure is the window's decision.
             raise
+
+    def _roll_back_user_message(self):
+        """Remove the user message of a failed or interrupted request.
+
+        Keeps the history in user/assistant pairs.
+        """
+        with self._messages_lock:
+            if self.messages and self.messages[-1].get("role") == "user":
+                self.messages.pop()
