@@ -123,13 +123,18 @@ def _setup_logging() -> None:
     bootstrap.open_log_section(handler, LOG_FILE)
     logger.addHandler(handler)
 
-# Smallest card, in GB as vram_gb reports it, on which the speech models stay
-# on the GPU next to the chat model. Gemma 4 12B Q4_0 takes about 6.5 GiB, its
-# 16k context and compute buffers add more, and faster-whisper and Kokoro each
-# open a CUDA context of their own (about 1-1.5 GB together). Below this size
-# the chat model needs the whole card, and the speech models lose little on
-# the CPU next to its answer time (docs/model-parameters.md, section 7.2).
-SPEECH_GPU_MIN_VRAM_GB = 12
+# Smallest card, in GB as vram_gb reports it, on which Kokoro stays on the GPU
+# next to the chat model. Gemma 4 12B Q4_0 takes about 6.5 GiB, its 16k
+# context and compute buffers add more, and Kokoro opens a CUDA context of its
+# own. Below this size the chat model needs the whole card, and synthesis
+# loses little on the CPU next to its answer time (docs/model-parameters.md,
+# sections 3.4 and 7.2).
+#
+# faster-whisper is NOT under this rule: recognition is slower on the CPU, and
+# much slower with a large model, so it stays on any card ctranslate2 can use.
+# The chat model's memory fit runs after Whisper is loaded and leaves it its
+# memory. settings.json ("stt_device") moves Whisper to the CPU by hand.
+TTS_GPU_MIN_VRAM_GB = 12
 
 
 # =====================================================================
@@ -489,28 +494,30 @@ def build_config(hardware: dict) -> dict:
     directly. The chat model gets no values here: llama-server fits its GPU
     layers into the free VRAM at launch, and its context is a setting.
 
-    The chat model is still what decides the speech devices. It shares the
-    card with them, and on a card below SPEECH_GPU_MIN_VRAM_GB it needs all of
-    it, so faster-whisper and Kokoro go to the CPU there. A card the chat
-    model cannot use (a CPU build of llama-server) is free for them whatever
-    its size. The LLM side follows the physical GPU and llama-server's own
-    device probe - NOT torch or ctranslate2, which are the speech stacks.
+    faster-whisper gets the GPU whenever ctranslate2 can use it, whatever the
+    size of the card (TTS_GPU_MIN_VRAM_GB says why).
+
+    The chat model still decides Kokoro's device. It shares the card with
+    Kokoro, and on a card below TTS_GPU_MIN_VRAM_GB it needs all of it, so
+    Kokoro goes to the CPU there. A card the chat model cannot use (a CPU
+    build of llama-server) is free for Kokoro whatever its size. The LLM side
+    follows the physical GPU and llama-server's own device probe - NOT torch
+    or ctranslate2, which are the speech stacks.
     """
     gpu = hardware["gpu"]
 
     # LLM side: usable unless llama-server explicitly reported no usable device
     # (None = nothing to ask, assume a present GPU is usable).
     llm_uses_gpu = gpu["present"] and gpu["llama_gpu_offload"] is not False
-    speech_fits_on_gpu = (not llm_uses_gpu
-                          or (gpu["vram_gb"] or 0) >= SPEECH_GPU_MIN_VRAM_GB)
+    tts_fits_on_gpu = (not llm_uses_gpu
+                       or (gpu["vram_gb"] or 0) >= TTS_GPU_MIN_VRAM_GB)
 
     # DEVICE stays the plain answer to "does torch see CUDA": config caps the
     # per-model devices by it, and warn_if_gpu_unused reads it as that answer.
     return {
         "DEVICE": "cuda" if gpu["torch_cuda"] else "cpu",
-        "STT_DEVICE": ("cuda" if gpu["stt_cuda"] and speech_fits_on_gpu
-                       else "cpu"),
-        "TTS_DEVICE": ("cuda" if gpu["torch_cuda"] and speech_fits_on_gpu
+        "STT_DEVICE": "cuda" if gpu["stt_cuda"] else "cpu",
+        "TTS_DEVICE": ("cuda" if gpu["torch_cuda"] and tts_fits_on_gpu
                        else "cpu"),
         # null = system default device, which is the right choice on most
         # machines; the indices of all devices are listed under "hardware".

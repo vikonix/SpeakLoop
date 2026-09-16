@@ -62,11 +62,18 @@ class HfRepo(NamedTuple):
     label is display text (logs, the installer's prompts) and carries no size
     of its own: the number lives in size_mb and is formatted where it is shown,
     so the two can never contradict each other.
+
+    weights_file is the file of the repo the model cannot load without, as a
+    path inside the snapshot. loader.models_cached takes a repo for complete
+    only when this file is there: huggingface_hub 1.x deletes a partial file
+    when its download fails, so the small files of a repo can be in the cache
+    while its weights are not, and nothing else shows it.
     """
 
     repo_id: str
     label: str
     size_mb: int
+    weights_file: str
 
 
 class HfFile(NamedTuple):
@@ -107,26 +114,38 @@ class PackagedModel(NamedTuple):
 # Measure the WHOLE snapshot, not the weights the app loads: snapshot_download
 # without allow_patterns fetches every file in the repo.
 
-# The repo faster-whisper resolves the model name "small" to. The app must load
-# it by this repo id (or by the name that maps to it), or the load goes to a
-# repo the installer never fetched.
-WHISPER_SMALL = HfRepo(
-    "Systran/faster-whisper-small",
-    "faster-whisper small (speech recognition)",
-    size_mb=486,  # measured 2026-09-11
+# The speech recognition model: Whisper large-v3-turbo in the CTranslate2
+# format, the repo faster-whisper resolves the model name "large-v3-turbo" to.
+# The app must load it by this repo id (or by the name that maps to it), or the
+# load goes to a repo the installer never fetched. The record name carries no
+# model size, so a change of the model changes only this record.
+#
+# Turbo keeps the large-v3 encoder and has 4 decoder layers, so it recognizes
+# unfamiliar words much better than small and still answers fast. It is
+# multilingual: a Spanish lesson needs no other model.
+WHISPER = HfRepo(
+    "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "faster-whisper large-v3-turbo (speech recognition)",
+    # 1 621 668 947 bytes, the sum of the repo file list. Not yet measured
+    # with tools/measure_model_sizes.py.
+    size_mb=1622,  # summed 2026-09-16
+    weights_file="model.bin",
 )
 
 KOKORO = HfRepo(
     "hexgrad/Kokoro-82M",
     "Kokoro-82M (text-to-speech, English)",
     size_mb=363,  # measured 2026-07-28
+    # The weights KModel loads. The voices (voices/*.pt) are separate files
+    # and are not checked.
+    weights_file="kokoro-v1_0.pth",
 )
 
 # Every hub repo, in the order model_fetch downloads them. Supertonic is NOT in
 # this tuple: it does not use the hub cache (see below), so caching its repo
 # under HF_HOME/hub would be dead weight the app never reads.
 HF_REPOS: tuple[HfRepo, ...] = (
-    WHISPER_SMALL,
+    WHISPER,
     KOKORO,
 )
 

@@ -66,7 +66,7 @@ class ModelBindingTests(unittest.TestCase):
     """The app loads by the same names the fetchers download by."""
 
     def test_whisper_is_loaded_by_the_catalogue_repo_id(self):
-        self.assertEqual(config.WHISPER_MODEL, models_info.WHISPER_SMALL.repo_id)
+        self.assertEqual(config.WHISPER_MODEL, models_info.WHISPER.repo_id)
 
     def test_the_gguf_path_is_the_catalogue_file_in_models(self):
         self.assertEqual(Path(config.EXTERNAL_MODEL_PATH),
@@ -76,13 +76,13 @@ class ModelBindingTests(unittest.TestCase):
         # The gate is all-or-nothing: a repo that this run never loads would
         # keep the Hub online forever, and a repo it does load but that is not
         # listed would be switched offline before it was downloaded.
-        self.assertIn(models_info.WHISPER_SMALL.repo_id, config._CACHED_REPOS)
+        self.assertIn(models_info.WHISPER, config._CACHED_REPOS)
         if config.TTS_BACKEND == "kokoro":
-            self.assertIn(models_info.KOKORO.repo_id, config._CACHED_REPOS)
+            self.assertIn(models_info.KOKORO, config._CACHED_REPOS)
         else:
             # Supertonic keeps its weights outside the hub cache, so it is
             # checked by its own predicate instead.
-            self.assertNotIn(models_info.KOKORO.repo_id, config._CACHED_REPOS)
+            self.assertNotIn(models_info.KOKORO, config._CACHED_REPOS)
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -254,6 +254,69 @@ class GpuLayersSettingTests(unittest.TestCase):
         value = config.EXTERNAL_N_GPU_LAYERS
         self.assertTrue(value in config.GPU_LAYERS_WORDS or value.isdigit(),
                         value)
+
+
+class SttDeviceSettingTests(unittest.TestCase):
+    """stt_device: "auto", "cuda" or "cpu", and the device it resolves to.
+
+    Every rejected value prints a line to stderr; mock.patch keeps it out of
+    the test report. DEVICE and _HW are patched per case, so nothing here
+    depends on this machine's hardware_config.json or on torch.
+    """
+
+    def _parse(self, value):
+        with mock.patch("sys.stderr"):
+            return config._stt_device_setting(value)
+
+    def _resolve(self, setting: str, device: str, hw: dict) -> str:
+        with mock.patch.object(config, "DEVICE", device), \
+                mock.patch.object(config, "_HW", hw), \
+                mock.patch("sys.stderr"):
+            return config._stt_device(setting)
+
+    def test_the_key_is_known(self):
+        self.assertIn("stt_device", config._KNOWN_USER_KEYS)
+
+    def test_the_three_choices_are_kept(self):
+        for value in ("auto", "cuda", "cpu"):
+            with self.subTest(value=value):
+                self.assertEqual(self._parse(value), value)
+
+    def test_invalid_values_fall_back_to_auto(self):
+        # A typo gives the detected device, not a device nobody chose.
+        for value in ("CUDA", "gpu", "", None, 1, True, ["cuda"]):
+            with self.subTest(value=value):
+                self.assertEqual(self._parse(value), "auto")
+
+    def test_auto_takes_the_detected_device(self):
+        self.assertEqual(
+            self._resolve("auto", "cuda", {"STT_DEVICE": "cuda"}), "cuda")
+        self.assertEqual(
+            self._resolve("auto", "cuda", {"STT_DEVICE": "cpu"}), "cpu")
+
+    def test_auto_is_capped_by_device(self):
+        self.assertEqual(
+            self._resolve("auto", "cpu", {"STT_DEVICE": "cuda"}), "cpu")
+
+    def test_cpu_wins_over_a_detected_cuda(self):
+        # The way out for a card where Whisper leaves the chat model too few
+        # layers.
+        self.assertEqual(
+            self._resolve("cpu", "cuda", {"STT_DEVICE": "cuda"}), "cpu")
+
+    def test_cuda_wins_over_a_detected_cpu(self):
+        self.assertEqual(
+            self._resolve("cuda", "cuda", {"STT_DEVICE": "cpu"}), "cuda")
+
+    def test_cuda_is_capped_by_device(self):
+        # Without the CUDA build of torch, ctranslate2 has no GPU libraries on
+        # Windows and the model load would fail.
+        self.assertEqual(
+            self._resolve("cuda", "cpu", {"STT_DEVICE": "cuda"}), "cpu")
+
+    def test_the_resolved_device_is_a_valid_one(self):
+        # Whatever the checkout's settings.json says.
+        self.assertIn(config.STT_DEVICE, ("cuda", "cpu"))
 
 
 class LlmSettingTests(unittest.TestCase):

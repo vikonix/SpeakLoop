@@ -66,6 +66,7 @@ _KNOWN_USER_KEYS = {
     "max_record_seconds",
     "silence_timeout",
     "silence_threshold",
+    "stt_device",
     "accent",
     "voice",
     "color_theme",
@@ -205,8 +206,8 @@ SUPERTONIC_CACHE_DIR = Path(os.environ["SUPERTONIC_CACHE_DIR"])
 # synthesis model follows the active backend - requiring Kokoro under Supertonic
 # (or the other way round) would keep the Hub online for weights nobody loads.
 _CACHED_REPOS = (
-    (models_info.WHISPER_SMALL.repo_id,)
-    + ((models_info.KOKORO.repo_id,) if TTS_BACKEND == "kokoro" else ())
+    (models_info.WHISPER,)
+    + ((models_info.KOKORO,) if TTS_BACKEND == "kokoro" else ())
 )
 # model_fetch.supertonic_cached() owns this check: it reads the same variable
 # set above and is pure filesystem work, so calling it here pulls in no
@@ -295,13 +296,49 @@ def _model_device(hw_key: str, default: str) -> str:
     return _HW.get(hw_key) or default
 
 
-# Device of faster-whisper. detect_hardware writes "cuda" only when torch sees
-# CUDA and ctranslate2 reports a CUDA device, so the cap by DEVICE matches its
-# own rule.
-STT_DEVICE = _model_device("STT_DEVICE", DEVICE)
+# Device of faster-whisper, from settings.json ("stt_device"):
+#   "auto" - the detected value. detect_hardware writes "cuda" whenever torch
+#            sees CUDA and ctranslate2 reports a CUDA device, whatever the size
+#            of the card, so the cap by DEVICE matches its own rule.
+#   "cuda" - the GPU, set by hand. Still capped by DEVICE: on Windows the CUDA
+#            build of torch provides the libraries ctranslate2 needs on the
+#            GPU (stt.py), so without it the model load fails.
+#   "cpu"  - the CPU, for a card where Whisper leaves the chat model too few
+#            layers.
+STT_DEVICE_CHOICES = ("auto", "cuda", "cpu")
 
-# Device of Kokoro. A key of its own and not DEVICE: detect_hardware moves the
-# speech models to the CPU when the chat model needs the whole card, and
+
+def _stt_device_setting(value) -> str:
+    """The "stt_device" value, or "auto" when it is not one of the choices.
+
+    "auto" and not "cpu" on a typo: the detected device is the one the
+    installation was checked with.
+    """
+    if value in STT_DEVICE_CHOICES:
+        return value
+    print(f"[config] settings.json: stt_device must be one of "
+          f"{', '.join(repr(choice) for choice in STT_DEVICE_CHOICES)}, got "
+          f"{value!r}; using 'auto'", file=sys.stderr)
+    return "auto"
+
+
+def _stt_device(setting: str) -> str:
+    """The device of faster-whisper for a validated "stt_device" value."""
+    if setting == "cpu":
+        return "cpu"
+    if setting == "cuda":
+        if DEVICE != "cuda":
+            print("[config] settings.json: stt_device is 'cuda', but torch "
+                  "cannot use CUDA here; using 'cpu'", file=sys.stderr)
+            return "cpu"
+        return "cuda"
+    return _model_device("STT_DEVICE", DEVICE)
+
+
+STT_DEVICE = _stt_device(_stt_device_setting(_USER.get("stt_device", "auto")))
+
+# Device of Kokoro. A key of its own and not DEVICE: detect_hardware moves
+# Kokoro to the CPU when the chat model needs the whole card, and
 # writing "cpu" into DEVICE instead would make warn_if_gpu_unused report a
 # CUDA problem that does not exist.
 TTS_DEVICE = _model_device("TTS_DEVICE", DEVICE)
@@ -491,7 +528,7 @@ LLM_MAX_TOKENS = 512
 # Loaded by repo id, the same one model_fetch downloads, so the load cannot go
 # to a repo the installer never fetched. The language is WHISPER_LANGUAGE,
 # resolved from the language profile above.
-WHISPER_MODEL = models_info.WHISPER_SMALL.repo_id
+WHISPER_MODEL = models_info.WHISPER.repo_id
 WHISPER_BEAM_SIZE = 1         # Beam size 1 provides optimal speed at temperature 0.0
 WHISPER_NO_SPEECH_THRESHOLD = 0.45
 WHISPER_CPU_THREADS = 4       # CPU inference threads (tune to available core count)

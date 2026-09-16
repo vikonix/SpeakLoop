@@ -6,6 +6,8 @@
   "silence_timeout": 3.0,
   "_silence_threshold": "Loudness (RMS, 0..1) above which the microphone counts as hearing speech. Raise it in a noisy room when the recording never stops by itself; lower it when a quiet voice cuts the recording short. Minimum 0.001.",
   "silence_threshold": 0.01,
+  "_stt_device": "Where speech recognition (faster-whisper) runs: 'auto' (the default) uses the GPU whenever the installed libraries can, whatever the size of the card; 'cuda' and 'cpu' set it by hand. On a small card Whisper takes video memory from the chat model: try 'cpu' when the replies become slow (docs/model-parameters.md, section 3.4).",
+  "stt_device": "auto",
   "_accent": "Variant of the practiced language: 'american' (the default) or 'british'. It selects the synthesis language code and the list of voices.",
   "accent": "american",
   "_voice": "Voice of the partner. It must belong to the variant above: american has af_heart, af_bella, af_nicole, af_sarah, af_sky, am_adam, am_michael, am_echo, am_eric, am_liam; british has bf_emma, bf_alice, bf_isabella, bf_lily, bm_george, bm_daniel, bm_fable, bm_lewis. Remove the key to use the variant default.",

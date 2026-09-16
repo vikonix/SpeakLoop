@@ -222,9 +222,10 @@ class ProbeSttCudaTests(unittest.TestCase):
 
 
 class BuildConfigSpeechTests(unittest.TestCase):
-    """The speech devices: their own probes, and the room the chat model leaves."""
+    """The speech devices: their own probes, and the room the chat model
+    leaves Kokoro. Whisper takes the GPU on a card of any size."""
 
-    LARGE = detect_hardware.SPEECH_GPU_MIN_VRAM_GB
+    LARGE = detect_hardware.TTS_GPU_MIN_VRAM_GB
     SMALL = 4.0  # the reference laptop (docs/model-parameters.md, section 2)
 
     def _devices(self, **kwargs):
@@ -237,20 +238,28 @@ class BuildConfigSpeechTests(unittest.TestCase):
                           stt_cuda=True),
             ("cuda", "cuda", "cuda"))
 
-    def test_a_small_card_is_left_to_the_chat_model(self):
+    def test_a_small_card_keeps_whisper_and_moves_kokoro(self):
         # DEVICE stays "cuda": it answers whether torch sees CUDA, and a "cpu"
         # there would make warn_if_gpu_unused report a broken install.
         self.assertEqual(
             self._devices(vram_gb=self.SMALL, offload=True, torch_cuda=True,
                           stt_cuda=True),
-            ("cuda", "cpu", "cpu"))
+            ("cuda", "cuda", "cpu"))
 
-    def test_a_card_just_below_the_threshold_is_small(self):
+    def test_a_card_just_below_the_threshold_moves_kokoro(self):
         just_below = self.LARGE - 0.1
         self.assertEqual(
             self._devices(vram_gb=just_below, offload=True, torch_cuda=True,
-                          stt_cuda=True)[1:],
-            ("cpu", "cpu"))
+                          stt_cuda=True)[2],
+            "cpu")
+
+    def test_whisper_does_not_depend_on_the_card_size(self):
+        for vram_gb in (2.0, self.SMALL, self.LARGE, None):
+            with self.subTest(vram_gb=vram_gb):
+                self.assertEqual(
+                    self._devices(vram_gb=vram_gb, offload=True,
+                                  torch_cuda=True, stt_cuda=True)[1],
+                    "cuda")
 
     def test_a_card_the_chat_model_cannot_use_is_free_for_speech(self):
         # A CPU build of llama-server leaves even a small card to the speech

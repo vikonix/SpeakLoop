@@ -21,7 +21,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
-from speakloop import loader
+from speakloop import loader, models_info
 
 
 class ReadJsonTests(unittest.TestCase):
@@ -193,15 +193,18 @@ class ModelsCachedTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.hub = Path(self._tmp.name) / "hub"
         self.addCleanup(self._tmp.cleanup)
-        self.repos = ("org/model-a",)
+        self.repos = (models_info.HfRepo("org/model-a", "model a", 1,
+                                         "model.bin"),)
 
     def _repo_dir(self, repo: str) -> Path:
         return self.hub / ("models--" + repo.replace("/", "--"))
 
-    def _make_cached(self, repo: str):
+    def _make_cached(self, repo: str, *, with_weights: bool = True):
         snap = self._repo_dir(repo) / "snapshots" / "abc123"
         snap.mkdir(parents=True)
         (snap / "config.json").write_text("{}", encoding="utf-8")
+        if with_weights:
+            (snap / "model.bin").write_bytes(b"weights")
         (self._repo_dir(repo) / "blobs").mkdir(parents=True)
 
     def test_missing_hub_is_not_cached(self):
@@ -220,6 +223,29 @@ class ModelsCachedTests(unittest.TestCase):
         (self._repo_dir("org/model-a") / "blobs" / "x.incomplete").write_text(
             "", encoding="utf-8")
         self.assertFalse(loader.models_cached(self.hub, self.repos))
+
+    def test_snapshot_without_weights_is_not_cached(self):
+        # A download that failed with an error: the small files arrived, the
+        # partial weights file was deleted, and no *.incomplete is left.
+        self._make_cached("org/model-a", with_weights=False)
+        self.assertFalse(loader.models_cached(self.hub, self.repos))
+
+    def test_weights_in_a_subdirectory_are_found(self):
+        repos = (models_info.HfRepo("org/model-a", "model a", 1,
+                                    "weights/model.bin"),)
+        self._make_cached("org/model-a", with_weights=False)
+        weights = (self._repo_dir("org/model-a") / "snapshots" / "abc123"
+                   / "weights" / "model.bin")
+        weights.parent.mkdir()
+        weights.write_bytes(b"weights")
+        self.assertTrue(loader.models_cached(self.hub, repos))
+
+    def test_every_repo_must_be_complete(self):
+        repos = self.repos + (models_info.HfRepo("org/model-b", "model b", 1,
+                                                 "model.bin"),)
+        self._make_cached("org/model-a")
+        self._make_cached("org/model-b", with_weights=False)
+        self.assertFalse(loader.models_cached(self.hub, repos))
 
 
 class _FakeTorch:

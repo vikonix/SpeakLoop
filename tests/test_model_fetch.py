@@ -180,21 +180,32 @@ class HfRepoCachedTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.repo_dir = (Path(self._tmp.name) / "hub" / "models--repo--one")
+        self.repo = models_info.HfRepo("repo/one", "first", 1, "model.bin")
 
-    def _populate(self, *, incomplete: bool):
-        (self.repo_dir / "snapshots" / "abc123").mkdir(parents=True)
-        (self.repo_dir / "snapshots" / "abc123" / "config.json").write_bytes(b"{}")
+    def _populate(self, *, incomplete: bool, with_weights: bool = True):
+        snapshot = self.repo_dir / "snapshots" / "abc123"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_bytes(b"{}")
+        if with_weights:
+            (snapshot / "model.bin").write_bytes(b"weights")
         blobs = self.repo_dir / "blobs"
         blobs.mkdir()
         if incomplete:
             (blobs / "deadbeef.incomplete").write_bytes(b"half a file")
 
     def test_absent_repo(self):
-        self.assertFalse(model_fetch.hf_repo_cached("repo/one"))
+        self.assertFalse(model_fetch.hf_repo_cached(self.repo))
 
     def test_complete_snapshot(self):
         self._populate(incomplete=False)
-        self.assertTrue(model_fetch.hf_repo_cached("repo/one"))
+        self.assertTrue(model_fetch.hf_repo_cached(self.repo))
+
+    def test_snapshot_without_the_weights(self):
+        # huggingface_hub 1.x deletes the partial weights file when the
+        # download fails, so no *.incomplete is left to show it. Taken for
+        # complete, the repo would never be downloaded again without --force.
+        self._populate(incomplete=False, with_weights=False)
+        self.assertFalse(model_fetch.hf_repo_cached(self.repo))
 
     def test_snapshot_with_an_interrupted_blob(self):
         # The case the previous implementation missed: it asked
@@ -202,7 +213,7 @@ class HfRepoCachedTests(unittest.TestCase):
         # skipped when trees/<commit>.json is absent - which it is for a cache
         # filled file by file by the loading libraries, i.e. after a first run.
         self._populate(incomplete=True)
-        self.assertFalse(model_fetch.hf_repo_cached("repo/one"))
+        self.assertFalse(model_fetch.hf_repo_cached(self.repo))
 
     def test_needs_no_huggingface_hub(self):
         # install.py calls this before the requirements step, and the app calls
@@ -210,7 +221,7 @@ class HfRepoCachedTests(unittest.TestCase):
         # being importable just to ask a filesystem question.
         self._populate(incomplete=False)
         with patch.dict(sys.modules, {"huggingface_hub": None}):
-            self.assertTrue(model_fetch.hf_repo_cached("repo/one"))
+            self.assertTrue(model_fetch.hf_repo_cached(self.repo))
 
 
 class ProgressKwargsTests(unittest.TestCase):
@@ -282,8 +293,8 @@ class EnsureHfModelsTests(unittest.TestCase):
     reported together rather than aborting on the first one."""
 
     def setUp(self):
-        self.repos = (models_info.HfRepo("repo/one", "first", 1),
-                      models_info.HfRepo("repo/two", "second", 2))
+        self.repos = (models_info.HfRepo("repo/one", "first", 1, "model.bin"),
+                      models_info.HfRepo("repo/two", "second", 2, "model.bin"))
 
     def test_skips_cached_repos(self):
         downloaded = []

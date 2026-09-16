@@ -255,13 +255,14 @@ def _configure_symlink_fallback() -> None:
 # "Already downloaded?" predicates
 # ---------------------------------------------------------------------------
 
-def hf_repo_cached(repo_id: str) -> bool:
+def hf_repo_cached(repo: models_info.HfRepo) -> bool:
     """Is the repo present in the local HF cache and free of partial files?
 
     Delegates to loader.models_cached so that the installer, config's
     offline gate and the app's startup check all answer this question the same
-    way. A snapshot directory has to exist and no *.incomplete blob may be left
-    behind by an interrupted download - the latter matters because
+    way. A snapshot has to hold the weights file of the repo and no
+    *.incomplete blob may be left behind by an interrupted download - both
+    matter because
     ensure_hf_models() SKIPS a repo this returns True for, so an over-generous
     answer here means a half-fetched repo that no later run ever completes.
 
@@ -275,12 +276,14 @@ def hf_repo_cached(repo_id: str) -> bool:
     anything. The filesystem
     check is both stricter and free of the huggingface_hub import.
 
-    Neither check can see a download interrupted exactly BETWEEN two files: no
-    *.incomplete is left then. With files of this size an interrupt lands
-    mid-file in nearly every case, and --force remains the way out.
+    The weights file is checked by name because a download that failed with
+    an error leaves no *.incomplete file: huggingface_hub 1.x writes each
+    file under a temporary name and deletes it on failure. A missing file
+    other than the weights still passes this check; --force remains the way
+    out for that.
     """
     prepare_hf_env()
-    return loader.models_cached(hf_hub_dir(), (repo_id,))
+    return loader.models_cached(hf_hub_dir(), (repo,))
 
 
 def supertonic_cached() -> bool:
@@ -382,7 +385,7 @@ def ensure_hf_models(repos: Optional[Sequence[models_info.HfRepo]] = None, *,
     failures: list[str] = []
     for repo in repos if repos is not None else HF_MODEL_REPOS:
         repo_id = repo.repo_id
-        if not force and hf_repo_cached(repo_id):
+        if not force and hf_repo_cached(repo):
             log.info("Already cached: %s", repo_id)
             continue
         log.info("Fetching %s, %d MB [%s] ...", repo.label, repo.size_mb, repo_id)
@@ -488,7 +491,7 @@ def _print_status() -> None:
     print(f"Supertonic cache: {supertonic_cache_dir()}")
     print("Models   :")
     for repo in HF_MODEL_REPOS:
-        mark = "present" if hf_repo_cached(repo.repo_id) else "MISSING"
+        mark = "present" if hf_repo_cached(repo) else "MISSING"
         print(f"    [{mark:>7}] {repo.repo_id}  - {repo.label}, "
               f"{repo.size_mb} MB")
     supertonic = models_info.SUPERTONIC

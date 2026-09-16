@@ -210,14 +210,19 @@ def server_url(address: str, default_port: int) -> str:
 def models_cached(hub_dir: Path, repos) -> bool:
     """True only when every repo in *repos* is fully present under *hub_dir*.
 
-    Besides a non-empty snapshots dir, the blobs dir must hold no *.incomplete
-    files - those are partial downloads left by an interrupted first run, and
-    flipping to offline mode with one present would crash model loading.
+    *repos* holds models_info.HfRepo records (anything with repo_id and
+    weights_file). A snapshot must hold the weights file of the repo, and the
+    blobs dir must hold no *.incomplete files. Both checks are needed: a
+    process killed mid-download leaves an *.incomplete file, while a download
+    that failed with an error leaves nothing at all (huggingface_hub 1.x
+    deletes its partial file), only the small files that arrived before.
+    Taking such a repo for complete would skip its download and switch the
+    Hub offline, and the model load would then fail.
     """
     for repo in repos:
-        repo_dir = hub_dir / ("models--" + repo.replace("/", "--"))
-        snapshots = repo_dir / "snapshots"
-        if not snapshots.is_dir() or not any(snapshots.iterdir()):
+        repo_dir = hub_dir / ("models--" + repo.repo_id.replace("/", "--"))
+        if not any((snapshot / repo.weights_file).is_file()
+                   for snapshot in repo_dir.glob("snapshots/*")):
             return False
         if any(repo_dir.glob("blobs/*.incomplete")):
             return False

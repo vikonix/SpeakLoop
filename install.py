@@ -10,8 +10,8 @@ run SpeakLoop on a fresh machine:
   2. Detect an NVIDIA GPU / CUDA version (via nvidia-smi, no extra packages).
   3. (GPU only) install torch as a CUDA build.
   4. pip install the project dependencies (read from pyproject.toml).
-  5. Pre-download the Hugging Face models (faster-whisper small, Kokoro) into
-     model_cache/.
+  5. Pre-download the Hugging Face models (faster-whisper large-v3-turbo,
+     Kokoro) into model_cache/.
   6. Pre-download the Supertonic 3 TTS model into model_cache/supertonic3/
      (the Spanish TTS backend; kept outside the HF hub cache because the
      supertonic package uses its own cache directory).
@@ -1103,7 +1103,7 @@ def step_prefetch_models(
                                   "HF model cache")
 
     repos = ", ".join(repo.repo_id for repo in model_fetch.HF_MODEL_REPOS)
-    cached = all(model_fetch.hf_repo_cached(repo.repo_id)
+    cached = all(model_fetch.hf_repo_cached(repo)
                  for repo in model_fetch.HF_MODEL_REPOS)
     total_mb = sum(repo.size_mb for repo in model_fetch.HF_MODEL_REPOS)
     desc = (f"Download HF models into {model_fetch.MODEL_CACHE_DIR.name}/ "

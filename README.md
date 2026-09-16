@@ -11,7 +11,7 @@ The application is being moved to a new structure step by step. It runs from the
 ## Tech Stack
 
 - **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
-- **STT**: faster-whisper (Whisper small)
+- **STT**: faster-whisper (Whisper large-v3-turbo)
 - **LLM**: Gemma 4 12B (GGUF, Q4_0 QAT) via `llama-server` (llama.cpp), or any model loaded in LM Studio
 - **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish (the Spanish lesson is not available yet)
 - **Python**: 3.11 or 3.12
@@ -22,7 +22,7 @@ The application is being moved to a new structure step by step. It runs from the
 - **Windows, Linux or macOS.** The current application is used on Windows.
 - A microphone and speakers.
 - **NVIDIA GPU**: optional. It needs a CUDA build of PyTorch (see [Platform notes](#platform-notes)). For a conversational pace the chat model (about 7 GB) has to fit into the video memory completely; on a smaller card a reply takes several seconds more. [`docs/model-parameters.md`](docs/model-parameters.md) (Russian) has the measurements and what the owner of a small card can do.
-- **Disk**: about 9 GB for the models.
+- **Disk**: about 10 GB for the models.
 - **tkinter** (Linux only): the Tk GUI toolkit is packaged apart from the interpreter (`python3-tk` on Debian/Ubuntu). It is not on PyPI.
 - **PortAudio** (Linux only): the native audio library (`libportaudio2` on Debian/Ubuntu). The Windows and macOS wheels of `sounddevice` include it, the Linux wheels do not.
 
@@ -49,7 +49,7 @@ The installer does these steps:
 2. Checks the Python version.
 3. Finds an NVIDIA GPU with `nvidia-smi` and, if there is one, installs the CUDA build of `torch`.
 4. Installs the Python dependencies from `pyproject.toml`.
-5. Downloads the Hugging Face models (faster-whisper small, Kokoro) into `model_cache/`.
+5. Downloads the Hugging Face models (faster-whisper large-v3-turbo, Kokoro) into `model_cache/`.
 6. Downloads the Supertonic 3 speech model (Spanish) into `model_cache/supertonic3/`.
 7. Installs the pinned `llama-server` binary into `bin/llama/`.
 8. Downloads the GGUF chat model into `models/`.
@@ -77,7 +77,7 @@ Run these commands in the activated virtual environment:
 pip install -e .
 
 # Models and the llama-server binary
-python -m speakloop.model_fetch         # faster-whisper small, Kokoro, Supertonic 3
+python -m speakloop.model_fetch         # faster-whisper large-v3-turbo, Kokoro, Supertonic 3
 python -m speakloop.llama_server_fetch  # pinned llama.cpp build into bin/llama/
 python -m speakloop.gguf_fetch          # GGUF chat model into models/
 # python -m speakloop.gguf_fetch --fallback   # optional smaller model, see Models
@@ -125,7 +125,7 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 
 | Model | Used for | Download | Command |
 |---|---|---|---|
-| `Systran/faster-whisper-small` | speech recognition | 486 MB | `python -m speakloop.model_fetch --hf` |
+| Whisper large-v3-turbo (`mobiuslabsgmbh/faster-whisper-large-v3-turbo`) | speech recognition | 1622 MB | `python -m speakloop.model_fetch --hf` |
 | Kokoro-82M (`hexgrad/Kokoro-82M`) | speech output (English) | 363 MB | `python -m speakloop.model_fetch --hf` |
 | Supertonic 3 (`Supertone/supertonic-3`) | speech output (Spanish) | 404 MB | `python -m speakloop.model_fetch --supertonic`. The weights have the **OpenRAIL-M** license, so they are downloaded, not included |
 | `gemma-4-12B-it-QAT-Q4_0.gguf` (`lmstudio-community/gemma-4-12B-it-QAT-GGUF`) | conversation | 6976 MB | `python -m speakloop.gguf_fetch` |
@@ -137,11 +137,12 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 The configuration has three layers, lowest priority first:
 
 1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): the language profile ([`speakloop/languages/`](speakloop/languages)), the lesson settings (the explanation language is Russian), LLM backend and server address, generation parameters, recognition and synthesis settings.
-2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`, `TTS_DEVICE`) and audio devices. On a card smaller than 12 GB the speech models run on the CPU, so the chat model gets all the video memory. The GPU layers of the chat model are not here: `llama-server` fits them into the free video memory at each start. Run the detection again after changing the hardware; a file written before stage 2 still holds layer and context values, which the app now ignores.
+2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`, `TTS_DEVICE`) and audio devices. Speech recognition runs on the GPU whenever it can; speech output (Kokoro) runs on the CPU on a card smaller than 12 GB, so the chat model gets the rest of the video memory. The GPU layers of the chat model are not here: `llama-server` fits them into the free video memory at each start. Run the detection again after changing the hardware; a file written before stage 2 still holds layer and context values, which the app now ignores.
 3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
    - `max_record_seconds`: limit of one recording, in seconds (default 20).
    - `silence_timeout`: seconds of silence, after you have started to speak, before the recording stops by itself (default 3).
    - `silence_threshold`: loudness (RMS, 0..1) above which the microphone counts as hearing speech (default 0.01). Raise it in a noisy room, lower it for a quiet voice.
+   - `stt_device`: where speech recognition runs: `"auto"` (default: the GPU whenever it can be used, whatever the size of the card), `"cuda"` or `"cpu"`. On a small card Whisper takes video memory from the chat model; if the replies become slow, try `"cpu"`.
    - `accent`: variant of the practiced language, `"american"` (default) or `"british"`. It selects the synthesis language code and the list of voices.
    - `voice`: voice of the partner. It must belong to the variant above; absent (default) means the variant default (`af_heart` for american, `bf_emma` for british).
    - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
@@ -174,7 +175,7 @@ With `"llm_backend": "llama-server"` (the default) the model server starts autom
 
 With `llama-server` the app turns Gemma's thinking mode off in every request (the server turns it on by default), and it starts the server with `GGML_OP_OFFLOAD_MIN_BATCH=16` so that short prompts are computed on the GPU when the model does not fit into the video memory; set the variable before the start to try another value. The sampling values are the ones recommended for Gemma (temperature 1.0, top_p 0.95, top_k 64). With LM Studio, use its own thinking switch.
 
-On a 4 GB card (GTX 1650 Ti) a short reply of the model takes about 6-7 seconds; from your last word to the spoken reply it is about 12-13 seconds, 3 of them the wait for silence (`silence_timeout`).
+On a 4 GB card (GTX 1650 Ti) a short reply of the model takes about 8-10 seconds, and a reply with a correction about 15-17 seconds. Before the reply come the wait for silence (`silence_timeout`, 3 seconds by default) and speech recognition (about 1.8 seconds on the GPU).
 
 The model gets the whole conversation of the session, without trimming, so it remembers the start of the lesson. After each reply `logs/main.log` records how much of the context the conversation uses (`Context tokens: ...`). When the conversation no longer fits `external_n_ctx`, the server refuses the request and the chat shows the error; start the app again for a new lesson.
 

@@ -206,7 +206,7 @@ def main() -> int:
 
     # (where the number goes, current value, how to measure it)
     jobs: list[tuple[str, int, Callable[[], int]]] = []
-    for name, repo in (("WHISPER_SMALL", models_info.WHISPER_SMALL),
+    for name, repo in (("WHISPER", models_info.WHISPER),
                        ("KOKORO", models_info.KOKORO)):
         jobs.append((f"models_info.{name}", repo.size_mb,
                      lambda r=repo: measure_hf_repo(r)))

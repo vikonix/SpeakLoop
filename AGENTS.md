@@ -126,9 +126,13 @@ the key differ.
 - [`speakloop/themes/`](speakloop/themes) - `dark_schema.json` (the default,
   equal to the built-in palette) and `light_schema.json`. A user copy in
   `config/themes/` of the same name wins over these.
-- [`speakloop/stt.py`](speakloop/stt.py) - `STTManager`: faster-whisper with
-  VAD filtering, on `config.STT_DEVICE`, in the language of the active profile
-  (`config.WHISPER_LANGUAGE`; never automatic detection). **Imports torch before
+- [`speakloop/stt.py`](speakloop/stt.py) - `STTManager`: faster-whisper
+  large-v3-turbo with VAD filtering, on `config.STT_DEVICE` (`int8_float16` on
+  the GPU, which leaves more video memory to the chat model), in the language
+  of the active profile
+  (`config.WHISPER_LANGUAGE`; never automatic detection). Decoding falls back
+  to higher temperatures (`WHISPER_TEMPERATURES`) when a segment loops; with
+  0.0 alone the loop reaches the chat model. **Imports torch before
   faster_whisper**: on Windows the CUDA build of torch provides the cuBLAS and
   cuDNN libraries ctranslate2 needs. `load_model()` logs the device and the
   compute type, the only place the log names where recognition runs.
@@ -251,15 +255,17 @@ the key differ.
   `config/hardware_config.json` (`"config"` section) ->
   `config/settings.json`. Known settings.json keys are listed in
   `_KNOWN_USER_KEYS` (`max_record_seconds`, `silence_timeout`,
-  `silence_threshold`, `accent`, `voice`, `color_theme`, `llm_backend`,
+  `silence_threshold`, `stt_device`, `accent`, `voice`, `color_theme`, `llm_backend`,
   `lm_studio_host`, `llama_server_path`, `external_model_path`,
   `external_n_ctx`, `external_n_gpu_layers`, `first_topic`, `prompt_file`);
   keep
   `config/settings.example.json` in step (a test checks it).
   `EXTERNAL_N_GPU_LAYERS` is a **string** (`"auto"`, `"all"` or digits, from
   `_gpu_layers_setting`) and `EXTERNAL_N_CTX` defaults to 16384; neither is
-  read from hardware_config.json. `TTS_DEVICE` and `STT_DEVICE` come from
-  `_model_device`, capped by `DEVICE`. The **language section comes before
+  read from hardware_config.json. `TTS_DEVICE` comes from `_model_device`,
+  capped by `DEVICE`. `STT_DEVICE` comes from the `stt_device` key
+  (`_stt_device`): `"auto"` is the detected value through `_model_device`, and
+  a hand-set `"cuda"` is capped by `DEVICE` too. The **language section comes before
   the download section on purpose**: the offline gate has to know the active synthesis backend, because only that
   backend's model has to be cached before the Hub is switched off. Every
   language constant (`TARGET_LANGUAGE`, `WHISPER_LANGUAGE`, `TTS_BACKEND`,
@@ -283,7 +289,11 @@ the key differ.
   `DEVICE`.
 - [`speakloop/loader.py`](speakloop/loader.py) - pure config-loading helpers
   (JSON read, validated values, atomic save, cache predicate,
-  `detect_device`).
+  `detect_device`). The cache predicate `models_cached` takes a hub repo for
+  complete only when its snapshot holds the record's `weights_file` and no
+  `*.incomplete` blob is left: huggingface_hub 1.x deletes a partial file on
+  a failed download, so without the first check a repo with only its small
+  files is skipped by the installer and switched offline.
 - [`speakloop/paths.py`](speakloop/paths.py) - where every file lives, and the
   only module that knows. `data_root()` (what this machine writes; the clone in
   repo mode, the OS user-data directory for an installed package,
@@ -292,10 +302,10 @@ the key differ.
   exist.
 - [`speakloop/detect_hardware.py`](speakloop/detect_hardware.py) - machine probe
   writing `config/hardware_config.json`: `DEVICE` (torch CUDA - only that,
-  `warn_if_gpu_unused` reads it so), `STT_DEVICE` (a ctranslate2 CUDA device)
-  and `TTS_DEVICE` (Kokoro), audio devices. Both speech devices drop to the CPU
-  on a card below `SPEECH_GPU_MIN_VRAM_GB` (12) that the chat model uses (the
-  installed llama-server's `--list-devices` decides that). It writes no LLM
+  `warn_if_gpu_unused` reads it so), `STT_DEVICE` (a ctranslate2 CUDA device,
+  on a card of any size) and `TTS_DEVICE` (Kokoro), audio devices. Kokoro
+  drops to the CPU on a card below `TTS_GPU_MIN_VRAM_GB` (12) that the chat
+  model uses (the installed llama-server's `--list-devices` decides that). It writes no LLM
   layers or context any more, and config ignores those keys in an older
   file. **Must not import config.**
 
@@ -306,7 +316,7 @@ offline once models are cached, exactly when a download would be wanted) and
 all keeping huggingface_hub out of their module-level imports so `install.py`
 can use them before the requirements step:
 
-- [`speakloop/model_fetch.py`](speakloop/model_fetch.py) - faster-whisper small
+- [`speakloop/model_fetch.py`](speakloop/model_fetch.py) - faster-whisper large-v3-turbo
   and Kokoro (hub cache), Supertonic 3 (own cache directory). Owns
   `prepare_hf_env()` (Windows symlink and hf-xet workarounds).
 - [`speakloop/gguf_fetch.py`](speakloop/gguf_fetch.py) - the GGUF chat model
@@ -319,7 +329,9 @@ can use them before the requirements step:
   time.
 
 - [`speakloop/models_info.py`](speakloop/models_info.py) - model catalogue,
-  the single place a repo id is written. `GGUF_CHAT` is Gemma 4 12B QAT Q4_0,
+  the single place a repo id is written. `WHISPER` is faster-whisper
+  large-v3-turbo; every `HfRepo` names its `weights_file` (see loader).
+  `GGUF_CHAT` is Gemma 4 12B QAT Q4_0,
   `GGUF_CHAT_FALLBACK` is Llama 3.2 3B. Imports only `typing` (a test
   enforces it). Sizes are re-snapped with
   [`tools/measure_model_sizes.py`](tools/measure_model_sizes.py).
@@ -372,6 +384,11 @@ can use them before the requirements step:
   `load_components`): the first `librosa.resample` cost 9.6 s, paid by the
   learner between their first phrase and the answer. Do not drop the call
   without moving that cost somewhere else.
+- **Load order of the GPU users** (`app.py` `load_components`): Whisper is
+  loaded before llama-server starts, so the server's memory fit sees the video
+  memory Whisper holds and gives the chat model fewer layers, instead of
+  leaving Whisper without memory. Do not move the Whisper load after the
+  server start.
 - **LLM server subprocess**: started in `LLMServerController.start()` with
   layers and context from `config` (settings.json; see llm_server_ctl above),
   polled with `LLMManager.check_connection()`, then asked for its context

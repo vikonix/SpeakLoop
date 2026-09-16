@@ -119,8 +119,17 @@ class CatalogueShapeTests(unittest.TestCase):
     def test_the_speech_models_are_hub_repos(self):
         # model_fetch downloads exactly HF_REPOS; a speech model left out of it
         # would be fetched by nobody and downloaded at the first launch instead.
-        self.assertIn(models_info.WHISPER_SMALL, models_info.HF_REPOS)
+        self.assertIn(models_info.WHISPER, models_info.HF_REPOS)
         self.assertIn(models_info.KOKORO, models_info.HF_REPOS)
+
+    def test_every_hub_repo_names_its_weights_file(self):
+        # loader.models_cached looks for this file inside the snapshot, so it
+        # must be a relative path in the repo's own spelling.
+        for repo in models_info.HF_REPOS:
+            with self.subTest(repo=repo.repo_id):
+                self.assertTrue(repo.weights_file)
+                self.assertNotIn("\\", repo.weights_file)
+                self.assertFalse(repo.weights_file.startswith("/"))
 
     def test_the_fallback_is_a_different_gguf_file(self):
         # Both land in models/ under their own filename. The same name would
