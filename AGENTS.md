@@ -12,7 +12,9 @@ SpeakLoop is a local desktop **voice dialogue tutor** for language learning
 (Python 3.11/3.12, Tkinter with ttkbootstrap). One press (Space or the mic
 button) opens the microphone and the take ends on silence -> faster-whisper
 speech recognition -> a local LLM (a GGUF model served by `llama-server`, or LM
-Studio) -> speech synthesis (Kokoro for English, Supertonic for Spanish).
+Studio) -> speech synthesis (Kokoro for English, Supertonic for Spanish). The
+learner can also type the phrase in the control panel and send it with Enter,
+which skips the two speech steps and is otherwise the same exchange.
 
 The lesson runs on the free-talk prompt
 ([`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md), the main
@@ -88,7 +90,15 @@ the key differ.
   which is also the only thread-safe way into Tk. It no longer captures audio
   itself - `recorder.py` does. `_toggle_recording` is the whole input model:
   one press starts a take, the next one ends it, and a release only clears the
-  key auto-repeat guard. `_exchange_lock` keeps one exchange at a time, so a
+  key auto-repeat guard. A typed phrase enters the same flow at the model
+  request: `on_text_submitted` stops the speech of the previous reply, writes
+  the phrase into the chat and gives `_run_typed_exchange` a stop event of its
+  own, so voice and keyboard share every step from `_ask_model` on. A command
+  button takes the same path through `_submit_phrase` (`on_command_pressed`):
+  a command is an ordinary phrase of the learner and stays in the history as
+  one. `on_notes_toggled` only remembers the choice
+  (`config.save_user_setting`); the hiding itself is the view's.
+  `_exchange_lock` keeps one exchange at a time, so a
   take made during the previous exchange waits instead of being dropped.
   `load_components` builds the lesson (`prompt.build_system_prompt`, then
   `Lesson`) before it loads any model, so a bad prompt file stops the start at
@@ -103,7 +113,8 @@ the key differ.
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
 - [`speakloop/ui.py`](speakloop/ui.py) - `TutorView`: the whole window (header,
-  chat transcript, mic canvas, status bar) plus the *intent* methods the
+  the control panel at the top - mic canvas, text entry and instruction line -
+  the chat transcript below it, and the status bar) plus the *intent* methods the
   controller calls (`enter_recording`, `enter_thinking`, `enter_error`, …) and
   the `append_*` transcript writers (`append_partner_msg`, `append_note`,
   `append_summary`, ...). The partner is labelled `PARTNER_NAME = "Tutor"`,
@@ -118,6 +129,25 @@ the key differ.
   (`tests/test_ui.py`). `set_record_level()` repaints the mic
   button from the live input level while a take runs; the recording state has no
   glyph of its own any more, because the level disc IS the indicator.
+  The text entry is the second way to answer: `<Return>` on it sends
+  `clean_input()` of its content through `on_text_submitted` (empty sends
+  nothing), so the controller receives a phrase and never a widget. The space
+  bindings sit on the root window and therefore also see keys typed in the
+  entry - `_typing()` is what keeps a space inside a phrase from starting a
+  take. `_set_input_enabled()` is called from the `enter_*` intents themselves
+  (closed while recording, transcribing and answering; open while the partner
+  speaks, where Enter interrupts it), so the controller never enables the entry
+  by hand. The status bar shows the state alone: the STT and LLM durations are
+  in `logs/main.log` and `update_stats` is gone.
+  The second row of the panel holds the lesson commands and the Notes switch.
+  The command buttons are built from `prompt.LESSON_COMMANDS`, so a button
+  sends the word of the prompt itself and is never spelled here.
+  `_apply_notes_visibility()` is the whole Notes feature: it sets `elide` on
+  the two NOTE tags, which hides the corrections already in the chat and every
+  one that comes later, while the transcript inside the widget stays complete
+  (stage 5 reads it). SUMMARY has tags of its own and is never hidden. The
+  switch itself is outside `_set_input_enabled`: it sends nothing to the model
+  and stays usable in every state.
 - [`speakloop/ui_theme.py`](speakloop/ui_theme.py) - the palette (`THEME` from
   config), the ttkbootstrap base theme, `FONT_FAMILY` per platform and the
   `FONT_SIZE_*` scale. Importing it also **disables ttkbootstrap's
@@ -161,7 +191,10 @@ the key differ.
   brackets, which the prompt reads as its own default. A missing or repeated
   SETTINGS line **raises**: otherwise the lesson silently runs on a default.
   No config import; the caller passes the values. The system message is built
-  once and never changes during a session (prefix cache).
+  once and never changes during a session (prefix cache). `LESSON_COMMANDS`
+  lives here too - the four command words of the prompt, which the window's
+  buttons send as they are (`tests/test_prompt.py` checks that the shipped
+  prompt still names each of them).
 - [`speakloop/contract.py`](speakloop/contract.py) - pure code for the output
   contract: `parse_reply()` gives a `Reply` (`note`, `say`, `summary`, `raw`,
   `follows_contract`). SUMMARY takes everything from its line to the end,
@@ -257,7 +290,8 @@ the key differ.
   `_KNOWN_USER_KEYS` (`max_record_seconds`, `silence_timeout`,
   `silence_threshold`, `stt_device`, `accent`, `voice`, `color_theme`, `llm_backend`,
   `lm_studio_host`, `llama_server_path`, `external_model_path`,
-  `external_n_ctx`, `external_n_gpu_layers`, `first_topic`, `prompt_file`);
+  `external_n_ctx`, `external_n_gpu_layers`, `first_topic`, `prompt_file`,
+  `show_notes`);
   keep
   `config/settings.example.json` in step (a test checks it).
   `EXTERNAL_N_GPU_LAYERS` is a **string** (`"auto"`, `"all"` or digits, from
@@ -280,6 +314,11 @@ the key differ.
   file or key, and `THEME` is it overlaid with the selected
   `<name>_schema.json` (tests pin that the shipped dark schema equals
   `_DARK_THEME`).
+  `SHOW_NOTES` (key `show_notes`) is the one value the application writes
+  back: `save_user_setting()` is the only writer of `settings.json`
+  (`SETTINGS_FILE`), through `loader.save_setting`, which re-reads the file and
+  replaces it atomically so hand-edited and comment keys survive. The constants
+  themselves stay frozen at import.
   `resolve_llama_server_path()` is a function and not a constant on purpose:
   the binary can be installed or removed while the app is not running, so the
   answer is taken from the disk when the server is started. Also sets

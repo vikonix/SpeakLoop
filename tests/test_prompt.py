@@ -148,9 +148,18 @@ class ShippedPromptTests(unittest.TestCase):
             "Begin the lesson now with your first question."))
 
     def test_the_prompt_names_the_voice_commands(self):
-        # The ready message of app.py lists the same four commands.
-        for command in ('"simpler"', '"hint"', '"new topic"', '"finish"'):
-            self.assertIn(command, self.system_prompt)
+        # The command buttons of the window send exactly these strings, so a
+        # command renamed in the prompt has to be renamed in LESSON_COMMANDS.
+        for command in prompt.LESSON_COMMANDS:
+            with self.subTest(command=command):
+                self.assertIn(f'"{command}"', self.system_prompt)
+
+    def test_the_commands_are_written_as_the_learner_says_them(self):
+        # They go to the model as they are: lower case, no full stop, the way
+        # the prompt's Commands line spells them.
+        for command in prompt.LESSON_COMMANDS:
+            with self.subTest(command=command):
+                self.assertEqual(command, command.strip().lower())
 
     def test_the_prompt_defines_the_three_prefixes(self):
         # speakloop/contract.py parses exactly these.

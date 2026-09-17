@@ -210,6 +210,13 @@ class LessonSettingTests(unittest.TestCase):
     def test_the_first_topic_is_a_string(self):
         self.assertIsInstance(config.FIRST_TOPIC, str)
 
+    def test_show_notes_is_a_known_key(self):
+        self.assertIn("show_notes", config._KNOWN_USER_KEYS)
+
+    def test_show_notes_is_a_flag(self):
+        # ui.py uses it as one, and a string would silently mean "shown".
+        self.assertIsInstance(config.SHOW_NOTES, bool)
+
     def test_the_prompt_file_is_an_absolute_path(self):
         self.assertTrue(Path(config.PROMPT_FILE).is_absolute())
 
@@ -218,6 +225,28 @@ class LessonSettingTests(unittest.TestCase):
         shipped = (Path(config.__file__).resolve().parent
                    / "prompts" / "free_talk.md")
         self.assertTrue(shipped.is_file())
+
+
+class SaveUserSettingTests(unittest.TestCase):
+    """The one value the application writes back to settings.json."""
+
+    def test_the_settings_file_is_the_one_config_reads(self):
+        self.assertEqual(Path(config.SETTINGS_FILE).parent, paths.config_dir())
+        self.assertEqual(Path(config.SETTINGS_FILE).name, "settings.json")
+
+    def test_a_saved_setting_goes_through_the_loader(self):
+        # The loader re-reads the file and writes it atomically, which is what
+        # keeps the hand-edited keys and the comment keys of the user.
+        with mock.patch.object(config.loader, "save_setting",
+                               return_value=True) as save:
+            self.assertTrue(config.save_user_setting("show_notes", False))
+        save.assert_called_once_with(config.SETTINGS_FILE, "show_notes", False,
+                                     config._USER)
+
+    def test_a_failed_save_is_reported_and_not_raised(self):
+        with mock.patch.object(config.loader, "save_setting",
+                               return_value=False):
+            self.assertFalse(config.save_user_setting("show_notes", True))
 
 
 class GpuLayersSettingTests(unittest.TestCase):

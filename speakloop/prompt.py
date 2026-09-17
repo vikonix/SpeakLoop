@@ -32,6 +32,13 @@ SETTING_NAMES = (
     SETTING_FIRST_TOPIC,
 )
 
+# The commands of the learner, spelled as the prompt's "Commands of the
+# learner" line names them. The buttons of the window send exactly these
+# strings, so the model reads a pressed button like a spoken command. A command
+# renamed in the prompt has to be renamed here as well - tests/test_prompt.py
+# checks that the shipped prompt still names every one of them.
+LESSON_COMMANDS = ("simpler", "hint", "new topic", "finish")
+
 
 def _setting_pattern(name: str) -> "re.Pattern":
     """A whole line "<name>: [<default>]"."""

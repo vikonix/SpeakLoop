@@ -3,8 +3,9 @@
 
 """Unit tests for speakloop/ui.py.
 
-The window itself needs a display and is checked by hand. What is testable is
-the pure geometry helper, which decides where the window opens.
+The window itself needs a display and is checked by hand. What is testable are
+the pure helpers: the geometry one, which decides where the window opens, and
+the one that cleans a typed phrase before it is sent.
 
 Importing ui.py creates no widget, so this file runs without a display.
 
@@ -47,6 +48,31 @@ class CenteredGeometryTests(unittest.TestCase):
         # Tk accepts "<width>x<height>+<x>+<y>"; anything else raises inside
         # geometry() while the window is being built.
         self.assertRegex(ui.centered_geometry(1366, 768), r"^\d+x\d+\+\d+\+\d+$")
+
+
+class CleanInputTests(unittest.TestCase):
+    """What the text entry sends to the controller."""
+
+    def test_a_typed_phrase_is_sent_as_it_is(self):
+        self.assertEqual(ui.clean_input("I go to the store"),
+                         "I go to the store")
+
+    def test_the_ends_are_trimmed(self):
+        self.assertEqual(ui.clean_input("  I go to the store  "),
+                         "I go to the store")
+
+    def test_a_pasted_phrase_becomes_one_line(self):
+        # A phrase copied from another window can carry line breaks; the model
+        # gets one line, like a recognized take.
+        self.assertEqual(ui.clean_input("I go\nto   the\tstore"),
+                         "I go to the store")
+
+    def test_an_empty_entry_gives_an_empty_phrase(self):
+        # The caller drops it: an empty request would still cost a model call.
+        self.assertEqual(ui.clean_input(""), "")
+
+    def test_spaces_alone_give_an_empty_phrase(self):
+        self.assertEqual(ui.clean_input("   \n\t "), "")
 
 
 if __name__ == "__main__":

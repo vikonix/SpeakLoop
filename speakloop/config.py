@@ -58,7 +58,8 @@ if not isinstance(_HW, dict):
 
 # User preferences. Keys starting with "_" are skipped so they can serve as
 # comments (plain JSON has no comment syntax).
-_USER = loader.read_json(CONFIG_DIR / "settings.json")
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+_USER = loader.read_json(SETTINGS_FILE)
 
 # Every key settings.json may hold. A key outside this set is reported, because
 # a typo in a hand-edited file otherwise changes nothing and says nothing.
@@ -78,6 +79,7 @@ _KNOWN_USER_KEYS = {
     "external_n_gpu_layers",
     "first_topic",
     "prompt_file",
+    "show_notes",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
@@ -89,6 +91,22 @@ for _key in _USER:
 # CONFIG_DIR, the directory settings.json itself is in.
 _num = partial(loader.user_number, _USER)
 _path = partial(loader.user_path, _USER, CONFIG_DIR)
+_flag = partial(loader.user_bool, _USER)
+
+
+def save_user_setting(key: str, value) -> bool:
+    """Write one settings.json key from the running application.
+
+    The only value this module writes instead of reading: the window saves the
+    state of its Notes switch here, so the next lesson opens the way the last
+    one was left. Every other key stays hand-edited. The file is re-read and
+    rewritten atomically by the loader, so the comment keys and hand-made
+    values survive, and a failure is reported on stderr and never raised.
+
+    The constants above stay frozen at import: the caller already knows the
+    value it saved, and nothing else in this run reads the key again.
+    """
+    return loader.save_setting(SETTINGS_FILE, key, value, _USER)
 
 # =====================================================================
 # Language of the lesson (profiles in speakloop/languages/)
@@ -243,6 +261,12 @@ if not isinstance(FIRST_TOPIC, str):
     print(f"[config] settings.json: first_topic must be a string, got "
           f"{FIRST_TOPIC!r}; using the prompt default", file=sys.stderr)
     FIRST_TOPIC = ""
+
+# Are the NOTE lines shown in the chat? The window's Notes switch writes this
+# key back (save_user_setting), so a lesson opens the way the last one ended.
+# The corrections are always written into the transcript; the switch only
+# hides them (speakloop/ui.py).
+SHOW_NOTES = _flag("show_notes", True)
 
 # The prompt body (speakloop/prompt.py builds the system message from it).
 # settings.json ("prompt_file") can point at a copy to try changes on; the

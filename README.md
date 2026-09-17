@@ -4,7 +4,7 @@ AI-powered voice tutor for practicing foreign languages through real conversatio
 
 ## About
 
-SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. The tutor opens the lesson with a question. Press Space to answer: the recording stops by itself once you stop talking, then the app transcribes your speech, sends it to an LLM, shows the reply and reads its spoken part aloud. The lesson language is English; Spanish is not available yet.
+SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. The tutor opens the lesson with a question. Press Space to answer: the recording stops by itself once you stop talking, then the app transcribes your speech, sends it to an LLM, shows the reply and reads its spoken part aloud. You can also type the answer in the control panel and send it with Enter. The lesson language is English; Spanish is not available yet.
 
 The application is being moved to a new structure step by step. It runs from the `speakloop/` package and serves the local model with the official `llama-server` binary from llama.cpp.
 
@@ -147,6 +147,7 @@ The configuration has three layers, lowest priority first:
    - `voice`: voice of the partner. It must belong to the variant above; absent (default) means the variant default (`af_heart` for american, `bf_emma` for british).
    - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
    - `first_topic`: the first topic of the lesson, in your own words. Empty (default) lets the tutor choose an everyday situation.
+   - `show_notes`: are the tutor's corrections shown in the chat (default `true`)? The **Notes** button writes this key back, so the next lesson opens the way the last one ended. The corrections are always part of the lesson; the key only hides them.
    - `prompt_file`: the lesson prompt. Absent (default) means [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). Use it to try a changed copy; the copy must keep the three `SETTINGS` lines, or the app does not start.
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
    - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
@@ -196,8 +197,13 @@ A reply that does not follow this format is shown as it is and not read aloud.
 
 ## Controls
 
+The control panel stands at the top of the window: the microphone button, the text entry and the instruction line. The lesson is below it, and the status bar shows the state of the window.
+
 - **Space** or the microphone button: start a recording. It stops by itself after `silence_timeout` seconds of silence, on the next press, or at `max_record_seconds`. While it runs, the button shows the live microphone level.
 - **Space** or the microphone button during a reply: stop the reply and start recording at once.
+- **Text entry and Enter**: send a written phrase instead of speaking. Enter during a reply stops the reply and sends the phrase. The entry is closed while a recording runs and while the model answers.
+- **simpler / hint / new topic / finish**: the lesson commands. A button sends the same word you would say, and it appears in the chat as your own line. They are closed together with the text entry.
+- **Notes**: hide or show the tutor's corrections. It works at any time and covers the whole lesson, including the corrections already on the screen; the summary stays visible. The choice is saved in `settings.json` (`show_notes`).
 - **ESC**: quit
 
 ## Tests

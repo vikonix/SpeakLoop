@@ -87,6 +87,11 @@ class VoiceTutorController:
         Show       -> NOTE, SAY and SUMMARY go to the window.
         Speak      -> the sentences of SAY go to the speech queue (_ReplyEnd).
         Loop       -> back to idle; a new take interrupts the speech.
+
+    A phrase written in the window enters this flow at Think - typed and sent
+    with Enter (on_text_submitted), or chosen with a command button
+    (on_command_pressed). There is nothing to record and nothing to recognize,
+    and everything from the model request on is the same code.
     """
 
     def __init__(self):
@@ -148,6 +153,9 @@ class VoiceTutorController:
             on_mic_pressed=self.on_mic_pressed,
             on_space_pressed=self.on_space_pressed,
             on_space_released=self.on_space_released,
+            on_text_submitted=self.on_text_submitted,
+            on_command_pressed=self.on_command_pressed,
+            on_notes_toggled=self.on_notes_toggled,
             on_quit=self.quit_app,
         ))
 
@@ -262,7 +270,8 @@ class VoiceTutorController:
         self.view.enter_app_ready()
         self.view.append_system_msg(
             f"Ready. The lesson is in {config.TARGET_LANGUAGE}. "
-            f"Voice commands: simpler, hint, new topic, finish.")
+            f"Use the command buttons above, or say the same words: "
+            f"simpler, hint, new topic, finish.")
         self._open_lesson()
 
     def _open_lesson(self):
@@ -307,6 +316,74 @@ class VoiceTutorController:
         # Only clears the auto-repeat guard. The take keeps running until it
         # stops on silence, on the time limit, or on the next press.
         self._record_key_held = False
+
+    def on_text_submitted(self, learner_text: str):
+        """The learner sent a typed phrase with Enter. (Tk thread.)"""
+        logging.info(f"The learner typed: {learner_text!r}")
+        self._submit_phrase(learner_text)
+
+    def on_command_pressed(self, command: str):
+        """A command button was pressed. (Tk thread.)
+
+        A command is an ordinary phrase of the learner: the button sends the
+        word of the prompt, and the model reads it exactly as it reads the
+        spoken command. It goes into the chat and into the history like any
+        other phrase, so the transcript says why the lesson changed course.
+        """
+        logging.info(f"The learner pressed the command button {command!r}.")
+        self._submit_phrase(command)
+
+    def on_notes_toggled(self, show_notes: bool):
+        """The Notes switch was pressed. (Tk thread.)
+
+        The window has already hidden or shown the corrections; the controller
+        only remembers the choice for the next lesson. A file that cannot be
+        written is reported by the loader on stderr, and the lesson goes on.
+        """
+        logging.info(f"Notes are now {'shown' if show_notes else 'hidden'}.")
+        config.save_user_setting("show_notes", show_notes)
+
+    def _submit_phrase(self, learner_text: str):
+        """Send a phrase the learner wrote or chose. (Tk thread.)
+
+        A written phrase is the take of this exchange: it stops the speech of
+        the previous reply exactly as the start of a recording does, so the
+        learner has the floor from the moment they press Enter or a button. The
+        view keeps the entry and the buttons closed while the microphone is
+        open and while the model answers, so there is no take of the other kind
+        to cancel here.
+        """
+        if not self.app_ready:
+            return
+        self.playback.stop()
+        self.view.append_user_msg(learner_text)
+        # Installed on the Tk thread, like the stop event of a recorded take
+        # (see PlaybackController.new_event).
+        stop_event = self.playback.new_event()
+        threading.Thread(target=self._run_typed_exchange,
+                         args=(learner_text, stop_event), daemon=True).start()
+
+    def _run_typed_exchange(self, learner_text: str,
+                            stop_event: threading.Event):
+        """Ask the model about a typed phrase - off the main thread.
+
+        Under the same lock as a recorded exchange, so a take made while the
+        previous reply still runs waits instead of being answered in parallel.
+        """
+        with self._exchange_lock:
+            if stop_event.is_set():
+                # A recording was started while this phrase waited for the
+                # lock; that take owns the window now.
+                logging.info("The typed phrase was superseded by a new take; "
+                             "the model is not asked.")
+                return
+            try:
+                self._ask_model(learner_text, stop_event)
+            except Exception:
+                logging.exception("Error in the typed exchange:")
+                self.root.after(0, self.view.append_system_msg,
+                                "Processing Error. Please try again.")
+                self.root.after(0, self.view.enter_error, "Error")
 
     def _toggle_recording(self):
         """One press starts a take, the next one ends it.
@@ -443,7 +520,7 @@ class VoiceTutorController:
                              "the model is not asked.")
                 return
 
-            self._ask_model(user_text, stop_event, stt_ms)
+            self._ask_model(user_text, stop_event)
 
         except Exception:
             logging.exception("Error in the exchange:")
@@ -451,12 +528,12 @@ class VoiceTutorController:
             self.root.after(0, self.view.enter_error, "Error")
 
     def _ask_model(self, learner_text: Optional[str],
-                   stop_event: threading.Event,
-                   stt_ms: Optional[float] = None):
+                   stop_event: threading.Event):
         """Get one reply of the model, show it and queue its speech.
 
-        *learner_text* None opens the lesson; *stt_ms* is None then too, as
-        there was no take to transcribe.
+        *learner_text* None opens the lesson. The phrase itself is already in
+        the chat: a recorded one is written by _run_exchange after recognition,
+        a typed one by on_text_submitted.
         """
         self.root.after(0, self.view.enter_thinking)
         llm_start = time.perf_counter()
@@ -485,8 +562,6 @@ class VoiceTutorController:
         logging.info(f"LLM reply received. Duration: {llm_ms:.0f}ms")
 
         self.root.after(0, self._show_reply, reply)
-        if stt_ms is not None:
-            self.root.after(0, self.view.update_stats, stt_ms, llm_ms)
 
         sentences = split_sentences(reply.say) if reply.say else []
         if not sentences:

@@ -44,6 +44,9 @@ from speakloop.ui_theme import (
 import ttkbootstrap as ttk
 
 from speakloop import config
+# The command words of the lesson prompt: the buttons send exactly these
+# strings, so the wording of a button is the wording of the prompt.
+from speakloop.prompt import LESSON_COMMANDS
 
 # The application name, as the title bar and the header show it.
 APP_NAME = "SpeakLoop"
@@ -58,24 +61,37 @@ PARTNER_NAME = "Tutor"
 NOTE_LABEL = "Note"
 SUMMARY_LABEL = "Summary"
 
-# The instruction line under the mic button, per state. A take starts on one
+# The switch that hides and shows the Note lines of the whole lesson.
+NOTES_BUTTON_LABEL = "Notes"
+
+# The tags of a NOTE line. Hiding a note means eliding both of them, so the
+# line disappears with its own line break and leaves no empty row behind.
+_NOTE_TAGS = ("note", "text_note")
+
+# The instruction line beside the mic button, per state. A take starts on one
 # press and ends by itself after a pause, so the wording says press, never hold.
+# It names the two ways to answer, because the text entry has no placeholder of
+# its own (Tk has none, and a fake one has to be cleared on every focus change).
 INSTRUCTION_LOADING = "Loading components..."
-INSTRUCTION_READY_FIRST = "Press SPACE or the button to speak. Press ESC to quit."
-INSTRUCTION_READY = "Press SPACE or the button to speak."
+INSTRUCTION_READY_FIRST = "Press SPACE to speak, or type and press Enter. ESC quits."
+INSTRUCTION_READY = "Press SPACE to speak, or type a phrase and press Enter."
 INSTRUCTION_RECORDING = "Speak. Recording stops after a pause, or press again."
 INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and restart."
 
-# Window title and size. Here with the rest of the wording.
-WINDOW_TITLE = f"{APP_NAME} - Voice Tutor"
+# Window title and size. Here with the rest of the wording. The title names the
+# language of the lesson, which is why the window has no separate language
+# label any more.
+WINDOW_TITLE = f"{APP_NAME} - {config.TARGET_LANGUAGE} Voice Tutor"
 WINDOW_WIDTH = 500
 WINDOW_HEIGHT = 700
 
-# Mic button geometry (canvas is 100x100, so the center is at 50,50).
-_MIC_CANVAS_SIZE = 100
-_MIC_CENTER = 50
-_MIC_R_OUTER = 42
-_MIC_R_INNER = 34
+# Mic button geometry (canvas is 72x72, so the center is at 36,36). The button
+# now stands beside the text entry in the control panel, so it is smaller than
+# the single big button it replaced.
+_MIC_CANVAS_SIZE = 72
+_MIC_CENTER = 36
+_MIC_R_OUTER = 30
+_MIC_R_INNER = 24
 _MIC_RING_WIDTH = 3
 
 # Live-level mapping of the recording indicator: the outer ring stays at full
@@ -84,7 +100,19 @@ _MIC_RING_WIDTH = 3
 # at or above _MIC_LEVEL_FULL_RMS fills it to the inner radius; it never shrinks
 # below the minimum radius, so the microphone stays visibly open in silence.
 _MIC_LEVEL_FULL_RMS = 0.08
-_MIC_LEVEL_MIN_R = 10
+_MIC_LEVEL_MIN_R = 7
+
+
+def clean_input(text: str) -> str:
+    """The typed phrase as it is sent to the model.
+
+    Line breaks and runs of spaces become one space and the ends are trimmed,
+    so a phrase pasted from another window arrives as one line. An empty result
+    means there is nothing to send; the caller drops it.
+
+    Pure, so the rule can be tested without a display.
+    """
+    return " ".join(text.split())
 
 
 def centered_geometry(screen_width: int, screen_height: int,
@@ -117,18 +145,28 @@ class ViewCallbacks:
     ends it, so a release means nothing. The KEY release is still reported, and
     only because holding a key makes Tk repeat KeyPress - the controller uses it
     to tell one physical press from the repeats.
+
+    Three handlers carry a value, and the view never passes a widget: the text
+    entry is read and cleaned here (on_text_submitted), a command button sends
+    its own prompt word (on_command_pressed), and the Notes switch reports the
+    state it has just taken (on_notes_toggled). Hiding the notes is the view's
+    own business; the controller only saves the choice.
     """
     on_mic_pressed: Callable[[], None]
     on_space_pressed: Callable[[], None]
     on_space_released: Callable[[], None]
+    on_text_submitted: Callable[[str], None]
+    on_command_pressed: Callable[[str], None]
+    on_notes_toggled: Callable[[bool], None]
     on_quit: Callable[[], None]
 
 
 class TutorView:
     """Passive view facade: builds the window and renders its states.
 
-    Owns the header, the chat transcript, the mic button and the status bar.
-    Widget bindings forward to the :class:`ViewCallbacks` passed in
+    Owns the header, the control panel at the top (the mic button, the text
+    entry and the instruction line), the chat transcript below it and the
+    status bar. Widget bindings forward to the :class:`ViewCallbacks` passed in
     (``self._cb``); the controller drives the window through the intent methods
     below. The view holds no reference to the controller.
     """
@@ -142,9 +180,14 @@ class TutorView:
         """
         self.root = root
         self._cb = callbacks
+        # The lesson opens the way the last one was left (settings.json).
+        self._notes_shown = config.SHOW_NOTES
         self.setup_styles()
         self.build_ui()
         self.bind_events()
+        # After the chat tags exist: it elides the NOTE tags when the switch
+        # comes up off, and paints the switch either way.
+        self._apply_notes_visibility()
         # Second palette pass: a ttk widget created in build_ui makes
         # ttkbootstrap build its default style, which can override the colors
         # applied in setup_styles (see _apply_ttk_palette).
@@ -198,6 +241,9 @@ class TutorView:
         self.root.configure(bg=THEME["bg_main"])
         self._build_header()
         self._build_status_bar()
+        # The controls stand at the top, under the header: the learner answers
+        # from there and reads the lesson below it, so the panel never moves
+        # when the transcript grows.
         self._build_controls()
         # Last, and packed with expand=True: it takes whatever space the fixed
         # parts above and below have left.
@@ -205,19 +251,20 @@ class TutorView:
 
     def _build_header(self):
         header_frame = tk.Frame(self.root, bg=THEME["bg_main"], height=60)
-        header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=10)
+        header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(10, 5))
 
-        tk.Label(header_frame, text=f"{APP_NAME.upper()} • Voice Tutor",
+        # The language of the lesson is part of the title. The separate
+        # "<explanation> -> <target>" label was dropped with it: the explanation
+        # language is fixed and was never a choice the window had to show.
+        tk.Label(header_frame,
+                 text=f"{APP_NAME.upper()} • {config.TARGET_LANGUAGE} Voice Tutor",
                  font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"),
                  fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
 
-        tk.Label(header_frame,
-                 text=f"{config.EXPLANATION_LANGUAGE} ➔ {config.TARGET_LANGUAGE}",
-                 font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
-                 fg=THEME["text_dim"], bg=THEME["bg_panel"],
-                 padx=10, pady=4, bd=0).pack(side=tk.RIGHT)
-
     def _build_status_bar(self):
+        # The state of the window alone. The STT and LLM durations of the last
+        # exchange are in logs/main.log; on the screen they said nothing the
+        # learner could act on.
         status_bar = tk.Frame(self.root, bg=THEME["bg_panel"], height=30)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -227,29 +274,99 @@ class TutorView:
             fg=THEME["ready"], bg=THEME["bg_panel"])
         self.status_label.pack(side=tk.LEFT, padx=15, pady=4)
 
-        self.stats_label = tk.Label(
-            status_bar, text="STT: --ms | LLM: --ms",
-            font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            fg=THEME["text_dim"], bg=THEME["bg_panel"])
-        self.stats_label.pack(side=tk.RIGHT, padx=15, pady=4)
-
     def _build_controls(self):
-        control_frame = tk.Frame(self.root, bg=THEME["bg_main"])
-        control_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=10)
+        """The control panel at the top of the window: the mic button and the
+        text entry in the first row, the lesson commands in the second."""
+        control_frame = tk.Frame(self.root, bg=THEME["bg_panel"],
+                                 highlightthickness=1,
+                                 highlightbackground=THEME["border"])
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=5)
+
+        input_row = tk.Frame(control_frame, bg=THEME["bg_panel"])
+        input_row.pack(side=tk.TOP, fill=tk.X)
 
         # A Canvas and not a button: the five states are drawn (two circles and
         # an emoji), which no Tk button can show.
         self.btn_canvas = tk.Canvas(
-            control_frame, width=_MIC_CANVAS_SIZE, height=_MIC_CANVAS_SIZE,
-            bg=THEME["bg_main"], highlightthickness=0, cursor="hand2")
-        self.btn_canvas.pack(pady=5)
+            input_row, width=_MIC_CANVAS_SIZE, height=_MIC_CANVAS_SIZE,
+            bg=THEME["bg_panel"], highlightthickness=0, cursor="hand2")
+        self.btn_canvas.pack(side=tk.LEFT, padx=12, pady=12)
         self.draw_mic_button("loading")
 
+        # The entry and the instruction share the space right of the button.
+        entry_frame = tk.Frame(input_row, bg=THEME["bg_panel"])
+        entry_frame.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                         padx=(0, 12), pady=12)
+
+        # bg_main and not bg_panel: the field has to be visible against the
+        # panel it lies on.
+        self.text_entry = tk.Entry(
+            entry_frame,
+            bg=THEME["bg_main"],
+            fg=THEME["text_bright"],
+            disabledbackground=THEME["bg_main"],
+            disabledforeground=THEME["text_muted"],
+            insertbackground=THEME["text_bright"],
+            font=(FONT_FAMILY, FONT_SIZE_CHAT),
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+            highlightcolor=THEME["accent"],
+            state=tk.DISABLED,
+        )
+        self.text_entry.pack(side=tk.TOP, fill=tk.X, ipady=5)
+
         self.instruction_label = tk.Label(
-            control_frame, text=INSTRUCTION_LOADING,
+            entry_frame, text=INSTRUCTION_LOADING,
             font=(FONT_FAMILY, FONT_SIZE_BODY),
-            fg=THEME["text_dim"], bg=THEME["bg_main"])
-        self.instruction_label.pack(pady=5)
+            fg=THEME["text_dim"], bg=THEME["bg_panel"], anchor=tk.W)
+        self.instruction_label.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
+
+        self._build_command_row(control_frame)
+
+    def _build_command_row(self, parent):
+        """The lesson commands and the Notes switch, in one row.
+
+        The command buttons send the words of the prompt (LESSON_COMMANDS), so
+        a pressed button reaches the model exactly like the spoken command. The
+        Notes switch stands apart, behind a separator: it sends nothing and
+        stays usable in every state of the window.
+        """
+        command_row = tk.Frame(parent, bg=THEME["bg_panel"])
+        command_row.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 12))
+
+        # Packed before the commands: a widget packed to the right keeps its
+        # place while the buttons left of it share what is left.
+        self.notes_button = self._panel_button(
+            command_row, NOTES_BUTTON_LABEL, self._toggle_notes)
+        self.notes_button.pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Frame(command_row, bg=THEME["border"], width=1).pack(
+            side=tk.RIGHT, fill=tk.Y, padx=6, pady=2)
+
+        self.command_buttons = []
+        for command in LESSON_COMMANDS:
+            button = self._panel_button(
+                command_row, command,
+                # command=command binds this loop value; without it every
+                # button would send the last command of the loop.
+                lambda text=command: self._cb.on_command_pressed(text))
+            button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            button.configure(state=tk.DISABLED)
+            self.command_buttons.append(button)
+
+    def _panel_button(self, parent, text: str, command) -> tk.Button:
+        """One flat button of the control panel, in the colors of the theme."""
+        return tk.Button(
+            parent, text=text, command=command,
+            font=(FONT_FAMILY, FONT_SIZE_SMALL),
+            bg=THEME["bg_accent"], fg=THEME["text_dim"],
+            activebackground=THEME["bg_accent"],
+            activeforeground=THEME["text_bright"],
+            disabledforeground=THEME["text_muted"],
+            relief=tk.FLAT, bd=0,
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+            padx=6, pady=4, cursor="hand2")
 
     def _build_chat(self):
         chat_frame = tk.Frame(self.root, bg=THEME["bg_main"])
@@ -317,12 +434,84 @@ class TutorView:
         # space-only, so the handlers need no keysym check; holding the key
         # repeats KeyPress, which the controller filters with the release
         # binding below.
-        self.root.bind("<KeyPress-space>", lambda _e: self._cb.on_space_pressed())
-        self.root.bind("<KeyRelease-space>", lambda _e: self._cb.on_space_released())
+        self.root.bind("<KeyPress-space>", self._on_space_press)
+        self.root.bind("<KeyRelease-space>", self._on_space_release)
         self.btn_canvas.bind("<ButtonPress-1>", lambda _e: self._cb.on_mic_pressed())
+        # Enter sends what was typed. The binding is on the entry itself, so
+        # Enter means nothing anywhere else in the window.
+        self.text_entry.bind("<Return>", lambda _e: self._submit_text())
         # Both ways out of the application end in the same controller handler.
         self.root.bind("<Escape>", lambda _e: self._cb.on_quit())
         self.root.protocol("WM_DELETE_WINDOW", self._cb.on_quit)
+
+    def _typing(self) -> bool:
+        """True while the keyboard belongs to the text entry.
+
+        The space bindings sit on the root window and therefore also see the
+        keys pressed inside the entry. Without this check a space typed in a
+        phrase would start a recording instead of a space.
+        """
+        return self.root.focus_get() is self.text_entry
+
+    def _on_space_press(self, _event):
+        if self._typing():
+            return
+        self._cb.on_space_pressed()
+
+    def _on_space_release(self, _event):
+        if self._typing():
+            return
+        self._cb.on_space_released()
+
+    def _submit_text(self):
+        """Send the typed phrase to the controller and empty the entry.
+
+        An entry that holds only spaces sends nothing: the window stays as it
+        is, which is what the learner sees anyway.
+        """
+        phrase = clean_input(self.text_entry.get())
+        if not phrase:
+            return
+        self.text_entry.delete(0, tk.END)
+        self._cb.on_text_submitted(phrase)
+
+    def _set_input_enabled(self, enabled: bool):
+        """Open or close the text entry and the command buttons together.
+
+        Closed while the microphone is open and while the model answers: one
+        phrase at a time reaches the lesson, by voice, by keyboard or by
+        button. The text already typed is kept, so a draft survives an
+        exchange. The Notes switch is not part of this: it sends nothing.
+        """
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.text_entry.configure(state=state)
+        for button in self.command_buttons:
+            button.configure(state=state)
+
+    # ------------------------------------------------------------------
+    # The Notes switch
+    # ------------------------------------------------------------------
+    def _toggle_notes(self):
+        """Hide or show the corrections of the whole lesson. (Tk thread.)"""
+        self._notes_shown = not self._notes_shown
+        self._apply_notes_visibility()
+        self._cb.on_notes_toggled(self._notes_shown)
+
+    def _apply_notes_visibility(self):
+        """Elide or reveal every NOTE line, and repaint the switch.
+
+        The corrections are always written into the transcript: hiding them is
+        a property of their tags, so one call covers the notes already in the
+        chat and every note that arrives later. The transcript stays complete,
+        which is what the lesson summary and the transcript file will read.
+        SUMMARY has tags of its own and is never hidden.
+        """
+        for tag in _NOTE_TAGS:
+            self.chat_display.tag_configure(tag, elide=not self._notes_shown)
+        self.notes_button.configure(
+            fg=THEME["text_bright"] if self._notes_shown else THEME["text_muted"],
+            highlightbackground=(THEME["accent"] if self._notes_shown
+                                 else THEME["border"]))
 
     # ------------------------------------------------------------------
     # Mic button
@@ -452,11 +641,6 @@ class TutorView:
     def update_instruction(self, text: str):
         self.instruction_label.configure(text=text)
 
-    def update_stats(self, stt_ms: float, llm_ms: float):
-        """Show the durations of the last exchange, in milliseconds."""
-        self.stats_label.configure(
-            text=f"STT: {stt_ms:.0f}ms | LLM: {llm_ms:.0f}ms")
-
     # ------------------------------------------------------------------
     # Startup intents (status line only: the button stays in the loading
     # state until the application is ready, so these leave it alone)
@@ -482,15 +666,17 @@ class TutorView:
         self.draw_mic_button("idle")
         self.update_status("Ready", THEME["ready"])
         self.update_instruction(INSTRUCTION_READY_FIRST)
+        self._set_input_enabled(True)
 
     # ------------------------------------------------------------------
     # Exchange intents
     # ------------------------------------------------------------------
     def enter_idle(self):
-        """Waiting for the learner to speak."""
+        """Waiting for the learner to speak or to type."""
         self.draw_mic_button("idle")
         self.update_status("Ready", THEME["ready"])
         self.update_instruction(INSTRUCTION_READY)
+        self._set_input_enabled(True)
 
     def enter_recording(self):
         """The microphone is open.
@@ -502,24 +688,36 @@ class TutorView:
         self.set_record_level(0.0)
         self.update_status("Recording...", THEME["bad"])
         self.update_instruction(INSTRUCTION_RECORDING)
+        self._set_input_enabled(False)
 
     def enter_processing(self):
         """The recording is being transcribed."""
         self.draw_mic_button("processing")
         self.update_status("Processing Speech (STT)...", THEME["warn"])
+        self._set_input_enabled(False)
 
     def enter_thinking(self):
         """The model is answering.
 
         The button keeps the processing look: to the user this is one wait, and
-        two glyphs for it would only flicker.
+        two glyphs for it would only flicker. The entry is closed here as well,
+        because a typed phrase reaches this state without passing through
+        enter_processing.
         """
         self.update_status("Thinking (LLM)...", THEME["info"])
+        self.draw_mic_button("processing")
+        self._set_input_enabled(False)
 
     def enter_speaking(self):
-        """The partner's reply is being spoken."""
+        """The partner's reply is being spoken.
+
+        The entry is open: typing and Enter interrupt the speech, exactly as
+        pressing SPACE does.
+        """
         self.draw_mic_button("speaking")
         self.update_status(f"{PARTNER_NAME} is speaking...", THEME["partner"])
+        self.update_instruction(INSTRUCTION_READY)
+        self._set_input_enabled(True)
 
     # ------------------------------------------------------------------
     # Failure intents
@@ -536,19 +734,23 @@ class TutorView:
         self.draw_mic_button("idle")
         self.update_status(status, THEME["bad"])
         self.update_instruction(INSTRUCTION_READY)
+        self._set_input_enabled(True)
 
     def server_failed(self):
         """The LLM server did not start: the session cannot continue.
 
         The button deliberately stays in the loading state - there is nothing to
         press, and an idle mic would invite a recording that cannot be answered.
+        The entry stays closed for the same reason.
         """
         self.update_status("LLM Server Error", THEME["bad"])
         self.update_instruction(INSTRUCTION_SERVER_FAILED)
+        self._set_input_enabled(False)
 
     def init_failed(self):
         """Startup stopped on an unexpected error."""
         self.update_status("Initialization Failed", THEME["bad"])
+        self._set_input_enabled(False)
 
     def recording_failed(self):
         """The microphone input stream failed: the take is gone.
@@ -560,3 +762,4 @@ class TutorView:
         self.draw_mic_button("idle")
         self.update_status("Recording Error", THEME["bad"])
         self.update_instruction(INSTRUCTION_READY)
+        self._set_input_enabled(True)
