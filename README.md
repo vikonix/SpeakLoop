@@ -195,6 +195,15 @@ Voice commands (say the word alone): **simpler** makes the current question smal
 
 A reply that does not follow this format is shown as it is and not read aloud.
 
+## The Transcript
+
+Every lesson is written to `transcript/`, under a name taken from the time it started:
+
+- `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a `[System]` line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
+- `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines.
+
+The jsonl file is the one to read with a program: the markdown file can always be built from it again.
+
 ## Controls
 
 The control panel stands at the top of the window: the microphone button, the text entry and the instruction line. The lesson is below it, and the status bar shows the state of the window.
@@ -233,6 +242,7 @@ SpeakLoop/
 │   ├── prompt.py            builds the system message from the prompt file
 │   ├── contract.py          splits a reply into NOTE, SAY and SUMMARY
 │   ├── conversation.py      the lesson: opening and answers
+│   ├── transcript.py        the lesson transcript (jsonl and markdown)
 │   ├── llm.py               LLM client (OpenAI-compatible) and history
 │   ├── llm_server_ctl.py    starts and stops the llama-server subprocess
 │   ├── tts.py               Text-to-Speech (Kokoro, Supertonic) and playback
@@ -255,5 +265,6 @@ SpeakLoop/
 ├── tools/               maintainer tools (measure_model_sizes.py)
 ├── docs/                plans and reviews
 ├── models/              GGUF model files
+├── transcript/          one jsonl and one markdown file per lesson
 └── bin/, model_cache/, logs/   created by the installer
 ```

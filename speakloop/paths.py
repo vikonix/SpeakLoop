@@ -217,6 +217,16 @@ def log_dir() -> Path:
     return data_root() / "logs"
 
 
+def transcript_dir() -> Path:
+    """The lesson transcripts written by speakloop/transcript.py.
+
+    Beside logs/ rather than inside it: a transcript is the result of a lesson
+    and is read again later, while the logs directory is what somebody deletes
+    as a whole after an investigation.
+    """
+    return data_root() / "transcript"
+
+
 def ensure_dirs() -> None:
     """Create the directories a working installation needs, idempotently.
 
@@ -225,7 +235,7 @@ def ensure_dirs() -> None:
     on a first run, and creating a child of a missing parent would fail.
 
     The criterion for being listed here is that a documented scenario would
-    otherwise require the user to run mkdir first. Three of the four are places
+    otherwise require the user to run mkdir first. Four of the five are places
     the app writes to - and ``config/`` earns it twice over, because
     ``loader.save_setting`` reports an unwritable settings.json only on stderr
     and returns False, so without the directory no preference would ever
@@ -244,7 +254,8 @@ def ensure_dirs() -> None:
     directory reports its own failure (loader.save_setting already does), and
     the app is usable without saved settings.
     """
-    for directory in (config_dir(), themes_dir(), model_cache_dir(), log_dir()):
+    for directory in (config_dir(), themes_dir(), model_cache_dir(), log_dir(),
+                      transcript_dir()):
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

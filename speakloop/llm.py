@@ -122,6 +122,11 @@ class LLMManager:
         self.messages = []
         # Protects self.messages from concurrent reads/writes across threads
         self._messages_lock = threading.Lock()
+        # The context size the server reported for the last finished reply:
+        # the whole conversation after that reply, in tokens. None when no
+        # reply has finished yet, or when the last one was interrupted. Read
+        # by the transcript and, from step 5c, by the context warning.
+        self.last_total_tokens: Optional[int] = None
 
     def start_conversation(self, system_prompt: str):
         """Begin a new conversation with *system_prompt* as its system message."""
@@ -190,6 +195,9 @@ class LLMManager:
                 raise RuntimeError("No conversation. Call start_conversation() first.")
 
         logging.info(f"LLM request started for user input: {user_text!r}")
+        # Cleared before the request: a caller reads this number after a reply,
+        # and the number of the reply before it would be worse than none.
+        self.last_total_tokens = None
 
         try:
             # Append user message and snapshot history for the API call.
@@ -258,6 +266,8 @@ class LLMManager:
 
             logging.info(f"LLM full response: {final_reply!r}")
             logging.info(usage_log_line(usage))
+            if usage is not None:
+                self.last_total_tokens = usage.total_tokens
             return final_reply
 
         except Exception:

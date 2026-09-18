@@ -683,3 +683,12 @@ LOG_DIR = paths.log_dir()
 LOG_FILE = str(LOG_DIR / "main.log")
 # Output of the llama-server subprocess (see speakloop/llm_server_ctl.py).
 LLM_SERVER_LOG_FILE = str(LOG_DIR / "llm_server.log")
+
+# =====================================================================
+# Lesson transcript
+# =====================================================================
+# transcript/ is created by paths.ensure_dirs() with the other directories, so
+# the first record of a lesson has somewhere to go. The files inside it are
+# named per lesson by speakloop/transcript.py, which is why only the directory
+# is named here.
+TRANSCRIPT_DIR = paths.transcript_dir()

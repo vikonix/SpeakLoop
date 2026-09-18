@@ -202,7 +202,7 @@ class LayoutTests(unittest.TestCase):
     """Every named location is a child of the root, identically in both modes."""
 
     _ACCESSORS = ("config_dir", "themes_dir", "models_dir", "model_cache_dir",
-                  "llama_dir", "log_dir")
+                  "llama_dir", "log_dir", "transcript_dir")
 
     def _relative_layout(self):
         root = paths.data_root()
@@ -241,6 +241,13 @@ class LayoutTests(unittest.TestCase):
         # config directory.
         with _clean_env():
             self.assertEqual(paths.log_dir().parent, paths.data_root())
+
+    def test_transcripts_are_not_kept_among_the_logs(self):
+        # A transcript is the result of a lesson and is read again later, while
+        # the logs directory is deleted as a whole after an investigation.
+        with _clean_env():
+            self.assertEqual(paths.transcript_dir().parent, paths.data_root())
+            self.assertNotEqual(paths.transcript_dir(), paths.log_dir())
 
 
 class ShippedRootTests(unittest.TestCase):
@@ -308,6 +315,12 @@ class EnsureDirsTests(unittest.TestCase):
         # otherwise exist - an instruction beginning "first create this
         # directory" is one nobody follows.
         self.assertIn(paths.themes_dir(), self._created_by_ensure_dirs())
+
+    def test_creates_the_transcript_directory(self):
+        # The first record of a lesson is written while the lesson runs, and
+        # transcript.py must not be the place that discovers a missing
+        # directory.
+        self.assertIn(paths.transcript_dir(), self._created_by_ensure_dirs())
 
     def test_does_not_create_anything_inside_the_package(self):
         # The shipped resources are read-only and belong to the installation.

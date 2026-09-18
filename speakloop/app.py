@@ -19,6 +19,11 @@ The audio itself belongs to three modules of its own: speakloop/recorder.py
 captures a take, speakloop/tts.py synthesizes and plays a reply, and
 speakloop/playback.py owns the stop event that says which reply may still be
 heard. This module only routes between them.
+
+The lesson is written to disk while it runs: speakloop/transcript.py owns the
+files, and every event of the lesson passes one record to it (_record, and
+_system for the service lines). A record is added where the same text goes to
+the window, so the transcript cannot fall behind what the learner sees.
 """
 
 import logging
@@ -27,6 +32,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -34,7 +40,8 @@ import numpy as np
 # config first: it sets HF_HOME, the Supertonic cache and the offline switch,
 # which huggingface_hub reads when stt and tts import their engines below.
 from speakloop import config
-from speakloop import bootstrap, detect_hardware, lifecycle, prompt
+from speakloop import (bootstrap, detect_hardware, lifecycle, prompt,
+                       transcript)
 from speakloop.contract import Reply, split_sentences
 from speakloop.conversation import Lesson
 from speakloop.llm import LLMManager, error_message
@@ -147,6 +154,23 @@ class VoiceTutorController:
         # untouched by "lm-studio": all of its methods are no-ops until start().
         self._llm_server = LLMServerController()
 
+        # The transcript of this lesson (speakloop/transcript.py). Built
+        # here with the settings of the run, but no file is created before the
+        # first record: a session that is closed while it loads leaves none.
+        self._lesson_start = datetime.now()
+        # The phrase of the learner the records belong to. The opening question
+        # of the model answers no phrase of the learner and keeps 0.
+        self._turn = 0
+        self.transcript = transcript.TranscriptWriter(
+            config.TRANSCRIPT_DIR, self._lesson_start, transcript.meta_record(
+                started_at=self._lesson_start,
+                target_language=config.TARGET_LANGUAGE,
+                explanation_language=config.EXPLANATION_LANGUAGE,
+                first_topic=config.FIRST_TOPIC,
+                llm_model=self._chat_model_name(),
+                stt_model=config.WHISPER_MODEL,
+                tts_voice=config.TTS_VOICE))
+
         # The window. Built last of the members, because the loader thread
         # started below drives it at once.
         self.view = TutorView(self.root, ViewCallbacks(
@@ -163,13 +187,45 @@ class VoiceTutorController:
         threading.Thread(target=self.load_components, daemon=True).start()
 
     # ------------------------------------------------------------------
+    # The transcript and the service lines
+    # ------------------------------------------------------------------
+    def _chat_model_name(self) -> str:
+        """The chat model, as the transcript names it.
+
+        The GGUF file for the own server; the name of the backend for LM
+        Studio, where the model is chosen in that application and this process
+        cannot read which one it is.
+        """
+        if self.llm_backend == "llama-server":
+            return os.path.basename(config.EXTERNAL_MODEL_PATH)
+        return self.llm_backend
+
+    def _record(self, record_type: str, text: str, **extra) -> None:
+        """Add one event of the lesson to the transcript. (Any thread.)
+
+        The writer has a lock of its own, so the exchange threads and the Tk
+        thread use this the same way.
+        """
+        self.transcript.add(transcript.event_record(
+            datetime.now(), self._turn, record_type, text, **extra))
+
+    def _system(self, text: str) -> None:
+        """Show a [System] line and keep it in the transcript. (Any thread.)
+
+        Every service message of the application goes through here: the window
+        is reached on the Tk thread as always, and the same sentence becomes a
+        "system" record, which the reader of the file can skip or read.
+        """
+        self.root.after(0, self.view.append_system_msg, text)
+        self._record(transcript.TYPE_SYSTEM, text)
+
+    # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
     def load_components(self):
         logging.info("Starting model loading thread...")
         self.root.after(0, self.view.enter_loading)
-        self.root.after(0, self.view.append_system_msg,
-                        "Loading the speech models...")
+        self._system("Loading the speech models...")
 
         try:
             # First of all: a missing or edited prompt file stops the start at
@@ -193,7 +249,7 @@ class VoiceTutorController:
                 # named the model and the launch would then describe something
                 # that did not happen. Both are said below, once it is known
                 # which of the two it was.
-                self.root.after(0, self.view.append_system_msg, "Connecting to the LLM server...")
+                self._system("Connecting to the LLM server...")
                 self.root.after(0, self.view.enter_connecting)
                 ready = self._llm_server.start(self.llm_mgr)
                 if not ready:
@@ -205,8 +261,8 @@ class VoiceTutorController:
                     # second one.
                     reason = (self._llm_server.last_error
                               or "The LLM server did not start.")
-                    self.root.after(0, self.view.append_system_msg, f"Error: {reason}")
-                    self.root.after(0, self.view.append_system_msg, "See logs/main.log and logs/llm_server.log.")
+                    self._system(f"Error: {reason}")
+                    self._system("See logs/main.log and logs/llm_server.log.")
                     self.root.after(0, self.view.server_failed)
                     # Do not make the window ready - there is nothing to answer
                     # a recording with.
@@ -215,14 +271,13 @@ class VoiceTutorController:
                     # Said in the window and not only in the log: the answers
                     # now come from a server this run did not configure, which
                     # explains a model or a speed the settings do not.
-                    self.root.after(0, self.view.append_system_msg,
-                                    f"Using the llama-server already running on "
-                                    f"{config.LLM_SERVER_HOST}:{config.LLM_SERVER_PORT}. "
-                                    f"It keeps the model it was started with.")
+                    self._system(f"Using the llama-server already running "
+                                 f"on {config.LLM_SERVER_HOST}:"
+                                 f"{config.LLM_SERVER_PORT}. It keeps the "
+                                 f"model it was started with.")
                 else:
                     model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
-                    self.root.after(0, self.view.append_system_msg,
-                                    f"llama-server is ready with {model_name}.")
+                    self._system(f"llama-server is ready with {model_name}.")
                 served_n_ctx = self._llm_server.served_n_ctx
                 if (served_n_ctx is not None
                         and served_n_ctx < config.EXTERNAL_N_CTX):
@@ -230,15 +285,15 @@ class VoiceTutorController:
                     # section 3.3): a short lesson still works. In the chat
                     # and not in the status bar, which the next state change
                     # overwrites at once.
-                    self.root.after(0, self.view.append_system_msg,
-                                    f"Warning: the model has a context of "
-                                    f"{served_n_ctx} tokens instead of "
-                                    f"{config.EXTERNAL_N_CTX}. A long lesson "
-                                    f"may not fit. See logs/main.log.")
+                    self._system(f"Warning: the model has a context of "
+                                 f"{served_n_ctx} tokens instead of "
+                                 f"{config.EXTERNAL_N_CTX}. A long lesson "
+                                 f"may not fit. See logs/main.log.")
             else:
                 self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
-                    self.root.after(0, self.view.append_system_msg, "Warning: LM Studio is offline. Start it to use voice tutor!")
+                    self._system("Warning: LM Studio is offline. Start "
+                                 "it to use voice tutor!")
                     logging.warning("LM Studio is offline during initialization.")
 
             self.root.after(0, self.view.enter_warming_up)
@@ -262,16 +317,15 @@ class VoiceTutorController:
 
         except Exception as e:
             logging.exception("Error during initialization thread:")
-            self.root.after(0, self.view.append_system_msg, f"Initialization Error: {e}")
+            self._system(f"Initialization Error: {e}")
             self.root.after(0, self.view.init_failed)
 
     def make_app_ready(self):
         self.app_ready = True
         self.view.enter_app_ready()
-        self.view.append_system_msg(
-            f"Ready. The lesson is in {config.TARGET_LANGUAGE}. "
-            f"Use the command buttons above, or say the same words: "
-            f"simpler, hint, new topic, finish.")
+        self._system(f"Ready. The lesson is in {config.TARGET_LANGUAGE}. "
+                     f"Use the command buttons above, or say the same words: "
+                     f"simpler, hint, new topic, finish.")
         self._open_lesson()
 
     def _open_lesson(self):
@@ -292,9 +346,8 @@ class VoiceTutorController:
                 self._ask_model(None, stop_event)
             except Exception:
                 logging.exception("Error while opening the lesson:")
-                self.root.after(0, self.view.append_system_msg,
-                                "The lesson could not be opened. "
-                                "Speak to start it.")
+                self._system("The lesson could not be opened. "
+                             "Speak to start it.")
                 self.root.after(0, self.view.enter_error, "Error")
 
     # ------------------------------------------------------------------
@@ -320,7 +373,7 @@ class VoiceTutorController:
     def on_text_submitted(self, learner_text: str):
         """The learner sent a typed phrase with Enter. (Tk thread.)"""
         logging.info(f"The learner typed: {learner_text!r}")
-        self._submit_phrase(learner_text)
+        self._submit_phrase(learner_text, transcript.SOURCE_TEXT)
 
     def on_command_pressed(self, command: str):
         """A command button was pressed. (Tk thread.)
@@ -331,7 +384,7 @@ class VoiceTutorController:
         other phrase, so the transcript says why the lesson changed course.
         """
         logging.info(f"The learner pressed the command button {command!r}.")
-        self._submit_phrase(command)
+        self._submit_phrase(command, transcript.SOURCE_BUTTON)
 
     def on_notes_toggled(self, show_notes: bool):
         """The Notes switch was pressed. (Tk thread.)
@@ -343,8 +396,12 @@ class VoiceTutorController:
         logging.info(f"Notes are now {'shown' if show_notes else 'hidden'}.")
         config.save_user_setting("show_notes", show_notes)
 
-    def _submit_phrase(self, learner_text: str):
+    def _submit_phrase(self, learner_text: str, source: str):
         """Send a phrase the learner wrote or chose. (Tk thread.)
+
+        *source* says how the phrase was given (see speakloop/transcript.py):
+        the reader of the transcript needs it, because only a spoken phrase can
+        carry a recognition error.
 
         A written phrase is the take of this exchange: it stops the speech of
         the previous reply exactly as the start of a recording does, so the
@@ -357,6 +414,8 @@ class VoiceTutorController:
             return
         self.playback.stop()
         self.view.append_user_msg(learner_text)
+        self._turn += 1
+        self._record(transcript.TYPE_LEARNER, learner_text, source=source)
         # Installed on the Tk thread, like the stop event of a recorded take
         # (see PlaybackController.new_event).
         stop_event = self.playback.new_event()
@@ -381,8 +440,7 @@ class VoiceTutorController:
                 self._ask_model(learner_text, stop_event)
             except Exception:
                 logging.exception("Error in the typed exchange:")
-                self.root.after(0, self.view.append_system_msg,
-                                "Processing Error. Please try again.")
+                self._system("Processing Error. Please try again.")
                 self.root.after(0, self.view.enter_error, "Error")
 
     def _toggle_recording(self):
@@ -433,8 +491,7 @@ class VoiceTutorController:
         Routed through the normal stop path on the main thread, so the take is
         finalized exactly like a manual stop.
         """
-        self.root.after(0, self.view.append_system_msg,
-                        "Reached maximum record limit.")
+        self._system("Reached maximum record limit.")
         self.root.after(0, self.trigger_recording_stop)
 
     def _on_record_silence_stop(self):
@@ -459,8 +516,7 @@ class VoiceTutorController:
 
     def _on_record_stream_error(self):
         """The input stream failed; the recorder has already flagged itself off."""
-        self.root.after(0, self.view.append_system_msg,
-                        "The microphone could not be opened. See logs/main.log.")
+        self._system("The microphone could not be opened. See logs/main.log.")
         self.root.after(0, self.view.recording_failed)
 
     # ------------------------------------------------------------------
@@ -472,9 +528,8 @@ class VoiceTutorController:
             # The capture thread is stuck (a device that hangs on close) and its
             # callback may still be appending chunks. Reading them now would
             # race the writer, so the take is dropped.
-            self.root.after(0, self.view.append_system_msg,
-                            "The audio device did not stop in time. "
-                            "The take was dropped, please try again.")
+            self._system("The audio device did not stop in time. "
+                         "The take was dropped, please try again.")
             self.root.after(0, self.view.enter_idle)
             return
         # Collected BEFORE the lock below: a take started while this thread
@@ -489,8 +544,8 @@ class VoiceTutorController:
             if audio is None or len(audio) < (config.AUDIO_SAMPLE_RATE
                                               * MIN_RECORD_SECONDS):
                 logging.warning("Captured audio too short or empty.")
-                self.root.after(0, self.view.append_system_msg,
-                                "The recording is too short. Please speak a little longer.")
+                self._system("The recording is too short. "
+                             "Please speak a little longer.")
                 self.root.after(0, self.view.enter_idle)
                 return
 
@@ -504,12 +559,16 @@ class VoiceTutorController:
 
             if not user_text:
                 logging.info("STT returned empty transcription.")
-                self.root.after(0, self.view.append_system_msg, "Could not hear you clearly. Please try again.")
+                self._system("Could not hear you clearly. Please try again.")
                 self.root.after(0, self.view.enter_idle)
                 return
 
             # Update User Speech to GUI
             self.root.after(0, self.view.append_user_msg, user_text)
+            self._turn += 1
+            self._record(transcript.TYPE_LEARNER, user_text,
+                         source=transcript.SOURCE_VOICE,
+                         stt_ms=round(stt_ms))
 
             if stop_event.is_set():
                 # A new take began while this one was being transcribed. The
@@ -524,7 +583,7 @@ class VoiceTutorController:
 
         except Exception:
             logging.exception("Error in the exchange:")
-            self.root.after(0, self.view.append_system_msg, "Processing Error. Please try again.")
+            self._system("Processing Error. Please try again.")
             self.root.after(0, self.view.enter_error, "Error")
 
     def _ask_model(self, learner_text: Optional[str],
@@ -548,8 +607,7 @@ class VoiceTutorController:
             # keeps saying "Thinking" and the failure is only in the log.
             # llm.py has logged the traceback already. Nothing of the reply
             # was queued for speech, so there is nothing to drop.
-            self.root.after(0, self.view.append_system_msg,
-                            f"LLM error: {error_message(llm_error)}")
+            self._system(f"LLM error: {error_message(llm_error)}")
             self.root.after(0, self.view.enter_error, "LLM Error")
             return
 
@@ -562,6 +620,7 @@ class VoiceTutorController:
         logging.info(f"LLM reply received. Duration: {llm_ms:.0f}ms")
 
         self.root.after(0, self._show_reply, reply)
+        self._record_reply(reply, llm_ms)
 
         sentences = split_sentences(reply.say) if reply.say else []
         if not sentences:
@@ -595,6 +654,30 @@ class VoiceTutorController:
             self.view.append_partner_msg(reply.say)
         if reply.summary:
             self.view.append_summary(reply.summary)
+
+    def _record_reply(self, reply: Reply, llm_ms: float) -> None:
+        """Write one reply of the model into the transcript. (Exchange thread.)
+
+        The duration and the size of the context go on the FIRST record of the
+        reply: one reply can hold a NOTE and a SAY, and the same two numbers on
+        both records would read as two answers of the model.
+
+        A summary ends the lesson, so the readable view is written here. The
+        window still works afterwards, and quit_app writes the view again.
+        """
+        stats = {"llm_ms": round(llm_ms),
+                 "tokens": self.llm_mgr.last_total_tokens}
+        if not reply.follows_contract:
+            self._record(transcript.TYPE_BROKEN, reply.raw, **stats)
+            return
+        for record_type, text in ((transcript.TYPE_NOTE, reply.note),
+                                  (transcript.TYPE_SAY, reply.say),
+                                  (transcript.TYPE_SUMMARY, reply.summary)):
+            if text:
+                self._record(record_type, text, **stats)
+                stats = {}
+        if reply.summary:
+            self.transcript.save_markdown()
 
     def _enter_if_current(self, intent, stop_event: threading.Event):
         """Run a view intent only for the reply that is still current. (Tk thread.)
@@ -675,6 +758,10 @@ class VoiceTutorController:
         # rather than started, and while the loader thread is still in start():
         # see LLMServerController.shutdown.
         self._llm_server.shutdown()
+
+        # The readable view of a lesson that ended without a summary. The jsonl
+        # file needs nothing here: every record went to disk when it happened.
+        self.transcript.save_markdown()
 
         self.root.destroy()
         # Not the interpreter's normal exit: with CUDA torch loaded, tearing the

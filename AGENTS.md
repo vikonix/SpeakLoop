@@ -23,6 +23,11 @@ with `NOTE:` (a correction, shown only), `SAY:` (the partner's line, shown and
 spoken) or `SUMMARY:` (the lesson summary on "finish", shown only). The prompt
 text belongs to the owner: change it only on request.
 
+Every lesson is also written to `transcript/` while it runs
+([`speakloop/transcript.py`](speakloop/transcript.py)): a jsonl file with one
+record per event, which is the form the learning system reads, and a markdown
+view of the same records for reading by eye.
+
 The language of the lesson is data: `speakloop/languages/` holds one profile per
 language and `config.py` derives every per-run language constant from the active
 one. English is fixed; Spanish is postponed (the owner's decision), although its
@@ -98,6 +103,15 @@ the key differ.
   a command is an ordinary phrase of the learner and stays in the history as
   one. `on_notes_toggled` only remembers the choice
   (`config.save_user_setting`); the hiding itself is the view's.
+  `_record` and `_system` are the two ways into the transcript: every event of
+  the lesson becomes a record, and `_system` is the ONE place a `[System]`
+  line is written, so the window and the file always say the same. `_turn`
+  counts the phrases of the learner and a reply carries the number of the
+  phrase it answers, which is what joins a NOTE to the phrase it corrects.
+  `_record_reply` puts `llm_ms` and `tokens` on the first record of a reply
+  (the same numbers on a NOTE and a SAY would read as two answers) and writes
+  the markdown view when the summary arrives; `quit_app` writes it again, for
+  a lesson that ended without one.
   `_exchange_lock` keeps one exchange at a time, so a
   take made during the previous exchange waits instead of being dropped.
   `load_components` builds the lesson (`prompt.build_system_prompt`, then
@@ -213,6 +227,17 @@ the key differ.
   (the prompt commands get no special handling yet, `docs/refactoring.md`
   10.4). Both return a parsed `Reply`, or None after an interrupt, and log a
   warning for a reply outside the contract.
+- [`speakloop/transcript.py`](speakloop/transcript.py) - the two files of one
+  lesson. The record functions are pure (a record is a dict, the clock is an
+  argument), `TranscriptWriter` owns the files and one lock, because records
+  arrive from the exchange threads and from the Tk thread alike. The jsonl
+  line is appended as the event happens and the markdown view is built from
+  the kept records at the end, which is why the machine form is the one that
+  is written first: markdown can be built from jsonl, not the other way round.
+  `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its
+  meaning, not when an optional one is added. No file is created before the
+  first record, and a file that cannot be written is logged once and then left
+  alone - a lesson must not end because a disk is full.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
   client with the conversation history; used by both backends.
   `start_conversation()` sets the system message; `ask()` refuses to run
@@ -230,6 +255,9 @@ the key differ.
   usage and **no choices**, so the loop must skip it, and `usage_log_line()`
   writes the context size to `logs/main.log` after each reply ("unknown"
   after an interrupt, which ends the stream before the report).
+  `last_total_tokens` keeps that number for the transcript (and, from step 5c,
+  for the context warning): it is cleared before every request, so a caller
+  never reads the size of the reply before it.
   `LLM_TIMEOUT` (360 s) is the longest pause before the first token on a weak
   machine, and the client makes **no retries** (a retry repeats the prompt
   processing); `check_connection` has its own short timeout.
@@ -314,6 +342,9 @@ the key differ.
   file or key, and `THEME` is it overlaid with the selected
   `<name>_schema.json` (tests pin that the shipped dark schema equals
   `_DARK_THEME`).
+  `TRANSCRIPT_DIR` names the transcript directory; the files inside it are
+  named per lesson by `transcript.py`, which is why only the directory is
+  resolved here.
   `SHOW_NOTES` (key `show_notes`) is the one value the application writes
   back: `save_user_setting()` is the only writer of `settings.json`
   (`SETTINGS_FILE`), through `loader.save_setting`, which re-reads the file and
@@ -334,7 +365,10 @@ the key differ.
   a failed download, so without the first check a repo with only its small
   files is skipped by the installer and switched offline.
 - [`speakloop/paths.py`](speakloop/paths.py) - where every file lives, and the
-  only module that knows. `data_root()` (what this machine writes; the clone in
+  only module that knows. `transcript_dir()` sits beside `log_dir()` rather
+  than inside it, because a transcript is the result of a lesson and the logs
+  directory is what somebody deletes after an investigation; `ensure_dirs()`
+  creates it with the rest. `data_root()` (what this machine writes; the clone in
   repo mode, the OS user-data directory for an installed package,
   `SPEAKLOOP_HOME` overrides) and `shipped_root()` (read-only files inside the
   package). **Stdlib-only** - install.py reads it before the requirements
@@ -446,6 +480,13 @@ can use them before the requirements step:
   about to read), and the previous exchange gives the lock up quickly because
   the new take already set its stop event. An exchange whose event was set
   before the model call shows the recognized phrase and asks nothing.
+- **The transcript follows the window** (`app.py`): a record is added in the
+  same place the same text goes to the chat, and its jsonl line reaches the
+  disk at once. That is what makes the file complete up to the last event of a
+  lesson that ended in a crash, and what keeps the two from drifting apart. Do
+  not collect the lesson from the chat widget or from the LLM history instead:
+  the widget would make the view the source of the data, and the history holds
+  raw replies, the service `Begin.` and no times.
 - **Known v0 issues** are listed in `docs/refactoring.md` with the step that
   fixes each. Do not fix them outside their step.
 
@@ -465,6 +506,9 @@ loads a model; `tests/test_languages.py` imports the profile modules alone and
 needs neither config nor torch, and so do `tests/test_prompt.py` (which also
 reads the shipped prompt file), `tests/test_contract.py` and
 `tests/test_conversation.py` (a stand-in for `LLMManager`).
+`tests/test_transcript.py` needs neither config nor torch either; its writer
+tests run against a temporary directory, and the two failure tests replace
+`open` and `Path.write_text` with an `OSError`.
 
 ## Working Rules
 
