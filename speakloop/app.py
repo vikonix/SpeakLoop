@@ -42,7 +42,7 @@ import numpy as np
 from speakloop import config
 from speakloop import (bootstrap, detect_hardware, lifecycle, prompt,
                        transcript)
-from speakloop.contract import Reply, split_sentences
+from speakloop.contract import Reply, split_sentences, strip_markdown
 from speakloop.conversation import Lesson
 from speakloop.llm import LLMManager, error_message
 from speakloop.llm_server_ctl import LLMServerController
@@ -621,10 +621,22 @@ class VoiceTutorController:
 
         self.root.after(0, self._show_reply, reply)
         self._record_reply(reply, llm_ms)
+        if not reply.follows_contract:
+            # After the reply itself: the learner reads what the model wrote
+            # and then why it stays silent. _show_reply is already queued on
+            # the Tk thread, so this line lands under it. No second request:
+            # a retry costs another 15-50 s and changes the history.
+            self._system("The model did not answer in the lesson format. "
+                         "The reply is shown in full and is not spoken.")
 
-        sentences = split_sentences(reply.say) if reply.say else []
+        # The markers go before the split, and for speech only: the synthesis
+        # reads them aloud, while the chat and the transcript keep the line as
+        # the model wrote it.
+        spoken = strip_markdown(reply.say) if reply.say else ""
+        sentences = split_sentences(spoken)
         if not sentences:
-            # A SUMMARY or a reply outside the contract: shown, not spoken.
+            # A SUMMARY, a reply outside the contract, or a SAY of markers
+            # alone: shown, not spoken.
             self.root.after(0, self._enter_if_current, self.view.enter_idle,
                             stop_event)
             return

@@ -193,7 +193,7 @@ The lesson follows the free-talk prompt in [`speakloop/prompts/free_talk.md`](sp
 
 Voice commands (say the word alone): **simpler** makes the current question smaller, **hint** gives the first words of an answer, **new topic** changes the topic, **finish** ends the lesson. After "finish" the tutor shows a **Summary** in Russian; it is not read aloud. If you say goodbye in other words, the tutor asks whether to finish. The lesson never ends by itself. There is no grading.
 
-A reply that does not follow this format is shown as it is and not read aloud.
+A reply that does not follow this format is shown in full, is not read aloud, and a `[System]` line below it says why. The tutor is not asked again: a second request would cost another half minute and change the lesson history. Markdown inside the tutor's line (`**tape**`) is read without the markers, while the screen keeps the line as the tutor wrote it.
 
 ## The Transcript
 

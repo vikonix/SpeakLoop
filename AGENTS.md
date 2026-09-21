@@ -95,7 +95,12 @@ the key differ.
   which is also the only thread-safe way into Tk. It no longer captures audio
   itself - `recorder.py` does. `_toggle_recording` is the whole input model:
   one press starts a take, the next one ends it, and a release only clears the
-  key auto-repeat guard. A typed phrase enters the same flow at the model
+  key auto-repeat guard. `trigger_recording_start` claims the floor (stops the
+  speech, which sets the stop event of the reply that is running) only AFTER
+  `recorder.start()` has agreed to the take: a refused take that had already
+  stopped the playback left the exchange in flight without an answer and the
+  window in its processing state for good (problem 13 in
+  `docs/refactoring.md`). A typed phrase enters the same flow at the model
   request: `on_text_submitted` stops the speech of the previous reply, writes
   the phrase into the chat and gives `_run_typed_exchange` a stop event of its
   own, so voice and keyboard share every step from `_ask_model` on. A command
@@ -120,7 +125,11 @@ the key differ.
   request runs like an exchange, with its own stop event and under the same
   lock. `_ask_model` is the one path to the model: it shows the reply
   (`_show_reply`: NOTE, SAY, SUMMARY in this order, or the whole text of a
-  reply outside the contract) and queues only the sentences of SAY.
+  reply outside the contract) and queues only the sentences of SAY, with the
+  markdown taken out of them for the speech alone. A reply outside the
+  contract also gets a `[System]` line, written after the reply itself so the
+  window and the file both hold the two in that order; the model is not asked
+  again.
   `_enter_if_current` runs a view intent on the Tk thread only for the reply
   that is still current, so a late worker cannot draw over a new take.
   Module-level `run(append_log)` configures logging, logs
@@ -217,9 +226,15 @@ the key differ.
   them), and a `SUMMARY:` label repeated at the start of the summary is
   dropped; above it the first NOTE and the first SAY are taken. Prefixes are matched
   in capitals at the start of a line only - a NOTE read as SAY would be spoken
-  in the explanation language. `split_sentences()` cuts SAY for speech. Rules
-  for broken replies are stage 5; until then only `follows_contract` reports
-  them.
+  in the explanation language, and a label with markdown around it
+  (`**SAY:**`) is therefore a reply outside the contract, not a line to speak.
+  `split_sentences()` cuts SAY for speech, and `strip_markdown()` takes the
+  inline markers out of it first: the synthesis reads a marker as a sound. A
+  marker counts only as a pair with no space against the text, and an
+  underscore only between word boundaries, so "2 * 3 * 5" and "read_file_name"
+  stay whole. The cleaning is for speech alone - the chat and the transcript
+  keep the line as the model wrote it. What to do with a reply that breaks the
+  contract is the controller's (see app.py).
 - [`speakloop/conversation.py`](speakloop/conversation.py) - `Lesson` over
   `LLMManager`: `open()` sends `OPENING_MESSAGE` ("Begin.", a user message the
   chat template needs before the first question; it stays in the history and
@@ -479,7 +494,9 @@ can use them before the requirements step:
   `_exchange_lock` (a later take would otherwise replace the chunk buffer it is
   about to read), and the previous exchange gives the lock up quickly because
   the new take already set its stop event. An exchange whose event was set
-  before the model call shows the recognized phrase and asks nothing.
+  before the model call shows the recognized phrase and asks nothing. Only a
+  take that really starts may set that event: see `trigger_recording_start`
+  above.
 - **The transcript follows the window** (`app.py`): a record is added in the
   same place the same text goes to the chat, and its jsonl line reaches the
   disk at once. That is what makes the file complete up to the last event of a

@@ -5,8 +5,9 @@
 
 parse_reply() decides what the learner reads and what the learner hears: a
 NOTE taken for SAY would be read aloud, in the explanation language. The
-replies below have the shapes the prompt asks for, plus the near misses that
-stage 3 only has to report (their rules are stage 5).
+replies below have the shapes the prompt asks for, plus the near misses,
+which the controller shows in full and does not speak. strip_markdown()
+cleans the SAY line for the synthesis alone.
 
 contract.py is pure code, so this file needs neither config nor torch.
 
@@ -17,7 +18,7 @@ Run from the project root with:
 
 import unittest
 
-from speakloop.contract import parse_reply, split_sentences
+from speakloop.contract import parse_reply, split_sentences, strip_markdown
 
 NOTE_LINE = ('NOTE: "I fix my bicycle with a scotch" -> "with tape". '
              'Scotch это виски, а лента это tape.')
@@ -164,8 +165,10 @@ class ContractBreakTests(unittest.TestCase):
         self.assertIsNone(reply.say)
 
     def test_a_prefix_inside_a_line_is_not_read(self):
-        # Markdown around the prefix is a stage 5 rule; until then such a
-        # line is not spoken.
+        # A prefix is read at the start of a line only, so "**SAY:**" is a
+        # reply outside the contract: shown in full and not spoken (step 5b).
+        # Markdown is removed from the text of a SAY line, never around its
+        # label.
         reply = parse_reply("**SAY:** Where do you work?")
         self.assertIsNone(reply.say)
 
@@ -173,6 +176,57 @@ class ContractBreakTests(unittest.TestCase):
         reply = parse_reply("")
         self.assertEqual((reply.note, reply.say, reply.summary, reply.raw),
                          (None, None, None, ""))
+
+
+class StripMarkdownTests(unittest.TestCase):
+    """The markers go before the synthesis; the words stay as they are."""
+
+    def test_bold_markers_are_removed(self):
+        self.assertEqual(strip_markdown("Use **tape**, not scotch."),
+                         "Use tape, not scotch.")
+
+    def test_italic_markers_are_removed(self):
+        self.assertEqual(strip_markdown("It is *very* long."),
+                         "It is very long.")
+
+    def test_underscore_emphasis_is_removed(self):
+        self.assertEqual(strip_markdown("It is _very_ long."),
+                         "It is very long.")
+
+    def test_a_word_with_underscores_is_kept(self):
+        # The learner writes code, so snake_case is a word of the lesson.
+        self.assertEqual(strip_markdown("I name it read_file_name."),
+                         "I name it read_file_name.")
+
+    def test_code_markers_are_removed(self):
+        self.assertEqual(strip_markdown("Type `pip install` first."),
+                         "Type pip install first.")
+
+    def test_strikethrough_markers_are_removed(self):
+        self.assertEqual(strip_markdown("~~scotch~~ tape"), "scotch tape")
+
+    def test_several_markers_in_one_line_are_removed(self):
+        self.assertEqual(strip_markdown("**Tape** is *not* `scotch`."),
+                         "Tape is not scotch.")
+
+    def test_a_marker_without_its_pair_stays(self):
+        self.assertEqual(strip_markdown("2 * 3 is six."), "2 * 3 is six.")
+
+    def test_two_markers_with_spaces_against_them_stay(self):
+        # Emphasis has no space between the marker and the word, so this is
+        # arithmetic and not a pair.
+        self.assertEqual(strip_markdown("2 * 3 * 5 is thirty."),
+                         "2 * 3 * 5 is thirty.")
+
+    def test_plain_text_is_unchanged(self):
+        self.assertEqual(strip_markdown("Where do you work?"),
+                         "Where do you work?")
+
+    def test_the_sentence_split_sees_the_clean_text(self):
+        # The order app.py uses: a marker must not hide the end of a
+        # sentence from the split.
+        self.assertEqual(split_sentences(strip_markdown("**Tape.** *Why?*")),
+                         ["Tape.", "Why?"])
 
 
 class SplitSentencesTests(unittest.TestCase):

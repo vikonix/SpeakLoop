@@ -8,9 +8,10 @@ or SAY:. The last reply of a lesson begins with SUMMARY: and is the one reply
 that may have several lines (speakloop/prompts/free_talk.md, sections OUTPUT
 and SUMMARY). NOTE and SUMMARY are shown and never spoken; SAY is spoken.
 
-Pure code: no config and no I/O. What to do with a reply that breaks the
-contract is stage 5 of docs/refactoring.md. Until then parse_reply() only
-reports what it found, and the caller decides.
+Pure code: no config and no I/O. parse_reply() only reports what it found;
+what to do with a reply that breaks the contract belongs to the controller
+(speakloop/app.py shows such a reply in full, does not speak it and writes a
+[System] line about it).
 """
 
 import re
@@ -24,6 +25,21 @@ SUMMARY_PREFIX = "SUMMARY:"
 # Sentence end: punctuation, whitespace, then a capital letter. A dot inside a
 # number ("1.5") has no whitespace after it, so it does not split.
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-ZА-Я])")
+
+# Inline markdown Gemma sometimes puts inside a SAY line. Each pattern keeps
+# the text and drops the markers. The two-character markers go first: the
+# one-character rules below would otherwise leave a stray marker behind.
+# A marker with a space against the text is not emphasis, which is what keeps
+# "2 * 3 * 5" whole.
+_MARKDOWN_SPANS = (
+    re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*"),
+    re.compile(r"~~(?!\s)(.+?)(?<!\s)~~"),
+    re.compile(r"\*(?!\s)(.+?)(?<!\s)\*"),
+    # An underscore counts as emphasis only between two word boundaries:
+    # "read_file_name" is a word of the lesson and not a marker.
+    re.compile(r"(?<!\w)_(.+?)_(?!\w)"),
+    re.compile(r"`(.+?)`"),
+)
 
 
 @dataclass(frozen=True)
@@ -94,10 +110,11 @@ def parse_reply(text: str) -> Reply:
     when that line is "NOTE: SUMMARY:" or "SAY: SUMMARY:", and without a
     SUMMARY: label repeated at its start. Above
     it, the first NOTE line and the first SAY line are taken; a second line of
-    the same kind and any line without a prefix are ignored (their rules are
-    stage 5). Spaces before a prefix are ignored. The prefixes are matched in
-    capitals, as the prompt writes them. A prefix with no text after it counts
-    as absent.
+    the same kind and any line without a prefix are ignored. A reply with
+    neither SAY nor SUMMARY is reported by follows_contract, and the
+    controller shows it in full. Spaces before a prefix are ignored. The
+    prefixes are matched in capitals, as the prompt writes them. A prefix with
+    no text after it counts as absent.
     """
     raw = text.strip()
     note = say = summary = None
@@ -120,6 +137,19 @@ def parse_reply(text: str) -> Reply:
         if say_text and say is None:
             say = say_text
     return Reply(note=note, say=say, summary=summary, raw=raw)
+
+
+def strip_markdown(text: str) -> str:
+    """*text* without the inline markdown markers, for speech only.
+
+    The synthesis reads a marker as a sound, so "**tape**" is heard wrong.
+    Only the markers go; the text between them stays, and what the learner
+    reads in the chat is not changed. A marker that has no pair, or that
+    stands against a space, stays: "2 * 3 * 5" is arithmetic.
+    """
+    for pattern in _MARKDOWN_SPANS:
+        text = pattern.sub(r"\1", text)
+    return text
 
 
 def split_sentences(text: str) -> List[str]:
