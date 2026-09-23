@@ -33,10 +33,9 @@ WHISPER_VAD_SPEECH_PAD_MS = 300   # Padding attached around text fragments to av
 # 0.0 first; the higher values are tried only when the result fails the
 # library's own checks (compression_ratio_threshold catches a repetition loop,
 # log_prob_threshold a low-confidence text), and a result without a loop is
-# preferred. With 0.0 alone a loop is kept: on a Russian word inside an English
-# take, turbo wrote "the word for the word for ..." for about 250 tokens, and
-# all of it went to the chat model and stays in the lesson history. The extra
-# decoding is paid only for a segment that failed.
+# preferred. With 0.0 alone a repetition loop (for example on a word of
+# another language) goes to the chat model and stays in the lesson history.
+# The extra decoding is paid only for a segment that failed.
 WHISPER_TEMPERATURES = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 

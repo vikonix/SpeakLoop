@@ -9,9 +9,7 @@ that may have several lines (speakloop/prompts/free_talk.md, sections OUTPUT
 and SUMMARY). NOTE and SUMMARY are shown and never spoken; SAY is spoken.
 
 Pure code: no config and no I/O. parse_reply() only reports what it found;
-what to do with a reply that breaks the contract belongs to the controller
-(speakloop/app.py shows such a reply in full, does not speak it and writes a
-[System] line about it).
+what to do with a reply that breaks the contract is the caller's decision.
 """
 
 import re

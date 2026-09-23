@@ -6,9 +6,8 @@
 Pure data consumed by speakloop/config.py (assembled into LANGUAGE_PROFILES).
 The profile format is documented in speakloop/languages/__init__.py.
 
-The profile is complete, but the language cannot be selected yet: the tutor
-runs on English until the lesson prompt arrives (stage 3 of the plan in
-docs/refactoring.md).
+The profile is complete, but the language cannot be selected: only the
+English lesson is checked (see config.PRACTICE_LANGUAGE).
 """
 
 PROFILE = {

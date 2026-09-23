@@ -3,8 +3,8 @@
 
 """The lesson prompt: load the free-talk body and fill in its SETTINGS lines.
 
-The body is speakloop/prompts/free_talk.md, the main copy of the prompt
-(docs/refactoring.md, section 10.4). It is the system message of the whole
+The body is speakloop/prompts/free_talk.md, the main copy of the prompt. It
+is the system message of the whole
 lesson and is built once per session: the server reuses the processed prompt
 only while the start of the conversation stays the same.
 

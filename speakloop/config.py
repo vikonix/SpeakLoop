@@ -119,10 +119,9 @@ LANGUAGE_PROFILES = {
     "spanish": spanish.PROFILE,
 }
 
-# The practiced language is FIXED to English in this version. Both profiles are
-# complete, but Spanish is postponed by the owner's decision (docs/refactoring.md,
-# section 8): its lesson has not been checked. No settings key, so nothing
-# promises a choice that does not work yet.
+# The practiced language is fixed to English: only the English lesson is
+# checked. Both profiles are complete. No settings key, so nothing promises a
+# choice that does not work.
 PRACTICE_LANGUAGE = "english"
 _LANG_PROFILE = LANGUAGE_PROFILES[PRACTICE_LANGUAGE]
 
@@ -479,10 +478,9 @@ EXTERNAL_MODEL_PATH = _path(
     "external_model_path",
     paths.models_dir() / models_info.GGUF_CHAT.filename,
 )
-# Neither value below is read from hardware_config.json any more (see
-# docs/model-parameters.md). A file written before stage 2 still holds
-# EXTERNAL_N_GPU_LAYERS and EXTERNAL_N_CTX; reading them would pass -ngl and
-# switch the memory fit off, and would cut the lesson context to 2048 tokens.
+# Neither value below is read from hardware_config.json: an old file can still
+# hold EXTERNAL_N_GPU_LAYERS and EXTERNAL_N_CTX, and reading them would pass
+# -ngl (the memory fit goes off) and cut the lesson context to 2048 tokens.
 
 # Words llama-server's --n-gpu-layers accepts besides a number. "auto" is
 # the default and passes no argument at all, so llama.cpp fits the layers
@@ -494,9 +492,9 @@ def _gpu_layers_setting(value) -> str:
     """The "external_n_gpu_layers" value as llama-server takes it, or "auto".
 
     A string because the result goes to the command line unchanged. A number
-    or "all" is a manual override: it switches the memory fit off, which is
-    the point for an owner who has measured that more layers fit than the fit
-    chooses (docs/model-parameters.md, section 7.3).
+    or "all" is a manual override: it switches the memory fit off, for a
+    machine where more layers fit than the fit chooses
+    (docs/model-parameters.md).
     """
     if value in GPU_LAYERS_WORDS:
         return value
@@ -521,18 +519,15 @@ EXTERNAL_N_GPU_LAYERS = _gpu_layers_setting(
 # treat it as a typo rather than passing it through.
 EXTERNAL_N_CTX = int(_num("external_n_ctx", 16384, minimum=256))
 
-# Sampling. The values Google recommends for Gemma, which its GGUF also carries
-# as the server defaults (docs/model-parameters.md, section 9). They replace
-# temperature 0.3 / top_p 0.9, which were chosen for Llama 3.2 3B; a Gemma
-# lesson with the old values is the comparison to make if the replies turn
-# out too loose.
+# Sampling: the values Google recommends for Gemma, which its GGUF also carries
+# as the server defaults.
 LLM_TEMPERATURE = 1.0
 LLM_TOP_P = 0.95
 # Not a field of the OpenAI API: llm.py sends it only to llama-server. Without
 # it the server takes the default of the loaded GGUF or its own, which is not
 # 64 for every model.
 LLM_TOP_K = 64
-# Long enough for the multi-line SUMMARY of stage 3. At about 5 tokens per
+# Long enough for the multi-line SUMMARY. At about 5 tokens per
 # second on a weak machine a reply this long takes close to two minutes, so
 # the limit is a safety stop and not the expected length.
 LLM_MAX_TOKENS = 512
@@ -544,7 +539,7 @@ LLM_MAX_TOKENS = 512
 # to a repo the installer never fetched. The language is WHISPER_LANGUAGE,
 # resolved from the language profile above.
 WHISPER_MODEL = models_info.WHISPER.repo_id
-WHISPER_BEAM_SIZE = 1         # Beam size 1 provides optimal speed at temperature 0.0
+WHISPER_BEAM_SIZE = 1         # Greedy decoding: the fastest
 WHISPER_NO_SPEECH_THRESHOLD = 0.45
 WHISPER_CPU_THREADS = 4       # CPU inference threads (tune to available core count)
 
@@ -581,13 +576,10 @@ AUDIO_OUTPUT_DEVICE = _HW.get("AUDIO_OUTPUT_DEVICE")
 # complete list of valid keys and as the fallback: a missing or broken schema
 # file, or a missing key inside one, falls back to these values, so the app
 # always starts with a usable (dark) palette.
-#
-# The values are the colors the window had when they were still literals in
-# app.py, so the default look did not change when the view layer was split out.
 _DARK_THEME = {
     # Surfaces
     "bg_main": "#121214",            # window background (darkest surface)
-    "bg_panel": "#1a1a1e",           # chat, status bar, language chip
+    "bg_panel": "#1a1a1e",           # chat, status bar, control panel
     "bg_accent": "#1f1430",          # accent-tinted fill: the idle mic button
     "border": "#25252a",             # chat outline
     "accent": "#8a2be2",             # brand purple: title, focus highlight
@@ -595,7 +587,7 @@ _DARK_THEME = {
     "text": "#f8f8f2",               # chat body
     "text_emph": "#f1f1f6",          # the partner's reply
     "text_bright": "#ffffff",        # the learner's own line, mic glyph, caret
-    "text_dim": "#a0a0a5",           # secondary labels: stats, instruction
+    "text_dim": "#a0a0a5",           # secondary labels: instruction, notes
     "text_muted": "#6272a4",         # [System] lines
     # Status / feedback
     "good": "#50fa7b",               # mic outline while the partner speaks

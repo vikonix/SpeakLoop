@@ -171,8 +171,7 @@ the key differ.
   prompt itself and is never spelled here.
   `_apply_notes_visibility()` is the whole Notes feature: it sets `elide` on
   the two NOTE tags, which hides the corrections already in the chat and every
-  one that comes later, while the transcript inside the widget stays complete
-  (stage 5 reads it). SUMMARY has tags of its own and is never hidden. The
+  one that comes later; the text stays in the widget. SUMMARY has tags of its own and is never hidden. The
   switch itself is outside `_set_input_enabled`: it sends nothing to the model
   and stays usable in every state.
 - [`speakloop/ui_theme.py`](speakloop/ui_theme.py) - the palette (`THEME` from
@@ -256,7 +255,8 @@ the key differ.
   is written first: markdown can be built from jsonl, not the other way round.
   `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its
   meaning, not when an optional one is added. No file is created before the
-  first record, and a file that cannot be written is logged once and then left
+  first record (today that is the first `[System]` line at startup, E1 of
+  `docs/review-2026-09-23.md`), and a file that cannot be written is logged once and then left
   alone - a lesson must not end because a disk is full.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
   client with the conversation history; used by both backends. app.py
@@ -461,7 +461,7 @@ can use them before the requirements step:
   SUMMARY needs its start, and a trimmed start changes the prompt prefix, so
   the server processes the whole history again on every request. A history
   that does not fit the context makes the server refuse the request, and the
-  window shows that error; a rule of its own for this case is stage 5.
+  window shows that error.
 - **Sentence split** (`contract.split_sentences`): SAY is split on
   sentence-ending punctuation followed by whitespace and an uppercase letter
   (`(?<=[.!?])\s+(?=[A-ZА-Я])`), and each sentence is synthesized and played

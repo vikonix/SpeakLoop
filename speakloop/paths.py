@@ -184,8 +184,7 @@ def shipped_themes_dir() -> Path:
     """The theme schemas that travel with the code.
 
     Searched after :func:`themes_dir`, so a user file of the same name wins.
-    Named here rather than joined at the call site because config.py both globs
-    this directory (to list the selectable themes) and reads one file out of it.
+    Named here rather than joined at the call site, like every other location.
     """
     return shipped_root() / "themes"
 

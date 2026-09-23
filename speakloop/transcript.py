@@ -4,7 +4,7 @@
 """The transcript of one lesson: a jsonl file as it happens, a markdown view at
 the end.
 
-Two forms on purpose (docs/refactoring.md, section 10.5). The jsonl file is the
+Two forms on purpose. The jsonl file is the
 main one: one record per line, so the learning system reads the lesson without
 parsing prose, and the line is appended after every event, so a lesson that
 ends in a crash is still on disk. The markdown file is built from the same
@@ -193,8 +193,7 @@ def _markdown_block(record: dict) -> Optional[str]:
 class TranscriptWriter:
     """The two files of one lesson: the jsonl as it happens, the md at the end.
 
-    One writer per lesson. No file is created before the first record, so a
-    session that loads its models and is then closed leaves nothing behind.
+    One writer per lesson. No file is created before the first record.
 
     :meth:`add` and :meth:`save_markdown` may be called from any thread: the
     records of an exchange are written by the exchange thread and the service
@@ -219,7 +218,7 @@ class TranscriptWriter:
         """Keep one record and append it to the jsonl file. (Any thread.)
 
         The meta line is written together with the first record, and not at
-        construction: a lesson nobody spoke in leaves no file at all.
+        construction.
         """
         with self._lock:
             lines = [] if self._records else [to_jsonl(self._meta)]

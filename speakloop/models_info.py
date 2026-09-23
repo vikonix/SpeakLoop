@@ -126,8 +126,7 @@ class PackagedModel(NamedTuple):
 WHISPER = HfRepo(
     "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
     "faster-whisper large-v3-turbo (speech recognition)",
-    # 1 621 668 947 bytes, the sum of the repo file list. Not yet measured
-    # with tools/measure_model_sizes.py.
+    # 1 621 668 947 bytes, the sum of the repo file list.
     size_mb=1622,  # summed 2026-09-16
     weights_file="model.bin",
 )
@@ -179,7 +178,7 @@ GGUF_CHAT = HfFile(
     "lmstudio-community/gemma-4-12B-it-QAT-GGUF",
     "gemma-4-12B-it-QAT-Q4_0.gguf",
     "Gemma 4 12B IT QAT Q4_0 (chat model for llama-server)",
-    # 6 975 878 560 bytes, docs/model-parameters.md section 1.
+    # 6 975 878 560 bytes.
     size_mb=6976,  # measured 2026-09-14
 )
 

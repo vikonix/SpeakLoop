@@ -1341,6 +1341,10 @@ alive»), но `playback.stop()` уже сработал. Фраза «I prefer 
 C6 (параметры `LLMManager` в конструкторе) ждёт решения по запасной модели
 (E8 ревью).
 
+После связанности - раздел 6 ревью «Комментарии»: шаг K (K1-K4 и
+устаревшие места `AGENTS.md`, D1). K5 (сокращение длинных комментариев) и K6
+(стиль) не входят.
+
 **Решения владельца 2026-09-23 (после R2):**
 
 - Цепочка перезапуска (`lifecycle.relaunch_command`, `spawn_replacement`,
@@ -1510,6 +1514,41 @@ LM Studio и полагался на то, что для llama-server это с�
 
 Шаги R1-R4 закрыты. Из раздела 4 ревью остались C5 (строки `[System]`,
 обсуждается вместе с интерфейсом) и C6 (ждёт решения по E8).
+
+**На удаление:** нет.
+
+#### Шаг K: комментарии (проверен)
+
+Меняются только комментарии и docstring-и, код не меняется.
+
+**Что сделано:**
+
+- K1, упоминания задач и плана убраны: `app.py`, `config.py`,
+  `conversation.py`, `llm.py`, `playback.py`, `prompt.py`, `transcript.py`,
+  `lifecycle.py`, `languages/spanish.py`, `models_info.py`; у ссылок на
+  `docs/model-parameters.md` убраны номера разделов (`llm.py`,
+  `llm_server_ctl.py`, `config.py`, `detect_hardware.py`);
+- K2, история заменена сутью: `ui.py`, `config.py`, `recorder.py`, `tts.py`,
+  `stt.py`, `lifecycle.py`, `llm_server_ctl.py` (`--cache-reuse` без
+  llama-cpp-python);
+- K3, устаревшие и неверные места исправлены: `ui_theme.py` (заголовок, чип
+  языка), `config.py` (палитра, `WHISPER_BEAM_SIZE`), `loader.py`, `paths.py`,
+  `lifecycle.py` (ссылка на `bootstrap.early_init`), `ui.py` (Notes и
+  транскрипт), `recorder.py` (устройство записи), `app.py` и `transcript.py`
+  (файл создаётся с первой записью, см. E1);
+- K4, описание чужого поведения убрано: `contract.py`, `tts.py`,
+  `llm_server_ctl.py` (поля `adopted`, `last_error`, `served_n_ctx`),
+  `ui.py` (`ViewCallbacks`);
+- D1: `AGENTS.md` (Notes, файл транскрипта, «stage 5»).
+
+**Проверка:**
+
+- `python -m unittest discover -s tests -v` проходит;
+- приложение запускается, урок идёт (достаточно одной реплики и `finish`).
+
+**Первый прогон (2026-09-23):** 566 тестов проходят. Урок из одной реплики
+голосом и `finish`, итог и оба файла транскрипта записаны, ошибок и
+предупреждений в логе нет.
 
 **На удаление:** нет.
 

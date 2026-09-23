@@ -20,9 +20,9 @@ Two roles live here, split on purpose:
   rate (winsound on Windows, sounddevice elsewhere), so it works unchanged
   with either backend.
 
-``TTSManager`` is the facade app.py composes: it owns the playback path and
-delegates synthesis to the selected backend, exposing that backend's rate as
-``sample_rate`` - which the controller reads, never a constant.
+``TTSManager`` is the facade: it owns the playback path and delegates
+synthesis to the selected backend. Its ``sample_rate`` is that backend's rate;
+callers never assume a constant.
 """
 
 import io
@@ -328,8 +328,8 @@ class TTSManager:
                 # No AUDIO_LOCK here (unlike the sounddevice branch and
                 # the recorder): that lock guards the PortAudio init and
                 # teardown, and winsound does not touch PortAudio at all.
-                # Taking it here was what made a recording wait for the speech
-                # to end, which cut the beginning of the take off.
+                # Taken here, it makes a new recording wait for the speech to
+                # end, which cuts the beginning of the take off.
                 #
                 # Prepend silence so the Windows audio session can start
                 # without clipping the first 150 ms. The lead-in follows the

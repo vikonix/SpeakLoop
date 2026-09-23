@@ -77,9 +77,8 @@ INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and resta
 WINDOW_WIDTH = 500
 WINDOW_HEIGHT = 700
 
-# Mic button geometry (canvas is 72x72, so the center is at 36,36). The button
-# now stands beside the text entry in the control panel, so it is smaller than
-# the single big button it replaced.
+# Mic button geometry (canvas is 72x72, so the center is at 36,36). Small
+# enough to stand beside the text entry in the control panel.
 _MIC_CANVAS_SIZE = 72
 _MIC_CENTER = 36
 _MIC_R_OUTER = 30
@@ -156,8 +155,8 @@ class ViewCallbacks:
     Three handlers carry a value, and the view never passes a widget: the text
     entry is read and cleaned here (on_text_submitted), a command button sends
     its own prompt word (on_command_pressed), and the Notes switch reports the
-    state it has just taken (on_notes_toggled). Hiding the notes is the view's
-    own business; the controller only saves the choice.
+    state it has just taken (on_notes_toggled). The view hides the notes
+    itself.
     """
     on_mic_pressed: Callable[[], None]
     on_space_pressed: Callable[[], None]
@@ -262,9 +261,8 @@ class TutorView:
         header_frame = tk.Frame(self.root, bg=THEME["bg_main"], height=60)
         header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(10, 5))
 
-        # The language of the lesson is part of the title. The separate
-        # "<explanation> -> <target>" label was dropped with it: the explanation
-        # language is fixed and was never a choice the window had to show.
+        # The language of the lesson is part of the title; the explanation
+        # language is fixed and not shown.
         tk.Label(header_frame,
                  text=f"{APP_NAME.upper()} • "
                       f"{self._settings.lesson_language} Voice Tutor",
@@ -272,9 +270,8 @@ class TutorView:
                  fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
 
     def _build_status_bar(self):
-        # The state of the window alone. The STT and LLM durations of the last
-        # exchange are in logs/main.log; on the screen they said nothing the
-        # learner could act on.
+        # The state of the window alone. The STT and LLM durations are in
+        # logs/main.log.
         status_bar = tk.Frame(self.root, bg=THEME["bg_panel"], height=30)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -512,9 +509,8 @@ class TutorView:
 
         The corrections are always written into the transcript: hiding them is
         a property of their tags, so one call covers the notes already in the
-        chat and every note that arrives later. The transcript stays complete,
-        which is what the lesson summary and the transcript file will read.
-        SUMMARY has tags of its own and is never hidden.
+        chat and every note that arrives later. SUMMARY has tags of its own
+        and is never hidden.
         """
         for tag in _NOTE_TAGS:
             self.chat_display.tag_configure(tag, elide=not self._notes_shown)

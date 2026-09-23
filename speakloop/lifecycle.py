@@ -6,8 +6,8 @@
 Kept apart from the controller because both are process-level and Tk-free.
 The controller keeps the orchestration (quit_app, which releases the app's own
 resources first) and calls these to end or replace the process.
-spawn_replacement() has no caller yet: it is here for an in-session restart
-(for example after a restart-only setting changes).
+spawn_replacement() restarts the application, for example after the models
+are downloaded or after a setting that needs a restart.
 """
 
 import logging
@@ -60,8 +60,8 @@ def relaunch_command() -> list:
     """The command that starts this application again, the way it was started.
 
     Three launch forms reach the same code, and they need three different
-    commands. Prepending sys.executable to sys.argv - which is what this used
-    to do unconditionally - is right for exactly one of them:
+    commands. Prepending sys.executable to sys.argv is right for exactly one
+    of them:
 
     * ``python main.py`` (and any direct script path): sys.argv[0] is a .py
       file, so the interpreter goes in front, as before.
@@ -113,7 +113,7 @@ def spawn_replacement():
     The replacement must not share the dying parent's console/stdio: when
     launched from an IDE, the IDE closes those pipes as soon as the parent
     exits and the child's first print would crash with [Errno 22] (the same
-    failure mode the app.py module-top comment describes for os.execv). So
+    failure mode bootstrap.early_init describes for os.execv). So
     stdio is pointed at DEVNULL - the app logs to logs/main.log anyway -
     and on Windows the child is detached from the console and, when the
     launcher allows it, broken out of the IDE's job object so "stop" in the

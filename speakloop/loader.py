@@ -4,8 +4,8 @@
 """Configuration loading machinery - pure, stateless helpers.
 
 This module holds the *mechanics* of building SpeakLoop's configuration: reading
-JSON files, validating individual settings, creating directories, probing the
-cache and the compute device. None of it runs at import time and none of it
+JSON files, validating individual settings, writing settings.json atomically,
+probing the cache and the compute device. None of it runs at import time and none of it
 keeps global state - every function takes what it needs as arguments and returns
 a value. That keeps the rules (range checks, type checks, fallbacks) unit-testable
 in isolation, without a filesystem or the heavy ML stack.

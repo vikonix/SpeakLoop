@@ -51,8 +51,9 @@ PROPS_TIMEOUT_SEC = 2.0
 #   --parallel 1     : the default (-1) opens several slots, splits the context
 #                      between them and routes a request to whichever slot is
 #                      most similar, which fragments the prefix cache.
-#   --cache-reuse 256: keeps prefix reuse at the level llama-cpp-python gave,
-#                      which the stable system prompt of llm.py relies on.
+#   --cache-reuse 256: reuses cached chunks of the prompt when its middle
+#                      changes; the stable system prompt of llm.py relies on
+#                      the prefix cache.
 # --ctx-size is passed explicitly for the same reason: the default (0) takes
 # the model's own training context and inflates the KV cache to fill free VRAM.
 LLAMA_SERVER_PARALLEL_SLOTS = 1
@@ -67,7 +68,7 @@ AUTO_GPU_LAYERS = "auto"
 # last few tokens of a prompt, so a learner's reply of about 34 tokens arrives
 # as a batch of 30 and ran on the CPU: 2.5 s instead of 1.5 s on the reference
 # laptop. At 16 tokens both paths cost the same, so a lower value gains
-# nothing (docs/model-parameters.md, section 4.9). No effect when every layer
+# nothing (docs/model-parameters.md). No effect when every layer
 # is on the GPU or on a CPU build.
 OP_OFFLOAD_MIN_BATCH_VAR = "GGML_OP_OFFLOAD_MIN_BATCH"
 OP_OFFLOAD_MIN_BATCH = 16
@@ -108,7 +109,7 @@ def llama_server_command(exe_path: str, model_path: str, host: str, port: int,
     GPU layers: with *n_gpu_layers* "auto" no --n-gpu-layers is passed, so
     llama.cpp fits the layers into the free VRAM itself (-fit, on by
     default). Any other value is passed as it is, and an explicit value
-    switches that fit off (docs/model-parameters.md, section 3).
+    switches that fit off (docs/model-parameters.md).
 
     -fitc equals the context: without it the fit shrinks the context, with no
     error, when the VRAM is short. The lesson needs its context more than a few
@@ -240,18 +241,15 @@ class LLMServerController:
         # (load_components) and is never retried after shutdown.
         self._shutdown_requested = False
         # Set when start() found a server already listening and used it as it
-        # is. Public, because app.py has to tell the user: that server keeps
-        # the model, context size and GPU layers it was started with, which are
-        # not necessarily the ones this run configured.
+        # is. That server keeps the model, context size and GPU layers it was
+        # started with, which are not necessarily the ones this run configured.
         self.adopted = False
-        # One short sentence for the window after a failed start(), or None.
-        # The full reason is always in the log; this is the part of it a user
-        # can act on (see app.py, which shows it in the chat).
+        # One short sentence for the user after a failed start(), or None.
+        # The full reason is always in the log.
         self.last_error: Optional[str] = None
         # Per-slot context the ready server reports through /props, or None
         # when it did not say. Read for a launched server as well as for an
-        # adopted one: -fitc should keep the configured value, and app.py
-        # tells the user when the server still has less.
+        # adopted one: the memory fit can still shrink the context.
         self.served_n_ctx: Optional[int] = None
 
     def _build_command(self) -> Optional[list]:

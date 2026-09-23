@@ -8,8 +8,8 @@ the learner's phrases, and returns every reply split by the contract
 (speakloop/contract.py). The conversation history itself stays in LLMManager.
 
 The commands of the prompt (simpler, hint, new topic, finish) get no special
-handling in this version: the learner says them, and they go to the model as
-recognized, like any other phrase (docs/refactoring.md, section 10.4).
+handling: they go to the model as the learner gave them, like any other
+phrase.
 """
 
 import logging

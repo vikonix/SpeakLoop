@@ -127,8 +127,7 @@ def _setup_logging() -> None:
 # next to the chat model. Gemma 4 12B Q4_0 takes about 6.5 GiB, its 16k
 # context and compute buffers add more, and Kokoro opens a CUDA context of its
 # own. Below this size the chat model needs the whole card, and synthesis
-# loses little on the CPU next to its answer time (docs/model-parameters.md,
-# sections 3.4 and 7.2).
+# loses little on the CPU next to its answer time (docs/model-parameters.md).
 #
 # faster-whisper is NOT under this rule: recognition is slower on the CPU, and
 # much slower with a large model, so it stays on any card ctranslate2 can use.

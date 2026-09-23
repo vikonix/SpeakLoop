@@ -12,8 +12,8 @@ Why an event per reply and not one event for the application: with a single
 event the stop had to be cleared again before the next reply, and the clear
 happened in the worker of the OLD exchange, after a new recording had already
 set it. The interrupt was then lost and the abandoned reply was spoken over the
-new take (problem 1 in docs/refactoring.md). An event that belongs to one reply
-is only ever set, never cleared, so nothing can revoke an interrupt.
+new take. An event that belongs to one reply is only ever set, never cleared,
+so nothing can revoke an interrupt.
 
 Threading contract:
   * ``new_event()`` and ``stop()`` run on the Tk main thread only: they replace

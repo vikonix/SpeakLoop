@@ -74,7 +74,7 @@ def request_extra_body(backend: str):
       enable_thinking=true to Gemma's chat template by default, and the model
       then thinks for 40 s or more before a one-line reply; the thinking goes
       to reasoning_content, which this module never reads
-      (docs/model-parameters.md, section 4.8). A template without the
+      (docs/model-parameters.md). A template without the
       variable ignores it, so the fallback model is not affected.
     - top_k, which the OpenAI API does not have.
 
@@ -124,8 +124,7 @@ class LLMManager:
         self._messages_lock = threading.Lock()
         # The context size the server reported for the last finished reply:
         # the whole conversation after that reply, in tokens. None when no
-        # reply has finished yet, or when the last one was interrupted. Read
-        # by the transcript and, from step 5c, by the context warning.
+        # reply has finished yet, or when the last one was interrupted.
         self.last_total_tokens: Optional[int] = None
 
     def start_conversation(self, system_prompt: str):
@@ -251,7 +250,7 @@ class LLMManager:
             # The whole history is kept, without trimming. The lesson SUMMARY
             # needs its start, and a trimmed start changes the prompt prefix,
             # so the server processes the whole history again on every
-            # request (docs/refactoring.md, section 7.2). A history that no
+            # request. A history that no
             # longer fits the context makes the server refuse the request,
             # and that error goes to the window like any other.
             with self._messages_lock:

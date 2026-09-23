@@ -61,12 +61,9 @@ def warm_up_resampler(source_rate: int = _TYPICAL_DEVICE_RATE):
     """Load and compile the resampler before the first take needs it.
 
     get_audio() resamples every take from the device's own rate to
-    config.AUDIO_SAMPLE_RATE. The FIRST such call imports librosa and pays for
-    its compilation: measured at 9.6 s on 2026-09-12, and the learner paid it
-    between the end of their first phrase and the recognition, with the window
-    showing "Processing" the whole time. Called during the start-up warm-up
-    instead, the same seconds are spent where the window already says that the
-    models are loading.
+    config.AUDIO_SAMPLE_RATE. The FIRST such call imports librosa and compiles
+    it, which takes seconds. Paid here, during the start-up warm-up, it does
+    not stand between the learner's first phrase and the answer.
 
     The rate only decides which ratio is prepared; the cost is in the import,
     so the default is the usual device rate rather than the real one, which is
@@ -214,7 +211,8 @@ class AudioRecorder:
         falls back to the configured device at 16 kHz when WASAPI or its device
         cannot be resolved.
         """
-        # An explicit device from hardware detection always wins.
+        # A device set by hand in hardware_config.json always wins
+        # (detect_hardware writes null).
         if config.AUDIO_INPUT_DEVICE is not None:
             return config.AUDIO_INPUT_DEVICE, config.AUDIO_SAMPLE_RATE
         try:
@@ -245,9 +243,8 @@ class AudioRecorder:
             # is atomic under the GIL, and recorded_chunks is only read after
             # the stream is closed and this thread is joined (see join and
             # get_audio), so there is no concurrent reader to guard against.
-            # Holding record_lock here was the cause of dropped samples
-            # (audible clicks) while the GUI thread held the same lock during a
-            # start or a stop.
+            # A lock here drops samples (audible clicks) whenever the GUI
+            # thread holds it during a start or a stop.
             if status:
                 callback_warnings.append(str(status))
             self.recorded_chunks.append(indata.copy())

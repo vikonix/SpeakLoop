@@ -111,8 +111,7 @@ class VoiceTutorController:
         # Thread management
         self.shutdown_event = threading.Event()
         # One exchange at a time. A take made while the previous exchange still
-        # runs waits for this lock instead of being dropped - losing it was the
-        # second half of the interrupt race (problem 1 in docs/refactoring.md).
+        # runs waits for this lock instead of being dropped.
         self._exchange_lock = threading.Lock()
 
         # True once the models are loaded: nothing may be recorded before that.
@@ -155,9 +154,8 @@ class VoiceTutorController:
         # untouched by "lm-studio": all of its methods are no-ops until start().
         self._llm_server = LLMServerController()
 
-        # The transcript of this lesson (speakloop/transcript.py). Built
-        # here with the settings of the run, but no file is created before the
-        # first record: a session that is closed while it loads leaves none.
+        # The transcript of this lesson (speakloop/transcript.py), with the
+        # settings of the run. Its files are created with the first record.
         self._lesson_start = datetime.now()
         # The phrase of the learner the records belong to. The opening question
         # of the model answers no phrase of the learner and keeps 0.
@@ -288,10 +286,9 @@ class VoiceTutorController:
                 served_n_ctx = self._llm_server.served_n_ctx
                 if (served_n_ctx is not None
                         and served_n_ctx < config.EXTERNAL_N_CTX):
-                    # A warning and not a refusal (docs/model-parameters.md,
-                    # section 3.3): a short lesson still works. In the chat
-                    # and not in the status bar, which the next state change
-                    # overwrites at once.
+                    # A warning and not a refusal: a short lesson still
+                    # works. In the chat and not in the status bar, which the
+                    # next state change overwrites at once.
                     self._system(f"Warning: the model has a context of "
                                  f"{served_n_ctx} tokens instead of "
                                  f"{config.EXTERNAL_N_CTX}. A long lesson "
