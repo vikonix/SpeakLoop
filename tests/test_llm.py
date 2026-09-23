@@ -28,7 +28,8 @@ from unittest.mock import MagicMock, patch
 
 from speakloop import config
 from speakloop.llm import (
-    LLMManager, error_message, request_extra_body, usage_log_line)
+    EmptyCutReplyError, LLMManager, error_message, is_context_overflow,
+    request_extra_body, usage_log_line)
 
 
 class ApiError(Exception):
@@ -78,6 +79,33 @@ class ErrorMessageTests(unittest.TestCase):
         self.assertEqual(error_message(RuntimeError("no client")), "no client")
 
 
+class ContextOverflowTests(unittest.TestCase):
+    def test_the_llama_server_error_type_is_recognized(self):
+        # The OpenAI client unwraps the outer "error" key.
+        error = ApiError("400", {
+            "code": 400, "type": "exceed_context_size_error",
+            "message": "the request exceeds the available context size, "
+                       "try increasing it"})
+        self.assertTrue(is_context_overflow(error))
+
+    def test_the_type_inside_an_error_key_is_recognized(self):
+        error = ApiError("400", {"error": {
+            "type": "exceed_context_size_error", "message": "full"}})
+        self.assertTrue(is_context_overflow(error))
+
+    def test_a_message_about_the_context_length_is_recognized(self):
+        error = ApiError("400", {"error": {
+            "message": "Context length exceeded. Trying to keep 20000 tokens"}})
+        self.assertTrue(is_context_overflow(error))
+
+    def test_another_error_is_not_an_overflow(self):
+        error = ApiError(LONG, {"error": {"message": "No models loaded."}})
+        self.assertFalse(is_context_overflow(error))
+
+    def test_a_transport_error_is_not_an_overflow(self):
+        self.assertFalse(is_context_overflow(ConnectionError("refused")))
+
+
 class RequestExtraBodyTests(unittest.TestCase):
     def test_llama_server_gets_thinking_off(self):
         # Without it Gemma thinks for 40 s before a one-line reply
@@ -112,10 +140,11 @@ class UsageLogLineTests(unittest.TestCase):
         self.assertIn("unknown", usage_log_line(None))
 
 
-def _chunk(text):
+def _chunk(text, finish_reason=None):
     """One streamed chunk, shaped like the part of the OpenAI answer llm.py reads."""
     return SimpleNamespace(
-        choices=[SimpleNamespace(delta=SimpleNamespace(content=text))],
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=text),
+                                 finish_reason=finish_reason)],
         usage=None)
 
 
@@ -227,6 +256,17 @@ class AskRequestTests(unittest.TestCase):
                          [{"role": "system", "content": SYSTEM_PROMPT},
                           {"role": "user", "content": "Hi"}])
 
+    def test_a_complete_reply_is_not_cut(self):
+        self._ask("llama-server",
+                  REPLY_CHUNKS + [_chunk("", finish_reason="stop")])
+        self.assertFalse(self.manager.last_reply_cut)
+
+    def test_a_reply_stopped_by_the_length_limit_is_cut(self):
+        # The server stopped it at max_tokens or at the end of the context.
+        self._ask("llama-server",
+                  REPLY_CHUNKS + [_chunk("", finish_reason="length")])
+        self.assertTrue(self.manager.last_reply_cut)
+
     def test_the_usage_chunk_does_not_change_the_reply(self):
         # Its choices list is empty; reading choices[0] would raise.
         reply, _ = self._ask("llama-server",
@@ -294,6 +334,18 @@ class FailureTests(unittest.TestCase):
         with self.assertLogs(level="ERROR"), \
                 self.assertRaises(RuntimeError):
             manager.ask("Hi", threading.Event())
+        self.assertEqual(len(manager.messages), 1)
+
+    def test_an_empty_reply_cut_off_is_a_full_context(self):
+        # The model used the last free tokens and wrote no text: the window
+        # must say that the context is full, not "empty reply".
+        manager = _manager()
+        manager.client.chat.completions.create.return_value = _stream_of(
+            [_chunk(""), _chunk("", finish_reason="length")])
+        with self.assertLogs(level="ERROR"), \
+                self.assertRaises(EmptyCutReplyError) as caught:
+            manager.ask("Hi", threading.Event())
+        self.assertTrue(is_context_overflow(caught.exception))
         self.assertEqual(len(manager.messages), 1)
 
 

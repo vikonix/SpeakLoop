@@ -100,7 +100,9 @@ the key differ.
   `recorder.start()` has agreed to the take: a refused take that had already
   stopped the playback left the exchange in flight without an answer and the
   window in its processing state for good (problem 13 in
-  `docs/refactoring.md`). A typed phrase enters the same flow at the model
+  `docs/refactoring.md`). A press within `LATE_STOP_WINDOW_SECONDS` (1.5 s)
+  after an automatic stop (`_auto_stop`: a pause or the time limit) is the
+  learner's late stop and opens no take. A typed phrase enters the same flow at the model
   request: `on_text_submitted` stops the speech of the previous reply, writes
   the phrase into the chat and gives `_run_typed_exchange` a stop event of its
   own, so voice and keyboard share every step from `_ask_model` on. A command
@@ -110,9 +112,14 @@ the key differ.
   (`config.save_user_setting`); the hiding itself is the view's.
   `_record` and `_system` are the two ways into the transcript: every event of
   the lesson becomes a record, and `_system` is the ONE place a `[System]`
-  line is written, so the window and the file always say the same. `_turn`
-  counts the phrases of the learner and a reply carries the number of the
-  phrase it answers, which is what joins a NOTE to the phrase it corrects.
+  line is written, so the window and the file always say the same. A phrase
+  of the learner gets its number from `_next_turn` (under a lock: typed
+  phrases are numbered on the Tk thread, spoken ones on the exchange thread)
+  and the number is passed on explicitly, so a reply carries the number of
+  the phrase it answers, which is what joins a NOTE to the phrase it corrects.
+  A phrase that gets no answer because a new take started (superseded before
+  the model call, or its reply interrupted) gets the `UNANSWERED_MESSAGE`
+  line (`_report_unanswered`, not during quit).
   `_record_reply` puts `llm_ms` and `tokens` on the first record of a reply
   (the same numbers on a NOTE and a SAY would read as two answers) and writes
   the markdown view when the summary arrives; `quit_app` writes it again, for
@@ -130,7 +137,8 @@ the key differ.
   contract also gets a `[System]` line, written after the reply itself so the
   window and the file both hold the two in that order; the model is not asked
   again.
-  `_enter_if_current` runs a view intent on the Tk thread only for the reply
+  Every window state a worker sets goes through `_enter_later`, which runs
+  the intent on the Tk thread through `_enter_if_current`: only for the reply
   that is still current, so a late worker cannot draw over a new take.
   Module-level `run(append_log)` configures logging, logs
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
@@ -198,8 +206,11 @@ the key differ.
   Windows (MME drops samples) and downsamples the take to
   `config.AUDIO_SAMPLE_RATE` with librosa. Its four callbacks
   (`on_max_duration`, `on_silence_stop`, `on_stream_error`, `on_level`) all run
-  on the capture thread. The realtime callback takes **no lock** - that was the
-  source of dropped samples - so the buffer may only be read after `join()`.
+  on the capture thread. Every take is a `Take` of its own (chunks, capture
+  rate, thread): `stop()` returns it, and `join(take)` and `get_audio(take)`
+  work on that object, so a new take cannot empty or resample a take that has
+  not been read. The realtime callback takes **no lock** - that was the
+  source of dropped samples - so a take may only be read after `join()`.
 - [`speakloop/audio_io.py`](speakloop/audio_io.py) - the device plumbing both
   the microphone and the speaker need: `reset_portaudio()` (Windows only, and
   skipped while any stream is open - it invalidates every stream in the
@@ -243,9 +254,14 @@ the key differ.
   `LLMManager`: `open()` sends `OPENING_MESSAGE` ("Begin.", a user message the
   chat template needs before the first question; it stays in the history and
   is never shown), `answer()` sends the learner's phrase **as recognized**
-  (the prompt commands get no special handling yet, `docs/refactoring.md`
-  10.4). Both return a parsed `Reply`, or None after an interrupt, and log a
-  warning for a reply outside the contract.
+  (the prompt commands get no special handling). Both return a parsed
+  `Reply`, or None after an interrupt, and log a warning for a reply outside
+  the contract. `context_level_reached()` is the pure rule of the context
+  warning: the highest of `CONTEXT_WARNING_LEVELS` (80 and 90 percent) that
+  the token count has reached above the level already shown; the last level
+  also comes when fewer than `reserve` tokens are left (app.py passes
+  `CONTEXT_RESERVE_TOKENS`, two reply limits), because on a small context 10
+  percent is less than a summary needs.
 - [`speakloop/transcript.py`](speakloop/transcript.py) - the two files of one
   lesson. The record functions are pure (a record is a dict, the clock is an
   argument), `TranscriptWriter` owns the files and one lock, because records
@@ -272,13 +288,21 @@ the key differ.
   the user is told.
   `error_message()` is that text - the server's own sentence out of the JSON
   body, since `str()` of an API error is the whole HTTP problem.
+  `is_context_overflow()` recognizes a refusal because the context is full:
+  llama-server's error type `exceed_context_size_error`, a message about
+  the context length (LM Studio), or `EmptyCutReplyError`, which `ask()`
+  raises for a reply cut off by the length limit before any text (the model
+  used the last free tokens and wrote nothing). `last_reply_cut` is True when the server
+  ended the last reply with `finish_reason: "length"` (the reply limit or the
+  end of the context): such a reply looks complete, so app.py shows
+  `CUT_REPLY_MESSAGE` under it.
   Every request asks for the usage report
   (`stream_options.include_usage`): the last chunk of the stream then has the
   usage and **no choices**, so the loop must skip it, and `usage_log_line()`
   writes the context size to `logs/main.log` after each reply ("unknown"
   after an interrupt, which ends the stream before the report).
-  `last_total_tokens` keeps that number for the transcript (and, from step 5c,
-  for the context warning): it is cleared before every request, so a caller
+  `last_total_tokens` keeps that number for the transcript and the context
+  warning: it is cleared before every request, so a caller
   never reads the size of the reply before it.
   `LLM_TIMEOUT` (360 s) is the longest pause before the first token on a weak
   machine, and the client makes **no retries** (a retry repeats the prompt
@@ -460,8 +484,13 @@ can use them before the requirements step:
 - **Whole history** (`llm.py`): the conversation is never trimmed. The lesson
   SUMMARY needs its start, and a trimmed start changes the prompt prefix, so
   the server processes the whole history again on every request. A history
-  that does not fit the context makes the server refuse the request, and the
-  window shows that error.
+  that does not fit the context makes the server refuse the request. Before
+  that, app.py (`_warn_if_context_fills`) shows one `[System]` line at 80 and
+  one at 90 percent of the context (the server's `served_n_ctx`, or
+  `external_n_ctx` when the server reports none, as LM Studio does) with the
+  advice to say "finish" (not after a SUMMARY: the lesson is over); after a
+  refusal it shows `CONTEXT_FULL_MESSAGE` instead of the server's text,
+  because even "finish" no longer fits.
 - **Sentence split** (`contract.split_sentences`): SAY is split on
   sentence-ending punctuation followed by whitespace and an uppercase letter
   (`(?<=[.!?])\s+(?=[A-ZА-Я])`), and each sentence is synthesized and played
@@ -499,9 +528,9 @@ can use them before the requirements step:
   drop them. For the same reason every reply that queued a sentence must end
   with one marker; a failed or interrupted request queues nothing.
 - **A take during the previous exchange** (`app.py`): it is neither dropped nor
-  run in parallel. `_finalize_recording` collects the take BEFORE it waits for
-  `_exchange_lock` (a later take would otherwise replace the chunk buffer it is
-  about to read), and the previous exchange gives the lock up quickly because
+  run in parallel. `_finalize_recording` gets its own `Take` from
+  `trigger_recording_stop` and waits for `_exchange_lock`, and the previous
+  exchange gives the lock up quickly because
   the new take already set its stop event. An exchange whose event was set
   before the model call shows the recognized phrase and asks nothing. Only a
   take that really starts may set that event: see `trigger_recording_start`

@@ -65,6 +65,40 @@ def error_message(error: Exception) -> str:
     return str(error) or error.__class__.__name__
 
 
+# The error type llama-server gives a request that does not fit the context.
+CONTEXT_OVERFLOW_TYPE = "exceed_context_size_error"
+
+
+class EmptyCutReplyError(RuntimeError):
+    """The server stopped the reply at the length limit before any text.
+
+    Near the end of the context the model can use the last free tokens
+    without writing any text, so the context is as full as after a refusal.
+    """
+
+
+def is_context_overflow(error: Exception) -> bool:
+    """True when the context is too full for an answer.
+
+    A refusal of the server, or a reply cut off before any text
+    (EmptyCutReplyError). llama-server names the refusal in the error type.
+    Other servers (LM Studio) only say it in words, so the message is read
+    too.
+    """
+    if isinstance(error, EmptyCutReplyError):
+        return True
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        inner = body.get("error")
+        error_type = (inner.get("type") if isinstance(inner, dict)
+                      else body.get("type"))
+        if error_type == CONTEXT_OVERFLOW_TYPE:
+            return True
+    text = error_message(error).lower()
+    return "context" in text and any(
+        word in text for word in ("exceed", "too long", "length", "overflow"))
+
+
 def request_extra_body(backend: str):
     """Fields outside the OpenAI API to send with a chat request, or None.
 
@@ -126,6 +160,10 @@ class LLMManager:
         # the whole conversation after that reply, in tokens. None when no
         # reply has finished yet, or when the last one was interrupted.
         self.last_total_tokens: Optional[int] = None
+        # True when the last finished reply was cut off: the server stopped
+        # it at the reply limit (max_tokens) or at the end of the context
+        # (finish_reason "length"). Such a reply looks complete otherwise.
+        self.last_reply_cut = False
 
     def start_conversation(self, system_prompt: str):
         """Begin a new conversation with *system_prompt* as its system message."""
@@ -190,6 +228,7 @@ class LLMManager:
         # Cleared before the request: a caller reads this number after a reply,
         # and the number of the reply before it would be worse than none.
         self.last_total_tokens = None
+        self.last_reply_cut = False
 
         try:
             # Append user message and snapshot history for the API call.
@@ -219,6 +258,7 @@ class LLMManager:
             ) as stream_response:
                 reply = ""
                 usage = None
+                finish_reason = None
 
                 for chunk in stream_response:
                     if stop_event.is_set():
@@ -231,7 +271,10 @@ class LLMManager:
                     if not chunk.choices:
                         continue
 
-                    reply += chunk.choices[0].delta.content or ""
+                    choice = chunk.choices[0]
+                    reply += choice.delta.content or ""
+                    finish_reason = (getattr(choice, "finish_reason", None)
+                                     or finish_reason)
 
             # Checked after the stream and not only inside it: an event set
             # during the last chunk also means that nobody waits for the reply.
@@ -245,6 +288,10 @@ class LLMManager:
             if not final_reply:
                 # An error and not a stand-in text: a stand-in in the history
                 # would show the model a reply outside the lesson contract.
+                if finish_reason == "length":
+                    raise EmptyCutReplyError(
+                        "The reply was cut off before any text: the context "
+                        "or the reply limit is full.")
                 raise RuntimeError("The model returned an empty reply.")
 
             # The whole history is kept, without trimming. The lesson SUMMARY
@@ -260,6 +307,10 @@ class LLMManager:
             logging.info(usage_log_line(usage))
             if usage is not None:
                 self.last_total_tokens = usage.total_tokens
+            if finish_reason == "length":
+                self.last_reply_cut = True
+                logging.warning("The reply was cut off at the reply limit or "
+                                "at the end of the context.")
             return final_reply
 
         except Exception:

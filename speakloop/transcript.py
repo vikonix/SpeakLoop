@@ -110,7 +110,9 @@ def event_record(moment: datetime, turn: int, record_type: str, text: str,
 
     *turn* is the number of the phrase of the learner the event belongs to, and
     the reply to that phrase carries the same number: that is what joins a
-    correction to the phrase it corrects, without a reader counting lines.
+    correction to the phrase it corrects, without a reader counting lines. A
+    system record about no phrase in particular carries the number of the
+    latest phrase before it.
 
     An *extra* field that is None is dropped, so a record never carries an
     empty measurement. A zero is kept: it is a measurement.

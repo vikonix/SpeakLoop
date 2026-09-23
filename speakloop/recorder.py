@@ -3,9 +3,9 @@
 
 """Microphone capture and recorded-signal helpers.
 
-AudioRecorder owns the capture thread, the input device choice and the raw
-chunk buffer; the controller only starts and stops takes and collects the
-result as one 16 kHz numpy array. The pure signal helper (normalize_audio)
+AudioRecorder owns the capture thread and the input device choice; every
+take keeps its own chunks and capture rate (Take). The controller only starts
+and stops takes and collects each result as one 16 kHz numpy array. The pure signal helper (normalize_audio)
 lives here too, so the whole microphone side of the audio path is in this
 module.
 """
@@ -78,11 +78,29 @@ def warm_up_resampler(source_rate: int = _TYPICAL_DEVICE_RATE):
                  (time.perf_counter() - started) * 1000)
 
 
+class Take:
+    """One recording: its capture thread, its raw chunks and its capture rate.
+
+    A take belongs to the caller that stopped it. A new take gets a new
+    object, so it cannot empty or resample the chunks of a take that has not
+    been read yet.
+    """
+
+    def __init__(self):
+        self.chunks: List[np.ndarray] = []
+        # Rate the microphone is actually captured at. The device's own rate
+        # is used (through WASAPI on Windows) to avoid the driver's
+        # low-quality resampling; get_audio() downsamples to 16 kHz.
+        self.sample_rate: int = config.AUDIO_SAMPLE_RATE
+        self.thread: Optional[threading.Thread] = None
+
+
 class AudioRecorder:
     """One take of microphone capture running on its own daemon thread.
 
-    Usage: start() opens the capture thread, stop() asks it to finish, join()
-    waits for it, get_audio() returns the take as one 16 kHz float32 array.
+    Usage: start() opens the capture thread, stop() asks it to finish and
+    returns the Take, join(take) waits for its thread, get_audio(take) returns
+    it as one 16 kHz float32 array.
 
     All callbacks are invoked on the capture thread, so a GUI caller must
     marshal every widget update onto the Tk main thread itself (root.after):
@@ -119,12 +137,9 @@ class AudioRecorder:
 
         self.is_recording = False
         self.record_lock = threading.Lock()
-        self.recorded_chunks: List[np.ndarray] = []
-        self.record_thread: Optional[threading.Thread] = None
-        # Rate the microphone is actually captured at. The device's own rate is
-        # used (through WASAPI on Windows) to avoid the driver's low-quality
-        # resampling; the take is downsampled to 16 kHz in get_audio().
-        self.capture_sr: int = config.AUDIO_SAMPLE_RATE
+        # The take started last. Replaced by start(); the caller keeps the
+        # object stop() returned.
+        self._take: Optional[Take] = None
 
     def is_active(self) -> bool:
         with self.record_lock:
@@ -134,70 +149,76 @@ class AudioRecorder:
         """Begin a new take.
 
         Returns False if a take is already running, or if the previous take's
-        capture thread has not exited yet (its join timed out): that thread's
-        callback may still be appending, and because the callback reads
-        ``self.recorded_chunks`` at call time, starting now would mix the stuck
-        take's tail into the new take's buffer.
+        capture thread has not exited yet (its join timed out): that device
+        may still be busy, and a second stream on it is not safe.
         """
         with self.record_lock:
             if self.is_recording:
                 return False
-            if self.record_thread is not None and self.record_thread.is_alive():
+            previous = self._take
+            if (previous is not None and previous.thread is not None
+                    and previous.thread.is_alive()):
                 logging.warning("Previous record thread is still alive; "
                                 "refusing to start a new take.")
                 return False
             logging.info("Starting audio recording...")
             self.is_recording = True
-            self.recorded_chunks = []
-            self.record_thread = threading.Thread(target=self._record_loop,
-                                                  daemon=True)
-            self.record_thread.start()
+            take = Take()
+            take.thread = threading.Thread(target=self._record_loop,
+                                           args=(take,), daemon=True)
+            self._take = take
+            take.thread.start()
         return True
 
-    def stop(self) -> bool:
-        """Ask the capture thread to finish. Returns False if not recording."""
+    def stop(self) -> Optional[Take]:
+        """Ask the capture thread to finish and return its take.
+
+        None when no take is running.
+        """
         with self.record_lock:
             if not self.is_recording:
-                return False
+                return None
             logging.info("Stopping audio recording...")
             self.is_recording = False
-        return True
+            return self._take
 
-    def join(self, timeout: float = RECORD_THREAD_JOIN_TIMEOUT_SEC) -> bool:
-        """Wait for the capture thread to finish.
+    @staticmethod
+    def join(take: Take,
+             timeout: float = RECORD_THREAD_JOIN_TIMEOUT_SEC) -> bool:
+        """Wait for the capture thread of *take* to finish.
 
         Returns True once the thread has exited (or never ran). Returns False
         if it is still alive after the timeout: its callback may then still be
-        appending chunks, so the buffer must not be read.
+        appending chunks, so the take must not be read.
         """
-        if self.record_thread is None:
+        if take.thread is None:
             return True
-        self.record_thread.join(timeout=timeout)
-        if self.record_thread.is_alive():
+        take.thread.join(timeout=timeout)
+        if take.thread.is_alive():
             logging.warning(f"Record thread still alive after {timeout}s; "
                             "its chunk buffer may still be written to.")
             return False
         return True
 
-    def get_audio(self) -> Optional[np.ndarray]:
-        """Return the finished take as a 16 kHz mono float32 array (or None).
+    @staticmethod
+    def get_audio(take: Take) -> Optional[np.ndarray]:
+        """Return *take* as a 16 kHz mono float32 array (or None).
 
         Only call after join() has confirmed that the capture thread exited:
-        the chunk buffer has no other guard against a running writer.
+        the chunks have no other guard against a running writer. The chunks
+        are released, so a second call returns None.
         """
-        with self.record_lock:
-            if not self.recorded_chunks:
-                return None
-            chunks = list(self.recorded_chunks)
-            self.recorded_chunks = []
+        chunks, take.chunks = take.chunks, []
+        if not chunks:
+            return None
         audio = np.concatenate(chunks, axis=0).flatten().astype(np.float32,
                                                                 copy=False)
 
         # The take was captured at the device's own rate; the rest of the
         # pipeline (recognition, playback of the take) expects 16 kHz.
-        if self.capture_sr != config.AUDIO_SAMPLE_RATE:
+        if take.sample_rate != config.AUDIO_SAMPLE_RATE:
             import librosa
-            audio = librosa.resample(audio, orig_sr=self.capture_sr,
+            audio = librosa.resample(audio, orig_sr=take.sample_rate,
                                      target_sr=config.AUDIO_SAMPLE_RATE)
         return np.ascontiguousarray(audio, dtype=np.float32)
 
@@ -231,29 +252,30 @@ class AudioRecorder:
             logging.exception("WASAPI device selection failed; using defaults.")
         return config.AUDIO_INPUT_DEVICE, config.AUDIO_SAMPLE_RATE
 
-    def _record_loop(self):
+    def _record_loop(self, take: Take):
         start_time = time.time()
         logging.info("sd.InputStream thread started.")
         callback_warnings: List[str] = []
-        capture_device, self.capture_sr = self._select_capture_device()
+        capture_device, take.sample_rate = self._select_capture_device()
+        chunks = take.chunks
 
         def callback(indata, frames, time_info, status):
             # Runs on the realtime audio thread of PortAudio, which has a hard
             # deadline. It must never block, so it takes no lock: list.append
-            # is atomic under the GIL, and recorded_chunks is only read after
-            # the stream is closed and this thread is joined (see join and
+            # is atomic under the GIL, and the chunks are only read after the
+            # stream is closed and this thread is joined (see join and
             # get_audio), so there is no concurrent reader to guard against.
             # A lock here drops samples (audible clicks) whenever the GUI
             # thread holds it during a start or a stop.
             if status:
                 callback_warnings.append(str(status))
-            self.recorded_chunks.append(indata.copy())
+            chunks.append(indata.copy())
 
         try:
             with AUDIO_LOCK:
                 reset_portaudio()
                 stream = sd.InputStream(
-                        samplerate=self.capture_sr,
+                        samplerate=take.sample_rate,
                         channels=config.AUDIO_CHANNELS,
                         dtype="float32",
                         blocksize=RECORDING_BLOCKSIZE,
@@ -302,10 +324,9 @@ class AudioRecorder:
                     # Measure the chunks that arrived since the last poll. The
                     # slice is safe against the appending callback under the
                     # GIL (at worst the newest chunk is not seen yet).
-                    total = len(self.recorded_chunks)
+                    total = len(chunks)
                     if total > processed:
-                        block = np.concatenate(
-                            self.recorded_chunks[processed:total], axis=0)
+                        block = np.concatenate(chunks[processed:total], axis=0)
                         processed = total
                         rms = (float(np.sqrt(np.mean(np.square(block))))
                                if block.size else 0.0)

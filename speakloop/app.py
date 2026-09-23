@@ -43,8 +43,8 @@ from speakloop import config
 from speakloop import (bootstrap, detect_hardware, lifecycle, prompt,
                        transcript)
 from speakloop.contract import Reply, split_sentences, strip_markdown
-from speakloop.conversation import Lesson
-from speakloop.llm import LLMManager, error_message
+from speakloop.conversation import Lesson, context_level_reached
+from speakloop.llm import LLMManager, error_message, is_context_overflow
 from speakloop.llm_server_ctl import LLMServerController
 from speakloop.playback import PlaybackController
 from speakloop.recorder import AudioRecorder, normalize_audio, warm_up_resampler
@@ -71,6 +71,31 @@ class _ReplyEnd(NamedTuple):
 # Shortest take that is passed to recognition, in seconds. Anything below is a
 # slip of the key rather than a phrase.
 MIN_RECORD_SECONDS = 0.2
+
+# A press this soon after an automatic stop (a pause or the time limit) is the
+# learner's own stop that came late. It must not open a new take: that take
+# is almost empty, and it leaves the phrase just spoken without an answer.
+LATE_STOP_WINDOW_SECONDS = 1.5
+
+# The [System] line for a phrase that gets no answer because a new phrase
+# started while it waited for recognition or for the model.
+UNANSWERED_MESSAGE = ("This phrase has no answer: a new phrase started "
+                      "before the answer.")
+
+# Tokens the lesson keeps free for its end: two replies at the reply limit,
+# which is room for "finish" and the summary.
+CONTEXT_RESERVE_TOKENS = 2 * config.LLM_MAX_TOKENS
+
+# The [System] line under a reply the server cut off.
+CUT_REPLY_MESSAGE = ("The reply was cut off: the model context or the reply "
+                     "limit is full.")
+
+# The [System] line when the server refused a request because the lesson no
+# longer fits the context. Even "finish" needs the whole history, so only a
+# new lesson helps then.
+CONTEXT_FULL_MESSAGE = ("The lesson is too long for the model context, so "
+                        "the model cannot answer. Close the window and "
+                        "start a new lesson.")
 
 
 class VoiceTutorController:
@@ -116,6 +141,15 @@ class VoiceTutorController:
 
         # True once the models are loaded: nothing may be recorded before that.
         self.app_ready = False
+        # When the last take ended by itself (time.monotonic), or None. Read by
+        # trigger_recording_start for the late-stop window. (Tk thread only.)
+        self._auto_stop_time: Optional[float] = None
+        # The context the lesson has to fit into, in tokens: the server's own
+        # number when it reports one (load_components), else the setting (LM
+        # Studio reports none). And the highest warning level already shown.
+        # Both are used by the exchange threads only, under _exchange_lock.
+        self._context_size = config.EXTERNAL_N_CTX
+        self._context_warned = 0.0
         # Holding a key makes Tk repeat KeyPress. This flag keeps the first one
         # and is cleared on the matching KeyRelease; it is NOT a "hold to
         # record" state.
@@ -157,9 +191,11 @@ class VoiceTutorController:
         # The transcript of this lesson (speakloop/transcript.py), with the
         # settings of the run. Its files are created with the first record.
         self._lesson_start = datetime.now()
-        # The phrase of the learner the records belong to. The opening question
-        # of the model answers no phrase of the learner and keeps 0.
+        # The number of the latest phrase of the learner. A phrase gets its
+        # number from _next_turn, and its reply carries the same number; the
+        # opening question answers no phrase and has 0.
         self._turn = 0
+        self._turn_lock = threading.Lock()
         self.transcript = transcript.TranscriptWriter(
             config.TRANSCRIPT_DIR, self._lesson_start, transcript.meta_record(
                 started_at=self._lesson_start,
@@ -205,16 +241,31 @@ class VoiceTutorController:
             return os.path.basename(config.EXTERNAL_MODEL_PATH)
         return self.llm_backend
 
-    def _record(self, record_type: str, text: str, **extra) -> None:
+    def _next_turn(self) -> int:
+        """Give a new phrase of the learner its number. (Any thread.)
+
+        A typed phrase is numbered on the Tk thread and a spoken one on its
+        exchange thread, so the counter has a lock.
+        """
+        with self._turn_lock:
+            self._turn += 1
+            return self._turn
+
+    def _record(self, record_type: str, text: str,
+                turn: Optional[int] = None, **extra) -> None:
         """Add one event of the lesson to the transcript. (Any thread.)
 
-        The writer has a lock of its own, so the exchange threads and the Tk
-        thread use this the same way.
+        *turn* is the number of the phrase the event belongs to; without it
+        the event gets the number of the latest phrase. The writer has a lock
+        of its own, so the exchange threads and the Tk thread use this the
+        same way.
         """
+        if turn is None:
+            turn = self._turn
         self.transcript.add(transcript.event_record(
-            datetime.now(), self._turn, record_type, text, **extra))
+            datetime.now(), turn, record_type, text, **extra))
 
-    def _system(self, text: str) -> None:
+    def _system(self, text: str, turn: Optional[int] = None) -> None:
         """Show a [System] line and keep it in the transcript. (Any thread.)
 
         Every service message of the application goes through here: the window
@@ -222,7 +273,16 @@ class VoiceTutorController:
         "system" record, which the reader of the file can skip or read.
         """
         self.root.after(0, self.view.append_system_msg, text)
-        self._record(transcript.TYPE_SYSTEM, text)
+        self._record(transcript.TYPE_SYSTEM, text, turn)
+
+    def _report_unanswered(self, turn: int) -> None:
+        """Say that phrase *turn* gets no answer. (Exchange thread.)
+
+        Not while the window closes: quit_app stops the reply too, and the
+        learner is not waiting for an answer then.
+        """
+        if not self.shutdown_event.is_set():
+            self._system(UNANSWERED_MESSAGE, turn)
 
     # ------------------------------------------------------------------
     # Startup
@@ -284,6 +344,8 @@ class VoiceTutorController:
                     model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
                     self._system(f"llama-server is ready with {model_name}.")
                 served_n_ctx = self._llm_server.served_n_ctx
+                if served_n_ctx is not None:
+                    self._context_size = served_n_ctx
                 if (served_n_ctx is not None
                         and served_n_ctx < config.EXTERNAL_N_CTX):
                     # A warning and not a refusal: a short lesson still
@@ -346,12 +408,12 @@ class VoiceTutorController:
             if stop_event.is_set():
                 return
             try:
-                self._ask_model(None, stop_event)
+                self._ask_model(None, stop_event, 0)
             except Exception:
                 logging.exception("Error while opening the lesson:")
                 self._system("The lesson could not be opened. "
                              "Speak to start it.")
-                self.root.after(0, self.view.enter_error, "Error")
+                self._enter_later(self.view.enter_error, stop_event, "Error")
 
     # ------------------------------------------------------------------
     # Press handlers (called by the view's bindings, on the Tk main thread)
@@ -417,15 +479,17 @@ class VoiceTutorController:
             return
         self.playback.stop()
         self.view.append_user_msg(learner_text)
-        self._turn += 1
-        self._record(transcript.TYPE_LEARNER, learner_text, source=source)
+        turn = self._next_turn()
+        self._record(transcript.TYPE_LEARNER, learner_text, turn,
+                     source=source)
         # Installed on the Tk thread, like the stop event of a recorded take
         # (see PlaybackController.new_event).
         stop_event = self.playback.new_event()
         threading.Thread(target=self._run_typed_exchange,
-                         args=(learner_text, stop_event), daemon=True).start()
+                         args=(learner_text, turn, stop_event),
+                         daemon=True).start()
 
-    def _run_typed_exchange(self, learner_text: str,
+    def _run_typed_exchange(self, learner_text: str, turn: int,
                             stop_event: threading.Event):
         """Ask the model about a typed phrase - off the main thread.
 
@@ -438,13 +502,14 @@ class VoiceTutorController:
                 # lock; that take owns the window now.
                 logging.info("The typed phrase was superseded by a new take; "
                              "the model is not asked.")
+                self._report_unanswered(turn)
                 return
             try:
-                self._ask_model(learner_text, stop_event)
+                self._ask_model(learner_text, stop_event, turn)
             except Exception:
                 logging.exception("Error in the typed exchange:")
                 self._system("Processing Error. Please try again.")
-                self.root.after(0, self.view.enter_error, "Error")
+                self._enter_later(self.view.enter_error, stop_event, "Error")
 
     def _toggle_recording(self):
         """One press starts a take, the next one ends it.
@@ -462,6 +527,12 @@ class VoiceTutorController:
             # Before the models are loaded there is nothing to answer a take
             # with, and the window still shows the loading button.
             return
+        if self._auto_stop_time is not None:
+            since_stop = time.monotonic() - self._auto_stop_time
+            if since_stop < LATE_STOP_WINDOW_SECONDS:
+                logging.info(f"A press {since_stop * 1000:.0f} ms after the "
+                             f"automatic stop is a late stop; no new take.")
+                return
         # The learner has the floor: stop the reply that is being spoken. This
         # also sets the stop event of that reply for good, so its speech cannot
         # come back after the new take.
@@ -470,9 +541,11 @@ class VoiceTutorController:
             return
         self.view.enter_recording()
 
-    def trigger_recording_stop(self):
-        if not self.recorder.stop():
-            return
+    def trigger_recording_stop(self) -> bool:
+        """End the take that runs. False when no take runs."""
+        take = self.recorder.stop()
+        if take is None:
+            return False
 
         self.view.enter_processing()
         # The stop event of the reply to THIS take is installed here, on the Tk
@@ -482,8 +555,18 @@ class VoiceTutorController:
         # The join and the exchange run off the main thread: the join can block
         # for up to RECORD_THREAD_JOIN_TIMEOUT_SEC, which would freeze the
         # window.
-        threading.Thread(target=self._finalize_recording, args=(stop_event,),
-                         daemon=True).start()
+        threading.Thread(target=self._finalize_recording,
+                         args=(take, stop_event), daemon=True).start()
+        return True
+
+    def _auto_stop(self):
+        """End a take the recorder has closed by itself. (Tk thread.)
+
+        The time is kept only when this call ended the take: a press that
+        came first has already ended it, and nothing is late then.
+        """
+        if self.trigger_recording_stop():
+            self._auto_stop_time = time.monotonic()
 
     # ------------------------------------------------------------------
     # Recorder callbacks (all called on the capture thread)
@@ -495,12 +578,12 @@ class VoiceTutorController:
         finalized exactly like a manual stop.
         """
         self._system("Reached maximum record limit.")
-        self.root.after(0, self.trigger_recording_stop)
+        self.root.after(0, self._auto_stop)
 
     def _on_record_silence_stop(self):
         """The take ended after a pause. This is the designed ending, so the
         chat says nothing about it; the same stop path finalizes the take."""
-        self.root.after(0, self.trigger_recording_stop)
+        self.root.after(0, self._auto_stop)
 
     def _on_record_level(self, level: float):
         """Live microphone level during a take, forwarded to the Tk thread."""
@@ -525,19 +608,17 @@ class VoiceTutorController:
     # ------------------------------------------------------------------
     # One exchange: transcribe, ask the model, queue the speech
     # ------------------------------------------------------------------
-    def _finalize_recording(self, stop_event: threading.Event):
-        """Collect the take, then run the exchange - off the main thread."""
-        if not self.recorder.join():
+    def _finalize_recording(self, take, stop_event: threading.Event):
+        """Collect *take*, then run the exchange - off the main thread."""
+        if not self.recorder.join(take):
             # The capture thread is stuck (a device that hangs on close) and its
             # callback may still be appending chunks. Reading them now would
             # race the writer, so the take is dropped.
             self._system("The audio device did not stop in time. "
                          "The take was dropped, please try again.")
-            self.root.after(0, self.view.enter_idle)
+            self._enter_later(self.view.enter_idle, stop_event)
             return
-        # Collected BEFORE the lock below: a take started while this thread
-        # waits would otherwise replace the chunk buffer it is about to read.
-        audio = self.recorder.get_audio()
+        audio = self.recorder.get_audio(take)
         with self._exchange_lock:
             self._run_exchange(audio, stop_event)
 
@@ -549,7 +630,7 @@ class VoiceTutorController:
                 logging.warning("Captured audio too short or empty.")
                 self._system("The recording is too short. "
                              "Please speak a little longer.")
-                self.root.after(0, self.view.enter_idle)
+                self._enter_later(self.view.enter_idle, stop_event)
                 return
 
             audio = normalize_audio(audio)
@@ -563,13 +644,13 @@ class VoiceTutorController:
             if not user_text:
                 logging.info("STT returned empty transcription.")
                 self._system("Could not hear you clearly. Please try again.")
-                self.root.after(0, self.view.enter_idle)
+                self._enter_later(self.view.enter_idle, stop_event)
                 return
 
             # Update User Speech to GUI
             self.root.after(0, self.view.append_user_msg, user_text)
-            self._turn += 1
-            self._record(transcript.TYPE_LEARNER, user_text,
+            turn = self._next_turn()
+            self._record(transcript.TYPE_LEARNER, user_text, turn,
                          source=transcript.SOURCE_VOICE,
                          stt_ms=round(stt_ms))
 
@@ -580,24 +661,26 @@ class VoiceTutorController:
                 # of the next one.
                 logging.info("The exchange was superseded by a new take; "
                              "the model is not asked.")
+                self._report_unanswered(turn)
                 return
 
-            self._ask_model(user_text, stop_event)
+            self._ask_model(user_text, stop_event, turn)
 
         except Exception:
             logging.exception("Error in the exchange:")
             self._system("Processing Error. Please try again.")
-            self.root.after(0, self.view.enter_error, "Error")
+            self._enter_later(self.view.enter_error, stop_event, "Error")
 
     def _ask_model(self, learner_text: Optional[str],
-                   stop_event: threading.Event):
+                   stop_event: threading.Event, turn: int):
         """Get one reply of the model, show it and queue its speech.
 
-        *learner_text* None opens the lesson. The phrase itself is already in
-        the chat: a recorded one is written by _run_exchange after recognition,
-        a typed one by on_text_submitted.
+        *learner_text* None opens the lesson. *turn* is the number of the
+        phrase the reply answers. The phrase itself is already in the chat: a
+        recorded one is written by _run_exchange after recognition, a typed
+        one by on_text_submitted.
         """
-        self.root.after(0, self.view.enter_thinking)
+        self._enter_later(self.view.enter_thinking, stop_event)
         llm_start = time.perf_counter()
 
         try:
@@ -610,27 +693,39 @@ class VoiceTutorController:
             # keeps saying "Thinking" and the failure is only in the log.
             # llm.py has logged the traceback already. Nothing of the reply
             # was queued for speech, so there is nothing to drop.
-            self._system(f"LLM error: {error_message(llm_error)}")
-            self.root.after(0, self.view.enter_error, "LLM Error")
+            if is_context_overflow(llm_error):
+                self._system(CONTEXT_FULL_MESSAGE)
+            else:
+                self._system(f"LLM error: {error_message(llm_error)}")
+            self._enter_later(self.view.enter_error, stop_event, "LLM Error")
             return
 
         if reply is None:
             # Interrupted by a new take, which owns the window from now on.
             logging.info("The reply was interrupted and is not shown.")
+            if learner_text is not None:
+                self._report_unanswered(turn)
             return
 
         llm_ms = (time.perf_counter() - llm_start) * 1000
         logging.info(f"LLM reply received. Duration: {llm_ms:.0f}ms")
 
         self.root.after(0, self._show_reply, reply)
-        self._record_reply(reply, llm_ms)
+        self._record_reply(reply, llm_ms, turn)
         if not reply.follows_contract:
             # After the reply itself: the learner reads what the model wrote
             # and then why it stays silent. _show_reply is already queued on
             # the Tk thread, so this line lands under it. No second request:
             # a retry costs another 15-50 s and changes the history.
             self._system("The model did not answer in the lesson format. "
-                         "The reply is shown in full and is not spoken.")
+                         "The reply is shown in full and is not spoken.",
+                         turn)
+        if self.llm_mgr.last_reply_cut:
+            self._system(CUT_REPLY_MESSAGE, turn)
+        if not reply.summary:
+            # After the summary the lesson is over, and advice to finish it
+            # would come too late.
+            self._warn_if_context_fills(turn)
 
         # The markers go before the split, and for speech only: the synthesis
         # reads them aloud, while the chat and the transcript keep the line as
@@ -640,8 +735,7 @@ class VoiceTutorController:
         if not sentences:
             # A SUMMARY, a reply outside the contract, or a SAY of markers
             # alone: shown, not spoken.
-            self.root.after(0, self._enter_if_current, self.view.enter_idle,
-                            stop_event)
+            self._enter_later(self.view.enter_idle, stop_event)
             return
         for sentence in sentences:
             logging.info(f"Queued sentence to TTS: {sentence!r}")
@@ -650,8 +744,28 @@ class VoiceTutorController:
         # arrives before the speech drops the sentences instead of speaking
         # them over the new take.
         self.tts_queue.put(_ReplyEnd(stop_event))
-        self.root.after(0, self._enter_if_current, self.view.enter_speaking,
-                        stop_event)
+        self._enter_later(self.view.enter_speaking, stop_event)
+
+    def _warn_if_context_fills(self, turn: int) -> None:
+        """Show one [System] line per warning level the context reaches.
+
+        (Exchange thread.) The lesson ends only by the learner's command, so
+        the line advises "finish" while the summary still fits.
+        """
+        tokens = self.llm_mgr.last_total_tokens
+        level = context_level_reached(tokens, self._context_size,
+                                      self._context_warned,
+                                      CONTEXT_RESERVE_TOKENS)
+        if level is None:
+            return
+        self._context_warned = level
+        advice = ("Say \"finish\" now: a longer lesson will not fit."
+                  if level >= 0.9 else
+                  "Say \"finish\" soon to get the summary.")
+        used = round(tokens * 100 / self._context_size)
+        self._system(f"The lesson uses {used}% of the model context "
+                     f"({tokens} of {self._context_size} tokens). {advice}",
+                     turn)
 
     def _show_reply(self, reply: Reply):
         """Write one reply into the chat. (Tk thread.)
@@ -670,7 +784,7 @@ class VoiceTutorController:
         if reply.summary:
             self.view.append_summary(reply.summary)
 
-    def _record_reply(self, reply: Reply, llm_ms: float) -> None:
+    def _record_reply(self, reply: Reply, llm_ms: float, turn: int) -> None:
         """Write one reply of the model into the transcript. (Exchange thread.)
 
         The duration and the size of the context go on the FIRST record of the
@@ -683,18 +797,26 @@ class VoiceTutorController:
         stats = {"llm_ms": round(llm_ms),
                  "tokens": self.llm_mgr.last_total_tokens}
         if not reply.follows_contract:
-            self._record(transcript.TYPE_BROKEN, reply.raw, **stats)
+            self._record(transcript.TYPE_BROKEN, reply.raw, turn, **stats)
             return
         for record_type, text in ((transcript.TYPE_NOTE, reply.note),
                                   (transcript.TYPE_SAY, reply.say),
                                   (transcript.TYPE_SUMMARY, reply.summary)):
             if text:
-                self._record(record_type, text, **stats)
+                self._record(record_type, text, turn, **stats)
                 stats = {}
         if reply.summary:
             self.transcript.save_markdown()
 
-    def _enter_if_current(self, intent, stop_event: threading.Event):
+    def _enter_later(self, intent, stop_event: threading.Event, *args):
+        """Queue a view intent of this exchange for the Tk thread. (Any thread.)
+
+        Every window state a worker sets goes through here, so a worker that
+        a new take has superseded cannot draw over it.
+        """
+        self.root.after(0, self._enter_if_current, intent, stop_event, *args)
+
+    def _enter_if_current(self, intent, stop_event: threading.Event, *args):
         """Run a view intent only for the reply that is still current. (Tk thread.)
 
         Checked on the Tk thread, where a new take changes the window: a check
@@ -702,7 +824,7 @@ class VoiceTutorController:
         would then draw over the recording state.
         """
         if not stop_event.is_set() and self.playback.is_current(stop_event):
-            intent()
+            intent(*args)
 
     # ------------------------------------------------------------------
     # Speech output
@@ -757,8 +879,7 @@ class VoiceTutorController:
         # Back to waiting for the learner - but only for the reply that is still
         # the current one. A reply that was interrupted must not overwrite the
         # window state of the take that interrupted it.
-        if not stop_event.is_set() and self.playback.is_current(stop_event):
-            self.root.after(0, self.view.enter_idle)
+        self._enter_later(self.view.enter_idle, stop_event)
 
     # ------------------------------------------------------------------
     # Shutdown

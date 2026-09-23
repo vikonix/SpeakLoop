@@ -55,6 +55,13 @@ def silent_recorder(**callbacks):
     return recorder.AudioRecorder(**handlers)
 
 
+def finish(audio_recorder):
+    """Stop the take that runs, if any, and wait for its thread (cleanup)."""
+    take = audio_recorder.stop() or audio_recorder._take
+    if take is not None:
+        audio_recorder.join(take)
+
+
 class NormalizeAudioTests(unittest.TestCase):
     """The one pure signal helper of the capture path."""
 
@@ -141,8 +148,9 @@ class TakeLifecycleTests(unittest.TestCase):
         audio_recorder = silent_recorder()
         self.assertTrue(audio_recorder.start())
         self.assertTrue(audio_recorder.is_active())
-        self.assertTrue(audio_recorder.stop())
-        self.assertTrue(audio_recorder.join())
+        take = audio_recorder.stop()
+        self.assertIsNotNone(take)
+        self.assertTrue(audio_recorder.join(take))
         self.assertFalse(audio_recorder.is_active())
         self.assertEqual(len(self.streams), 1)
         self.assertTrue(self.streams[0].started)
@@ -150,26 +158,39 @@ class TakeLifecycleTests(unittest.TestCase):
 
     def test_a_second_start_while_recording_is_refused(self):
         audio_recorder = silent_recorder()
-        self.addCleanup(audio_recorder.join)
-        self.addCleanup(audio_recorder.stop)
+        self.addCleanup(finish, audio_recorder)
         self.assertTrue(audio_recorder.start())
         self.assertFalse(audio_recorder.start())
 
     def test_a_stop_without_a_take_is_refused(self):
         # The controller routes every ending through stop(); one that reports
-        # False is what keeps a second ending from finalizing the take twice.
-        self.assertFalse(silent_recorder().stop())
+        # no take is what keeps a second ending from finalizing it twice.
+        self.assertIsNone(silent_recorder().stop())
 
     def test_the_take_is_returned_once_and_then_cleared(self):
-        audio_recorder = silent_recorder()
-        audio_recorder.recorded_chunks = [np.ones((4, 1), dtype=np.float32),
-                                          np.zeros((2, 1), dtype=np.float32)]
-        take = audio_recorder.get_audio()
-        self.assertEqual(list(take), [1, 1, 1, 1, 0, 0])
-        self.assertIsNone(audio_recorder.get_audio())
+        take = recorder.Take()
+        take.chunks = [np.ones((4, 1), dtype=np.float32),
+                       np.zeros((2, 1), dtype=np.float32)]
+        audio = recorder.AudioRecorder.get_audio(take)
+        self.assertEqual(list(audio), [1, 1, 1, 1, 0, 0])
+        self.assertIsNone(recorder.AudioRecorder.get_audio(take))
 
     def test_an_empty_take_is_reported_as_nothing(self):
-        self.assertIsNone(silent_recorder().get_audio())
+        self.assertIsNone(recorder.AudioRecorder.get_audio(recorder.Take()))
+
+    def test_a_new_take_leaves_the_stopped_take_alone(self):
+        # The controller reads a stopped take on another thread; a take that
+        # starts in between must not empty or replace it.
+        audio_recorder = silent_recorder()
+        self.addCleanup(finish, audio_recorder)
+        audio_recorder.start()
+        first = audio_recorder.stop()
+        self.assertTrue(audio_recorder.join(first))
+        first.chunks.append(np.ones((4, 1), dtype=np.float32))
+        self.assertTrue(audio_recorder.start())
+        self.assertIsNot(audio_recorder._take, first)
+        self.assertEqual(list(recorder.AudioRecorder.get_audio(first)),
+                         [1, 1, 1, 1])
 
     def test_a_failing_stream_reports_the_error_and_stops_recording(self):
         reported = threading.Event()
@@ -182,7 +203,7 @@ class TakeLifecycleTests(unittest.TestCase):
             audio_recorder = silent_recorder(
                 on_stream_error=reported.set)
             audio_recorder.start()
-            audio_recorder.join()
+            audio_recorder.join(audio_recorder._take)
         self.assertTrue(reported.wait(timeout=2))
         self.assertFalse(audio_recorder.is_active())
 
@@ -210,12 +231,11 @@ class AutomaticStopTests(unittest.TestCase):
         # is armed only once speech has been heard.
         stopped = threading.Event()
         audio_recorder = silent_recorder(on_silence_stop=stopped.set)
-        self.addCleanup(audio_recorder.join)
-        self.addCleanup(audio_recorder.stop)
+        self.addCleanup(finish, audio_recorder)
         audio_recorder.start()
         # Only silence arrives, for several times the silence timeout.
         for _ in range(10):
-            audio_recorder.recorded_chunks.append(
+            audio_recorder._take.chunks.append(
                 np.zeros((256, 1), dtype=np.float32))
             time.sleep(0.05)
         self.assertFalse(stopped.is_set())
@@ -223,18 +243,17 @@ class AutomaticStopTests(unittest.TestCase):
     def test_silence_after_speech_ends_the_take(self):
         stopped = threading.Event()
         audio_recorder = silent_recorder(on_silence_stop=stopped.set)
-        self.addCleanup(audio_recorder.join)
-        self.addCleanup(audio_recorder.stop)
+        self.addCleanup(finish, audio_recorder)
         audio_recorder.start()
         # One loud block arms the timer. The silent blocks after it are what a
         # microphone really delivers once the speaker stops talking: the stream
         # keeps running, so the capture loop keeps measuring (see the comment on
         # the silence check in _record_loop).
-        audio_recorder.recorded_chunks.append(
+        audio_recorder._take.chunks.append(
             np.full((256, 1), 0.5, dtype=np.float32))
         deadline = time.monotonic() + 3
         while not stopped.is_set() and time.monotonic() < deadline:
-            audio_recorder.recorded_chunks.append(
+            audio_recorder._take.chunks.append(
                 np.zeros((256, 1), dtype=np.float32))
             time.sleep(0.02)
         self.assertTrue(stopped.is_set())
@@ -242,10 +261,9 @@ class AutomaticStopTests(unittest.TestCase):
     def test_the_live_level_is_reported_while_the_take_runs(self):
         levels = []
         audio_recorder = silent_recorder(on_level=levels.append)
-        self.addCleanup(audio_recorder.join)
-        self.addCleanup(audio_recorder.stop)
+        self.addCleanup(finish, audio_recorder)
         audio_recorder.start()
-        audio_recorder.recorded_chunks.append(
+        audio_recorder._take.chunks.append(
             np.full((256, 1), 0.5, dtype=np.float32))
         deadline = time.monotonic() + 2
         while not levels and time.monotonic() < deadline:

@@ -14,7 +14,8 @@ Run from the project root with:
 import threading
 import unittest
 
-from speakloop.conversation import OPENING_MESSAGE, Lesson
+from speakloop.conversation import (
+    OPENING_MESSAGE, Lesson, context_level_reached)
 
 
 class FakeLLM:
@@ -34,6 +35,45 @@ class FakeLLM:
         if isinstance(answer, Exception):
             raise answer
         return answer
+
+
+class ContextLevelTests(unittest.TestCase):
+    """When the learner is told that the context fills up."""
+
+    def test_below_the_first_level_nothing_is_said(self):
+        self.assertIsNone(context_level_reached(799, 1000, 0.0))
+
+    def test_the_first_level_is_reached(self):
+        self.assertEqual(context_level_reached(800, 1000, 0.0), 0.8)
+
+    def test_a_level_is_said_once(self):
+        self.assertIsNone(context_level_reached(850, 1000, 0.8))
+
+    def test_the_second_level_follows_the_first(self):
+        self.assertEqual(context_level_reached(900, 1000, 0.8), 0.9)
+
+    def test_a_jump_past_both_levels_gives_the_higher_one(self):
+        self.assertEqual(context_level_reached(950, 1000, 0.0), 0.9)
+
+    def test_no_token_count_says_nothing(self):
+        # An interrupted reply has no usage report.
+        self.assertIsNone(context_level_reached(None, 1000, 0.0))
+
+    def test_no_context_size_says_nothing(self):
+        self.assertIsNone(context_level_reached(900, 0, 0.0))
+
+    def test_a_small_reserve_left_reaches_the_last_level_early(self):
+        # 2560 tokens: 10 percent is 256, less than a summary may need.
+        self.assertEqual(context_level_reached(1600, 2560, 0.8, 1024), 0.9)
+
+    def test_near_the_end_the_last_level_comes_at_once(self):
+        self.assertEqual(context_level_reached(2100, 2560, 0.0, 1024), 0.9)
+
+    def test_enough_room_left_says_nothing(self):
+        self.assertIsNone(context_level_reached(1000, 2560, 0.0, 1024))
+
+    def test_a_large_context_is_not_affected_by_the_reserve(self):
+        self.assertIsNone(context_level_reached(14000, 16384, 0.8, 1024))
 
 
 class LessonTests(unittest.TestCase):
