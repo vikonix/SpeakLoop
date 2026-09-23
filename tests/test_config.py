@@ -249,6 +249,29 @@ class SaveUserSettingTests(unittest.TestCase):
             self.assertFalse(config.save_user_setting("show_notes", True))
 
 
+class LlamaServerSettingTests(unittest.TestCase):
+    """llama_server_path: a path relative to config/, or "" to search."""
+
+    def _parse(self, value):
+        with mock.patch("sys.stderr"):
+            return config._llama_server_setting(value)
+
+    def test_an_absent_or_empty_value_means_search(self):
+        for value in (None, "", "   "):
+            self.assertEqual(self._parse(value), "")
+
+    def test_a_value_that_is_not_a_string_means_search(self):
+        self.assertEqual(self._parse(42), "")
+
+    def test_a_relative_path_is_resolved_against_config_dir(self):
+        self.assertEqual(Path(self._parse("../bin/llama-server")),
+                         config.CONFIG_DIR / "../bin/llama-server")
+
+    def test_an_absolute_path_is_kept(self):
+        absolute = Path(tempfile.gettempdir()) / "llama-server"
+        self.assertEqual(Path(self._parse(str(absolute))), absolute)
+
+
 class GpuLayersSettingTests(unittest.TestCase):
     """external_n_gpu_layers: "auto", "all" or a whole number, as a string.
 
@@ -359,6 +382,18 @@ class LlmSettingTests(unittest.TestCase):
 
     def test_the_reply_limit_leaves_room_for_a_summary(self):
         self.assertGreaterEqual(config.LLM_MAX_TOKENS, 512)
+
+    def test_llama_server_is_reached_at_its_own_address(self):
+        self.assertEqual(config._client_address("llama-server"),
+                         (config.LLM_SERVER_URL, config.LLM_SERVER_API_KEY))
+
+    def test_lm_studio_is_reached_at_its_own_address(self):
+        self.assertEqual(config._client_address("lm-studio"),
+                         (config.LM_STUDIO_URL, config.LM_STUDIO_API_KEY))
+
+    def test_the_client_address_follows_the_selected_backend(self):
+        self.assertEqual((config.LLM_URL, config.LLM_API_KEY),
+                         config._client_address(config.LLM_BACKEND))
 
     def test_the_speech_devices_are_capped_by_device(self):
         # Both come from _model_device, so neither can be "cuda" on a machine

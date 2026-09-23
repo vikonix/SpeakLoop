@@ -28,13 +28,11 @@ reason the fetchers and the hardware probe must never import it.
 """
 
 import os
-import shutil
 import sys
-import threading
 from functools import partial
 from pathlib import Path
 
-from speakloop import llama_server_fetch, loader, model_fetch, models_info, paths
+from speakloop import loader, model_fetch, models_info, paths
 from speakloop.languages import english, spanish
 
 # What this machine writes (settings, downloads, logs). In a clone this is the
@@ -372,7 +370,7 @@ TTS_DEVICE = _model_device("TTS_DEVICE", DEVICE)
 # =====================================================================
 # Backend selection, read from settings.json ("llm_backend"):
 #   "llama-server" - the official llama.cpp binary started automatically as a
-#                    subprocess (see resolve_llama_server_path() below)
+#                    subprocess (llm_server_ctl.find_llama_server finds it)
 #   "lm-studio"    - external LM Studio app (must be running separately)
 # There is no "no model" choice: a dialogue lesson cannot run without one.
 LLM_BACKEND_CHOICES = ("llama-server", "lm-studio")
@@ -418,6 +416,18 @@ LLM_SERVER_URL = f"http://{LLM_SERVER_HOST}:{LLM_SERVER_PORT}/v1"
 # any page open in a browser could call 127.0.0.1:8765 and read the answer.
 LLM_SERVER_API_KEY = "local"
 
+
+def _client_address(backend: str) -> tuple:
+    """URL and key of the chat server of *backend*."""
+    if backend == "llama-server":
+        return LLM_SERVER_URL, LLM_SERVER_API_KEY
+    return LM_STUDIO_URL, LM_STUDIO_API_KEY
+
+
+# The address and the key the chat client uses: app.py points LLMManager at
+# them once, for either backend.
+LLM_URL, LLM_API_KEY = _client_address(LLM_BACKEND)
+
 # How long (seconds) to wait for the server to become ready after launching.
 # The measured load of the 7 GB Gemma file was 16 s with the file in the OS
 # cache; a cold disk and the memory fit (-fit) come on top of that, and a
@@ -431,48 +441,29 @@ LLM_SERVER_STARTUP_TIMEOUT = 120
 # LLM_SERVER_* constants above plus the GGUF settings below
 # (speakloop/llm_server_ctl.py builds its command line).
 #
-# settings.json ("llama_server_path") names the binary. An empty value - the
-# default - resolves in this order:
-#   1. bin/llama/llama-server[.exe], i.e. whatever
-#      speakloop/llama_server_fetch.py installed from the pinned llama.cpp
-#      release;
-#   2. "llama-server" on PATH, for a build the user manages themselves.
-# An empty result is NOT reported here: the binary only matters when this
-# backend is actually selected, and LLMServerController says so at start time.
-#
-# Deliberately a function and NOT a module constant, unlike every other path in
-# this file: the binary can be installed while the app is not running, and a
-# value frozen at import would also hide a binary removed since, so the answer
-# is taken from the disk at the moment the server is started.
-def _resolve_llama_server(setting) -> str:
-    """Absolute path of the llama-server binary to launch, or "" if none."""
+# settings.json ("llama_server_path") names a binary the user manages. Empty
+# (the default) means "find it": llm_server_ctl.find_llama_server looks in
+# bin/llama/ and then on PATH when the server starts.
+def _llama_server_setting(setting) -> str:
+    """The "llama_server_path" value as a path, or "" when it is not set.
+
+    Not a validated default path like the other path keys: an empty value has
+    its own meaning (search for the binary). A relative path resolves against
+    the directory settings.json is in, like every other path setting.
+    """
     if setting is None:
-        setting = ""
+        return ""
     if not isinstance(setting, str):
         print(f"[config] settings.json: llama_server_path must be a string, "
               f"got {setting!r}; searching for the binary instead",
               file=sys.stderr)
-        setting = ""
-    if setting.strip():
-        # A relative path resolves against the directory settings.json is in,
-        # like every other path setting (pathlib keeps an absolute value
-        # unchanged). Spelled out here rather than taken from loader.user_path
-        # because this setting has its own fallback chain below, not a single
-        # default path.
-        return str(CONFIG_DIR / setting.strip())
-    bundled = llama_server_fetch.installed_exe()
-    if bundled is not None:
-        return str(bundled)
-    return shutil.which("llama-server") or ""
+        return ""
+    if not setting.strip():
+        return ""
+    return str(CONFIG_DIR / setting.strip())
 
 
-def resolve_llama_server_path() -> str:
-    """Where the llama-server binary is right now, or "" if there is none.
-
-    The single answer to that question in the app: llm_server_ctl builds its
-    command line from it.
-    """
-    return _resolve_llama_server(_USER.get("llama_server_path", ""))
+LLAMA_SERVER_PATH = _llama_server_setting(_USER.get("llama_server_path", ""))
 
 
 # =====================================================================
@@ -566,12 +557,6 @@ WHISPER_INITIAL_PROMPT = (
 # =====================================================================
 # Shared Audio Device Settings
 # =====================================================================
-# Single lock coordinates PortAudio access between the microphone
-# (speakloop/recorder.py) and the speaker (speakloop/tts.py). Both modules
-# import this object - do not create separate Lock instances or they will not
-# mutually exclude each other.
-AUDIO_LOCK = threading.Lock()
-
 # Rate of the audio pipeline: the recorder downsamples every take to it and the
 # recognizer needs exactly this rate. NOT the synthesis rate, which belongs to
 # the active TTS backend (TTSManager.sample_rate).

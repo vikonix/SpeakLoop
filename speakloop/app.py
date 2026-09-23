@@ -50,7 +50,7 @@ from speakloop.playback import PlaybackController
 from speakloop.recorder import AudioRecorder, normalize_audio, warm_up_resampler
 from speakloop.stt import STTManager
 from speakloop.tts import TTSManager
-from speakloop.ui import TutorView, ViewCallbacks
+from speakloop.ui import TutorView, ViewCallbacks, ViewSettings
 
 
 class _ReplyEnd(NamedTuple):
@@ -144,9 +144,10 @@ class VoiceTutorController:
         # so only the two known values reach this point.
         self.llm_backend = config.LLM_BACKEND
         logging.info(f"Using the {self.llm_backend} LLM backend.")
-        # One client for both backends: they speak the same OpenAI API and only
-        # the address differs, which init_client is told at connection time.
+        # One client for both backends: they speak the same OpenAI API, and
+        # config gives the address and the key of the selected one.
         self.llm_mgr = LLMManager()
+        self.llm_mgr.init_client(config.LLM_URL, config.LLM_API_KEY)
         # The lesson over llm_mgr. Built by load_components, from the prompt
         # file; no exchange can start before that (app_ready).
         self.lesson: Optional[Lesson] = None
@@ -181,6 +182,12 @@ class VoiceTutorController:
             on_command_pressed=self.on_command_pressed,
             on_notes_toggled=self.on_notes_toggled,
             on_quit=self.quit_app,
+        ), ViewSettings(
+            lesson_language=config.TARGET_LANGUAGE,
+            show_notes=config.SHOW_NOTES,
+            # The buttons send the words of the prompt, so the model reads a
+            # pressed button like the spoken command.
+            commands=prompt.LESSON_COMMANDS,
         ))
 
         # Start loading models in a background thread to prevent UI freezing
@@ -290,7 +297,6 @@ class VoiceTutorController:
                                  f"{config.EXTERNAL_N_CTX}. A long lesson "
                                  f"may not fit. See logs/main.log.")
             else:
-                self.llm_mgr.init_client()
                 if not self.llm_mgr.check_connection():
                     self._system("Warning: LM Studio is offline. Start "
                                  "it to use voice tutor!")
@@ -325,7 +331,7 @@ class VoiceTutorController:
         self.view.enter_app_ready()
         self._system(f"Ready. The lesson is in {config.TARGET_LANGUAGE}. "
                      f"Use the command buttons above, or say the same words: "
-                     f"simpler, hint, new topic, finish.")
+                     f"{', '.join(prompt.LESSON_COMMANDS)}.")
         self._open_lesson()
 
     def _open_lesson(self):

@@ -43,11 +43,6 @@ from speakloop.ui_theme import (
 # modern flat themes). Aliased as ``ttk`` so ttk.Style keeps working unchanged.
 import ttkbootstrap as ttk
 
-from speakloop import config
-# The command words of the lesson prompt: the buttons send exactly these
-# strings, so the wording of a button is the wording of the prompt.
-from speakloop.prompt import LESSON_COMMANDS
-
 # The application name, as the title bar and the header show it.
 APP_NAME = "SpeakLoop"
 
@@ -78,10 +73,7 @@ INSTRUCTION_READY = "Press SPACE to speak, or type a phrase and press Enter."
 INSTRUCTION_RECORDING = "Speak. Recording stops after a pause, or press again."
 INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and restart."
 
-# Window title and size. Here with the rest of the wording. The title names the
-# language of the lesson, which is why the window has no separate language
-# label any more.
-WINDOW_TITLE = f"{APP_NAME} - {config.TARGET_LANGUAGE} Voice Tutor"
+# Window size.
 WINDOW_WIDTH = 500
 WINDOW_HEIGHT = 700
 
@@ -132,6 +124,21 @@ def centered_geometry(screen_width: int, screen_height: int,
 
 
 @dataclass(frozen=True)
+class ViewSettings:
+    """What the window shows that comes from outside it.
+
+    lesson_language - the language of the lesson, named in the title and the
+                      header.
+    show_notes      - the first state of the Notes switch.
+    commands        - the lesson commands; each button shows and sends one
+                      of them exactly as given.
+    """
+    lesson_language: str
+    show_notes: bool
+    commands: tuple
+
+
+@dataclass(frozen=True)
 class ViewCallbacks:
     """Typed view->controller contract: the handlers the bindings invoke.
 
@@ -171,17 +178,18 @@ class TutorView:
     below. The view holds no reference to the controller.
     """
 
-    def __init__(self, root, callbacks: ViewCallbacks):
+    def __init__(self, root, callbacks: ViewCallbacks, settings: ViewSettings):
         """Build the window under ``root``, wiring the bindings to ``callbacks``.
 
         Args:
             root: the Tk root window the widgets are placed in.
             callbacks: the view->controller handlers the bindings invoke.
+            settings: the language, the Notes state and the commands to show.
         """
         self.root = root
         self._cb = callbacks
-        # The lesson opens the way the last one was left (settings.json).
-        self._notes_shown = config.SHOW_NOTES
+        self._settings = settings
+        self._notes_shown = settings.show_notes
         self.setup_styles()
         self.build_ui()
         self.bind_events()
@@ -230,7 +238,8 @@ class TutorView:
         # The window itself: title, size, and the background that shows through
         # wherever no widget covers it. The view owns the chrome, so the
         # controller needs to know neither the palette nor the wording.
-        self.root.title(WINDOW_TITLE)
+        self.root.title(
+            f"{APP_NAME} - {self._settings.lesson_language} Voice Tutor")
         # Size and position in one call, before the window is shown: the
         # winfo_screen* values are already valid at this point, so the window
         # appears in the middle of the screen instead of being drawn in a corner
@@ -257,7 +266,8 @@ class TutorView:
         # "<explanation> -> <target>" label was dropped with it: the explanation
         # language is fixed and was never a choice the window had to show.
         tk.Label(header_frame,
-                 text=f"{APP_NAME.upper()} • {config.TARGET_LANGUAGE} Voice Tutor",
+                 text=f"{APP_NAME.upper()} • "
+                      f"{self._settings.lesson_language} Voice Tutor",
                  font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"),
                  fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
 
@@ -327,8 +337,8 @@ class TutorView:
     def _build_command_row(self, parent):
         """The lesson commands and the Notes switch, in one row.
 
-        The command buttons send the words of the prompt (LESSON_COMMANDS), so
-        a pressed button reaches the model exactly like the spoken command. The
+        Each command button sends its own word exactly as ViewSettings gives
+        it. The
         Notes switch stands apart, behind a separator: it sends nothing and
         stays usable in every state of the window.
         """
@@ -344,7 +354,7 @@ class TutorView:
             side=tk.RIGHT, fill=tk.Y, padx=6, pady=2)
 
         self.command_buttons = []
-        for command in LESSON_COMMANDS:
+        for command in self._settings.commands:
             button = self._panel_button(
                 command_row, command,
                 # command=command binds this loop value; without it every

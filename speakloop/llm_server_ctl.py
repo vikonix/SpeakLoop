@@ -10,7 +10,8 @@ LLMManager (llm.py).
 
 The server speaks the same OpenAI-compatible API as LM Studio and answers 503
 while the model is still loading, so the readiness poll is just
-LLMManager.check_connection against config.LLM_SERVER_URL.
+LLMManager.check_connection. The caller has already pointed that client at the
+server (config.LLM_URL).
 
 A server already listening on the port is used as it is rather than replaced:
 an app that died without quit_app leaves one behind, and a second one could not
@@ -21,6 +22,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -82,6 +84,21 @@ def server_environment() -> dict:
     environment = dict(os.environ)
     environment.setdefault(OP_OFFLOAD_MIN_BATCH_VAR, str(OP_OFFLOAD_MIN_BATCH))
     return environment
+
+
+def find_llama_server(setting: str) -> str:
+    """The llama-server binary to launch, or "" when there is none.
+
+    *setting* is config.LLAMA_SERVER_PATH and wins when it is set. Otherwise
+    the binary llama_server_fetch installed, then one on PATH. Called at every
+    start: the binary can be installed or removed while the app is closed.
+    """
+    if setting:
+        return setting
+    installed = llama_server_fetch.installed_exe()
+    if installed is not None:
+        return str(installed)
+    return shutil.which("llama-server") or ""
 
 
 def llama_server_command(exe_path: str, model_path: str, host: str, port: int,
@@ -244,10 +261,6 @@ class LLMServerController:
         as None, so start() has a single failure path and app.py keeps its
         one error message for the user. Each reason also leaves a short
         sentence in last_error, which is what that message says.
-
-        The binary is located here rather than read from a constant frozen at
-        config's import, because config.resolve_llama_server_path() answers for
-        the state of the disk at call time.
         """
         model_path = config.EXTERNAL_MODEL_PATH
         if not model_path:
@@ -255,7 +268,7 @@ class LLMServerController:
             self.last_error = "No GGUF model is configured."
             return None
 
-        exe_path = config.resolve_llama_server_path()
+        exe_path = find_llama_server(config.LLAMA_SERVER_PATH)
         if not exe_path:
             logging.error(
                 "llama-server binary not found: settings.json "
@@ -298,8 +311,6 @@ class LLMServerController:
 
         logging.info("Port %s:%s is already in use - asking what is there.",
                      host, port)
-        llm_mgr.init_client(base_url=config.LLM_SERVER_URL,
-                            api_key=config.LLM_SERVER_API_KEY)
         if not llm_mgr.check_connection(silent=True):
             logging.error(
                 "Port %s:%s is in use by something that does not answer the "
@@ -393,9 +404,8 @@ class LLMServerController:
     def start(self, llm_mgr: LLMManager) -> bool:
         """Launch the server subprocess and block until it responds.
 
-        Readiness is probed through ``llm_mgr``, whose client is (re)pointed
-        at the local server here - the same client the app then uses for
-        generation. Returns False on a busy port (see _use_running_server), an
+        Readiness is probed through ``llm_mgr``, whose client must already
+        point at the local server (config.LLM_URL). Returns False on a busy port (see _use_running_server), an
         unusable configuration (see _build_command), an early subprocess exit,
         a startup timeout, or when shutdown() has already been requested.
         Every False except the last leaves its reason in last_error.
@@ -465,8 +475,6 @@ class LLMServerController:
                 raise
 
         deadline = time.time() + config.LLM_SERVER_STARTUP_TIMEOUT
-        llm_mgr.init_client(base_url=config.LLM_SERVER_URL,
-                            api_key=config.LLM_SERVER_API_KEY)
         while time.time() < deadline:
             # Snapshot the process reference: shutdown() (called from quit_app
             # on the Tk main thread while this loop runs on the loader thread)

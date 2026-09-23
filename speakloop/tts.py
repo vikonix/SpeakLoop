@@ -38,6 +38,7 @@ import sounddevice as sd
 
 from speakloop import config, models_info
 from speakloop.audio_io import (
+    AUDIO_LOCK,
     WINSOUND_AVAILABLE,
     WINSOUND_LEAD_IN_SECONDS,
     reset_portaudio,
@@ -324,7 +325,7 @@ class TTSManager:
             # explicit AUDIO_OUTPUT_DEVICE forces the sounddevice path below;
             # otherwise that setting would be ignored on Windows.
             if uses_winsound():
-                # No config.AUDIO_LOCK here (unlike the sounddevice branch and
+                # No AUDIO_LOCK here (unlike the sounddevice branch and
                 # the recorder): that lock guards the PortAudio init and
                 # teardown, and winsound does not touch PortAudio at all.
                 # Taking it here was what made a recording wait for the speech
@@ -387,7 +388,7 @@ class TTSManager:
             if full_audio.ndim == 1:
                 full_audio = full_audio.reshape(-1, 1)
 
-            with config.AUDIO_LOCK:
+            with AUDIO_LOCK:
                 reset_portaudio()
                 stream = sd.OutputStream(
                         samplerate=sample_rate,
@@ -413,7 +414,7 @@ class TTSManager:
                         return
                     stream.write(full_audio[i:i + chunk_size])
             finally:
-                with config.AUDIO_LOCK:
+                with AUDIO_LOCK:
                     try:
                         stream.stop()
                         stream.close()

@@ -145,6 +145,9 @@ the key differ.
   SUMMARY use existing palette keys, so an older user theme still has every
   color. Widget bindings call only the callables in
   the `ViewCallbacks` passed in, so the view never references the controller.
+  What the window shows from outside comes in `ViewSettings` (the lesson
+  language, the first Notes state, the commands); the view imports neither
+  `config` nor `prompt` (only `ui_theme` reads the palette from `config`).
   Every status string, instruction line and the partner's name (`PARTNER_NAME`)
   live here - do not move wording or colors back into the controller. Its
   methods must run on the Tk main thread. `centered_geometry()` is pure on
@@ -163,8 +166,9 @@ the key differ.
   by hand. The status bar shows the state alone: the STT and LLM durations are
   in `logs/main.log` and `update_stats` is gone.
   The second row of the panel holds the lesson commands and the Notes switch.
-  The command buttons are built from `prompt.LESSON_COMMANDS`, so a button
-  sends the word of the prompt itself and is never spelled here.
+  The command buttons are built from `ViewSettings.commands`, which app.py
+  fills with `prompt.LESSON_COMMANDS`, so a button sends the word of the
+  prompt itself and is never spelled here.
   `_apply_notes_visibility()` is the whole Notes feature: it sets `elide` on
   the two NOTE tags, which hides the corrections already in the chat and every
   one that comes later, while the transcript inside the widget stays complete
@@ -200,7 +204,8 @@ the key differ.
 - [`speakloop/audio_io.py`](speakloop/audio_io.py) - the device plumbing both
   the microphone and the speaker need: `reset_portaudio()` (Windows only, and
   skipped while any stream is open - it invalidates every stream in the
-  process), the open-stream counter and `uses_winsound()`.
+  process), the open-stream counter with `AUDIO_LOCK`, the one lock that
+  serializes every PortAudio open, close and reset, and `uses_winsound()`.
 - [`speakloop/playback.py`](speakloop/playback.py) - `PlaybackController`: the
   stop event of the **current reply**. `new_event()` and `stop()` are Tk-thread
   only; workers get the event as an argument. An event is only ever set, never
@@ -254,7 +259,9 @@ the key differ.
   first record, and a file that cannot be written is logged once and then left
   alone - a lesson must not end because a disk is full.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
-  client with the conversation history; used by both backends.
+  client with the conversation history; used by both backends. app.py
+  points it once at `config.LLM_URL` with `config.LLM_API_KEY`
+  (`init_client`, no request); nothing else changes the address.
   `start_conversation()` sets the system message; `ask()` refuses to run
   without it. `ask()` returns the **whole** reply as one text (the contract
   needs all of it), but the response is still streamed inside a `with`: an
@@ -320,7 +327,7 @@ the key differ.
   (`play_array`), winsound on Windows and sounddevice elsewhere. `TTSManager`
   is the facade: `synthesize()` then `play_array()`, with `sample_rate` taken
   from the active backend - callers must never assume a rate. The winsound path
-  deliberately takes **no** `config.AUDIO_LOCK`: winsound does not touch
+  deliberately takes **no** `audio_io.AUDIO_LOCK`: winsound does not touch
   PortAudio, and holding the lock there made a new recording wait for the speech
   to end, which cut the beginning off the take.
 
@@ -365,9 +372,11 @@ the key differ.
   (`SETTINGS_FILE`), through `loader.save_setting`, which re-reads the file and
   replaces it atomically so hand-edited and comment keys survive. The constants
   themselves stay frozen at import.
-  `resolve_llama_server_path()` is a function and not a constant on purpose:
-  the binary can be installed or removed while the app is not running, so the
-  answer is taken from the disk when the server is started. Also sets
+  `LLM_URL` and `LLM_API_KEY` are the address and the key of the selected
+  backend (`_client_address`), the only ones the chat client uses.
+  `LLAMA_SERVER_PATH` is only the `llama_server_path` setting (`""` when it
+  is empty); the search for the binary is `llm_server_ctl.find_llama_server`,
+  so config does not import the fetchers' `llama_server_fetch`. Also sets
   `HF_HOME` to `model_cache/` and switches `HF_HUB_OFFLINE=1` once the repos
   this run loads are cached - which is why it must be imported before anything
   imports huggingface_hub. `_model_device()` caps a per-model device by
@@ -413,8 +422,8 @@ can use them before the requirements step:
 - [`speakloop/llama_server_fetch.py`](speakloop/llama_server_fetch.py) - the
   pinned llama.cpp release into `bin/llama/`, sha256 per asset, then
   `--version` and `--list-devices` probes. `installed_exe()`, `list_devices()`
-  and `installed_variant()` are also what config and llm_server_ctl use at run
-  time.
+  and `installed_variant()` are also what llm_server_ctl uses at run time.
+  config does not import this module.
 
 - [`speakloop/models_info.py`](speakloop/models_info.py) - model catalogue,
   the single place a repo id is written. `WHISPER` is faster-whisper
@@ -460,7 +469,7 @@ can use them before the requirements step:
 - **Audio normalization** (`recorder.py`): peaks are normalized before STT; a
   peak below 0.01 is not boosted.
 - **Windows audio**: TTS plays through `winsound` to bypass PortAudio/MME
-  driver issues, with a 150 ms silence lead-in. `config.AUDIO_LOCK` serialises
+  driver issues, with a 150 ms silence lead-in. `audio_io.AUDIO_LOCK` serialises
   PortAudio init and teardown between the recording and the sounddevice
   playback path only - the winsound path takes no lock at all (see tts.py).
   **Known limit**: `winsound.PlaySound(None, 0)` does not cut a synchronous

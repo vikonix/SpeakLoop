@@ -133,11 +133,10 @@ class BuildCommandTests(unittest.TestCase):
     def _build(self, exe=__file__, **overrides):
         """Build a command with *exe* as the binary the resolver reports.
 
-        exe is the resolver's answer rather than a constant because
-        _build_command locates the binary when it runs (so a binary installed
-        after config was imported is still seen). __file__ stands in for the
-        binary - only its existence is checked, and this file exists.
-        exe=None leaves the resolver alone for a test that patches it itself.
+        find_llama_server is replaced, so the test does not depend on a
+        binary installed on this machine. __file__ stands in for the binary -
+        only its existence is checked, and this file exists. exe=None leaves
+        find_llama_server alone for a test that patches it itself.
         """
         values = {
             "EXTERNAL_MODEL_PATH": MODEL,
@@ -147,11 +146,13 @@ class BuildCommandTests(unittest.TestCase):
             "EXTERNAL_N_CTX": NCTX,
             "LLM_SERVER_API_KEY": API_KEY,
         }
-        if exe is not None:
-            values["resolve_llama_server_path"] = lambda: exe
         values.update(overrides)
         with patch.multiple(config, **values):
-            return LLMServerController()._build_command()
+            if exe is None:
+                return LLMServerController()._build_command()
+            with patch.object(llm_server_ctl, "find_llama_server",
+                              return_value=exe):
+                return LLMServerController()._build_command()
 
     def test_builds_the_binary_command_from_config(self):
         cmd = self._build()
@@ -170,13 +171,13 @@ class BuildCommandTests(unittest.TestCase):
         self.assertNotIn("--n-gpu-layers", cmd)
 
     def test_the_binary_is_located_when_the_command_is_built(self):
-        # Not read from a value frozen at config's import: the binary can be
-        # installed while the app is not running, and a stale empty string
-        # would refuse to start a server this machine now has.
-        resolve = Mock(return_value=__file__)
-        with patch.object(config, "resolve_llama_server_path", resolve):
+        # Located at every build and not frozen at config's import: the binary
+        # can be installed while the app is not running.
+        find = Mock(return_value=__file__)
+        with patch.object(llm_server_ctl, "find_llama_server", find), \
+                patch.object(config, "LLAMA_SERVER_PATH", "/set/by/user"):
             self.assertIsNotNone(self._build(exe=None))
-        resolve.assert_called_once_with()
+        find.assert_called_once_with("/set/by/user")
 
     def _assert_refused(self, **overrides):
         """The build returns None AND says why.
@@ -208,10 +209,39 @@ class BuildCommandTests(unittest.TestCase):
         # stop doing.
         controller = LLMServerController()
         with patch.multiple(config, EXTERNAL_MODEL_PATH="",
-                            resolve_llama_server_path=lambda: __file__):
+                            LLAMA_SERVER_PATH=__file__):
             with self.assertLogs(level="ERROR"):
                 self.assertIsNone(controller._build_command())
         self.assertTrue(controller.last_error)
+
+
+class FindLlamaServerTests(unittest.TestCase):
+    """Where the binary comes from: the setting, the install, then PATH."""
+
+    def _find(self, setting="", installed=None, on_path=None):
+        with patch.object(llm_server_ctl.llama_server_fetch, "installed_exe",
+                          return_value=installed), \
+                patch.object(llm_server_ctl.shutil, "which",
+                             return_value=on_path):
+            return llm_server_ctl.find_llama_server(setting)
+
+    def test_the_setting_wins(self):
+        self.assertEqual(self._find("/own/llama-server",
+                                    installed=Path("/bin/llama/x"),
+                                    on_path="/usr/bin/llama-server"),
+                         "/own/llama-server")
+
+    def test_the_installed_binary_comes_next(self):
+        self.assertEqual(self._find(installed=Path("/bin/llama/llama-server"),
+                                    on_path="/usr/bin/llama-server"),
+                         str(Path("/bin/llama/llama-server")))
+
+    def test_a_binary_on_path_is_the_last_choice(self):
+        self.assertEqual(self._find(on_path="/usr/bin/llama-server"),
+                         "/usr/bin/llama-server")
+
+    def test_nothing_found_is_an_empty_string(self):
+        self.assertEqual(self._find(), "")
 
 
 class PortProbeTests(unittest.TestCase):
@@ -329,13 +359,12 @@ class RunningServerTests(unittest.TestCase):
         self.assertIsNone(controller.last_error)
         popen.assert_not_called()
 
-    def test_the_client_is_pointed_at_the_adopted_server(self):
-        # The same client the app then generates with, so the address and the
-        # key have to be the local server's.
+    def test_the_client_is_left_to_the_caller(self):
+        # app.py points the client at config.LLM_URL before start(); the
+        # controller only asks it whether the server answers.
         manager = fake_manager()
         self._start(manager)
-        manager.init_client.assert_called_once_with(base_url=URL,
-                                                    api_key=API_KEY)
+        manager.init_client.assert_not_called()
 
     def test_using_a_foreign_server_is_a_warning(self):
         # Its model, context size and GPU layers are not the configured ones,
@@ -495,7 +524,7 @@ class LaunchedServerContextTests(unittest.TestCase):
                                EXTERNAL_N_CTX=NCTX,
                                LLM_SERVER_LOG_FILE=str(
                                    Path(log_dir) / "llm_server.log"),
-                               resolve_llama_server_path=lambda: __file__):
+                               LLAMA_SERVER_PATH=__file__):
             controller = LLMServerController()
             with self.assertLogs(level="INFO") as captured:
                 started = controller.start(manager)

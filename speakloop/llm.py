@@ -133,19 +133,12 @@ class LLMManager:
         with self._messages_lock:
             self.messages = [{"role": "system", "content": system_prompt}]
 
-    def init_client(self, base_url: str = None, api_key: str = None):
-        """
-        Configure OpenAI-compatible client.
-
-        Defaults to LM Studio settings from config when arguments are omitted,
-        so existing "lm-studio" backend usage is unchanged.
-        """
-        url = base_url or config.LM_STUDIO_URL
-        key = api_key or config.LM_STUDIO_API_KEY
-        logging.info(f"Initializing LLM client → {url}")
+    def init_client(self, base_url: str, api_key: str):
+        """Point the client at the chat server. Sends no request."""
+        logging.info(f"Initializing LLM client → {base_url}")
         self.client = OpenAI(
-            base_url=url,
-            api_key=key,
+            base_url=base_url,
+            api_key=api_key,
             timeout=LLM_TIMEOUT,
             max_retries=LLM_MAX_RETRIES,
         )

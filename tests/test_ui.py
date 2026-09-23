@@ -19,6 +19,23 @@ import unittest
 from speakloop import ui
 
 
+class ViewDependencyTests(unittest.TestCase):
+    """The window gets its settings from the controller (ViewSettings)."""
+
+    def test_the_view_does_not_read_the_settings_itself(self):
+        self.assertFalse(hasattr(ui, "config"))
+
+    def test_the_view_does_not_read_the_prompt_commands_itself(self):
+        self.assertFalse(hasattr(ui, "LESSON_COMMANDS"))
+        self.assertFalse(hasattr(ui, "prompt"))
+
+    def test_the_commands_are_kept_as_given(self):
+        settings = ui.ViewSettings(lesson_language="English",
+                                   show_notes=False,
+                                   commands=("hint", "finish"))
+        self.assertEqual(settings.commands, ("hint", "finish"))
+
+
 class CenteredGeometryTests(unittest.TestCase):
     """Where the window opens on the screen."""
 

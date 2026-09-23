@@ -19,7 +19,8 @@ import numpy as np
 import sounddevice as sd
 
 from speakloop import config
-from speakloop.audio_io import reset_portaudio, stream_closed, stream_opened
+from speakloop.audio_io import (AUDIO_LOCK, reset_portaudio, stream_closed,
+                                stream_opened)
 
 # Technical recording and signal processing parameters
 RECORDING_BLOCKSIZE = 0  # 0 -> PortAudio picks an optimal block size. A small
@@ -252,7 +253,7 @@ class AudioRecorder:
             self.recorded_chunks.append(indata.copy())
 
         try:
-            with config.AUDIO_LOCK:
+            with AUDIO_LOCK:
                 reset_portaudio()
                 stream = sd.InputStream(
                         samplerate=self.capture_sr,
@@ -356,7 +357,7 @@ class AudioRecorder:
 
                     time.sleep(0.01)
             finally:
-                with config.AUDIO_LOCK:
+                with AUDIO_LOCK:
                     try:
                         stream.stop()
                         stream.close()
