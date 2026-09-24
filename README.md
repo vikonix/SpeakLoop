@@ -197,7 +197,7 @@ A reply that does not follow this format is shown in full, is not read aloud, an
 
 ## The Transcript
 
-Every lesson is written to `transcript/`, under a name taken from the time it started:
+Every lesson is written to `transcript/`, under a name taken from the time it started. The files are created when the lesson opens, after the models are loaded, so an application closed while it loads leaves no file:
 
 - `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a `[System]` line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
 - `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines.

@@ -457,8 +457,14 @@ class TutorView:
         The space bindings sit on the root window and therefore also see the
         keys pressed inside the entry. Without this check a space typed in a
         phrase would start a recording instead of a space.
+
+        A closed entry keeps the focus it had (Tk does not move it), so the
+        focus alone is not enough: without the state check Space could not
+        end a take after a typed phrase, because the entry is closed while
+        the microphone is open.
         """
-        return self.root.focus_get() is self.text_entry
+        return (self.root.focus_get() is self.text_entry
+                and str(self.text_entry.cget("state")) == tk.NORMAL)
 
     def _on_space_press(self, _event):
         if self._typing():
@@ -475,11 +481,16 @@ class TutorView:
 
         An entry that holds only spaces sends nothing: the window stays as it
         is, which is what the learner sees anyway.
+
+        The focus goes back to the window after a phrase is sent, so the next
+        Space starts a take or interrupts the speech instead of typing a space
+        into the entry. To type the next phrase the learner clicks the entry.
         """
         phrase = clean_input(self.text_entry.get())
         if not phrase:
             return
         self.text_entry.delete(0, tk.END)
+        self.root.focus_set()
         self._cb.on_text_submitted(phrase)
 
     def _set_input_enabled(self, enabled: bool):

@@ -5,7 +5,8 @@
 
 The window itself needs a display and is checked by hand. What is testable are
 the pure helpers: the geometry one, which decides where the window opens, and
-the one that cleans a typed phrase before it is sent.
+the one that cleans a typed phrase before it is sent. The Space rule
+(_typing) is tested on stand-ins for the root and the entry.
 
 Importing ui.py creates no widget, so this file runs without a display.
 
@@ -14,7 +15,9 @@ Run from the project root with:
     python -m unittest tests.test_ui
 """
 
+import tkinter as tk
 import unittest
+from types import SimpleNamespace
 
 from speakloop import ui
 
@@ -90,6 +93,44 @@ class CleanInputTests(unittest.TestCase):
 
     def test_spaces_alone_give_an_empty_phrase(self):
         self.assertEqual(ui.clean_input("   \n\t "), "")
+
+
+class _StubEntry:
+    """A stand-in for the text entry: only the state is read."""
+
+    def __init__(self, state: str):
+        self._state = state
+
+    def cget(self, option: str) -> str:
+        if option != "state":
+            raise KeyError(option)
+        return self._state
+
+
+class TypingTests(unittest.TestCase):
+    """_typing decides whether Space goes to the entry or to the recording."""
+
+    @staticmethod
+    def _view(entry_state: str, focus_on_entry: bool):
+        entry = _StubEntry(entry_state)
+        other_widget = object()
+        focused = entry if focus_on_entry else other_widget
+        root = SimpleNamespace(focus_get=lambda: focused)
+        return SimpleNamespace(root=root, text_entry=entry)
+
+    def test_an_open_entry_with_the_focus_takes_the_space(self):
+        view = self._view(tk.NORMAL, focus_on_entry=True)
+        self.assertTrue(ui.TutorView._typing(view))
+
+    def test_a_closed_entry_with_the_focus_leaves_the_space_to_the_recording(self):
+        # The entry is closed while the microphone is open, and it keeps the
+        # focus: Space must still end the take.
+        view = self._view(tk.DISABLED, focus_on_entry=True)
+        self.assertFalse(ui.TutorView._typing(view))
+
+    def test_an_open_entry_without_the_focus_leaves_the_space_to_the_recording(self):
+        view = self._view(tk.NORMAL, focus_on_entry=False)
+        self.assertFalse(ui.TutorView._typing(view))
 
 
 if __name__ == "__main__":

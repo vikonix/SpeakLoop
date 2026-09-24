@@ -128,9 +128,12 @@ the key differ.
   take made during the previous exchange waits instead of being dropped.
   `load_components` builds the lesson (`prompt.build_system_prompt`, then
   `Lesson`) before it loads any model, so a bad prompt file stops the start at
-  once. `make_app_ready` opens the lesson (`_open_lesson`): the first model
-  request runs like an exchange, with its own stop event and under the same
-  lock. `_ask_model` is the one path to the model: it shows the reply
+  once. `make_app_ready` creates the transcript writer
+  (`_start_transcript`) and then opens the lesson (`_open_lesson`): the first
+  model request runs like an exchange, with its own stop event and under the
+  same lock. Until the writer exists `_record` keeps nothing, so the
+  `[System]` lines of the loading stay in the window alone, a run closed while
+  it loads leaves no file, and the file name is the time the lesson opened. `_ask_model` is the one path to the model: it shows the reply
   (`_show_reply`: NOTE, SAY, SUMMARY in this order, or the whole text of a
   reply outside the contract) and queues only the sentences of SAY, with the
   markdown taken out of them for the speech alone. A reply outside the
@@ -168,7 +171,11 @@ the key differ.
   nothing), so the controller receives a phrase and never a widget. The space
   bindings sit on the root window and therefore also see keys typed in the
   entry - `_typing()` is what keeps a space inside a phrase from starting a
-  take. `_set_input_enabled()` is called from the `enter_*` intents themselves
+  take. It is True only while the entry has the focus AND is open: a closed
+  entry keeps the focus, and Space must still end a take. `_submit_text()`
+  also gives the focus back to the window after a phrase is sent, so Space
+  works for the microphone again at once; the next typed phrase starts with
+  a click in the entry. `_set_input_enabled()` is called from the `enter_*` intents themselves
   (closed while recording, transcribing and answering; open while the partner
   speaks, where Enter interrupts it), so the controller never enables the entry
   by hand. The status bar shows the state alone: the STT and LLM durations are
@@ -271,9 +278,9 @@ the key differ.
   is written first: markdown can be built from jsonl, not the other way round.
   `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its
   meaning, not when an optional one is added. No file is created before the
-  first record (today that is the first `[System]` line at startup, E1 of
-  `docs/review-2026-09-23.md`), and a file that cannot be written is logged once and then left
-  alone - a lesson must not end because a disk is full.
+  first record, and app.py creates the writer only when the lesson opens (its
+  first record is the "Ready" line). A file that cannot be written is logged
+  once and then left alone - a lesson must not end because a disk is full.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
   client with the conversation history; used by both backends. app.py
   points it once at `config.LLM_URL` with `config.LLM_API_KEY`

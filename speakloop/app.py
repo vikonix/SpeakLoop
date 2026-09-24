@@ -188,23 +188,16 @@ class VoiceTutorController:
         # untouched by "lm-studio": all of its methods are no-ops until start().
         self._llm_server = LLMServerController()
 
-        # The transcript of this lesson (speakloop/transcript.py), with the
-        # settings of the run. Its files are created with the first record.
-        self._lesson_start = datetime.now()
+        # The transcript of this lesson (speakloop/transcript.py). None until
+        # make_app_ready opens the lesson: a run that stops while it loads
+        # must leave no file, and the file name must be the time the lesson
+        # starts, not the time the application starts.
+        self.transcript: Optional[transcript.TranscriptWriter] = None
         # The number of the latest phrase of the learner. A phrase gets its
         # number from _next_turn, and its reply carries the same number; the
         # opening question answers no phrase and has 0.
         self._turn = 0
         self._turn_lock = threading.Lock()
-        self.transcript = transcript.TranscriptWriter(
-            config.TRANSCRIPT_DIR, self._lesson_start, transcript.meta_record(
-                started_at=self._lesson_start,
-                target_language=config.TARGET_LANGUAGE,
-                explanation_language=config.EXPLANATION_LANGUAGE,
-                first_topic=config.FIRST_TOPIC,
-                llm_model=self._chat_model_name(),
-                stt_model=config.WHISPER_MODEL,
-                tts_voice=config.TTS_VOICE))
 
         # The window. Built last of the members, because the loader thread
         # started below drives it at once.
@@ -241,6 +234,24 @@ class VoiceTutorController:
             return os.path.basename(config.EXTERNAL_MODEL_PATH)
         return self.llm_backend
 
+    def _start_transcript(self) -> None:
+        """Create the transcript writer of the lesson. (Tk thread.)
+
+        Called once, by make_app_ready. The records written before this call
+        are not kept: they are the service lines of the loading, which stay
+        in the window and in logs/main.log.
+        """
+        lesson_start = datetime.now()
+        self.transcript = transcript.TranscriptWriter(
+            config.TRANSCRIPT_DIR, lesson_start, transcript.meta_record(
+                started_at=lesson_start,
+                target_language=config.TARGET_LANGUAGE,
+                explanation_language=config.EXPLANATION_LANGUAGE,
+                first_topic=config.FIRST_TOPIC,
+                llm_model=self._chat_model_name(),
+                stt_model=config.WHISPER_MODEL,
+                tts_voice=config.TTS_VOICE))
+
     def _next_turn(self) -> int:
         """Give a new phrase of the learner its number. (Any thread.)
 
@@ -259,7 +270,12 @@ class VoiceTutorController:
         the event gets the number of the latest phrase. The writer has a lock
         of its own, so the exchange threads and the Tk thread use this the
         same way.
+
+        Before the lesson opens there is no writer, and the event is not kept
+        (see _start_transcript).
         """
+        if self.transcript is None:
+            return
         if turn is None:
             turn = self._turn
         self.transcript.add(transcript.event_record(
@@ -289,8 +305,10 @@ class VoiceTutorController:
     # ------------------------------------------------------------------
     def load_components(self):
         logging.info("Starting model loading thread...")
+        # The loading steps are shown in the status bar alone: the chat holds
+        # the lesson and the lines the learner must act on (errors, warnings,
+        # an adopted server). main.log has every step.
         self.root.after(0, self.view.enter_loading)
-        self._system("Loading the speech models...")
 
         try:
             # First of all: a missing or edited prompt file stops the start at
@@ -309,12 +327,6 @@ class VoiceTutorController:
             logging.info("TTS Model loaded successfully.")
 
             if self.llm_backend == "llama-server":
-                # Neutral until start() has decided. It uses a server that
-                # already listens instead of launching one, and a line that
-                # named the model and the launch would then describe something
-                # that did not happen. Both are said below, once it is known
-                # which of the two it was.
-                self._system("Connecting to the LLM server...")
                 self.root.after(0, self.view.enter_connecting)
                 ready = self._llm_server.start(self.llm_mgr)
                 if not ready:
@@ -340,9 +352,6 @@ class VoiceTutorController:
                                  f"on {config.LLM_SERVER_HOST}:"
                                  f"{config.LLM_SERVER_PORT}. It keeps the "
                                  f"model it was started with.")
-                else:
-                    model_name = os.path.basename(config.EXTERNAL_MODEL_PATH)
-                    self._system(f"llama-server is ready with {model_name}.")
                 served_n_ctx = self._llm_server.served_n_ctx
                 if served_n_ctx is not None:
                     self._context_size = served_n_ctx
@@ -387,6 +396,9 @@ class VoiceTutorController:
 
     def make_app_ready(self):
         self.app_ready = True
+        # Before the first line of the lesson, so the "Ready" line below is
+        # the first record of the file.
+        self._start_transcript()
         self.view.enter_app_ready()
         self._system(f"Ready. The lesson is in {config.TARGET_LANGUAGE}. "
                      f"Use the command buttons above, or say the same words: "
@@ -897,7 +909,9 @@ class VoiceTutorController:
 
         # The readable view of a lesson that ended without a summary. The jsonl
         # file needs nothing here: every record went to disk when it happened.
-        self.transcript.save_markdown()
+        # No writer means the lesson never opened, and there is nothing to save.
+        if self.transcript is not None:
+            self.transcript.save_markdown()
 
         self.root.destroy()
         # Not the interpreter's normal exit: with CUDA torch loaded, tearing the

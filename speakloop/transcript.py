@@ -47,8 +47,9 @@ SOURCE_BUTTON = "button"
 SCHEMA_VERSION = 1
 
 # The name of the two files of a lesson, without the extension. Minutes and no
-# seconds: two lessons in one minute would need the same file, and that does
-# not happen (a lesson opens with a model request of about a minute).
+# seconds: two lessons in one minute would need the same file. That does not
+# happen if the caller creates the writer when the lesson opens, after the
+# models are loaded, and not when the application starts.
 _FILE_STEM_FORMAT = "dialog-%Y-%m-%d_%H-%M"
 
 # The header of the markdown view.
