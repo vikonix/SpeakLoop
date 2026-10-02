@@ -72,21 +72,30 @@ CONTEXT_OVERFLOW_TYPE = "exceed_context_size_error"
 class EmptyCutReplyError(RuntimeError):
     """The server stopped the reply at the length limit before any text.
 
-    Near the end of the context the model can use the last free tokens
-    without writing any text, so the context is as full as after a refusal.
+    Two causes give the same empty reply. Near the end of the context the
+    model can use the last free tokens without writing any text, and the
+    context is then as full as after a refusal. Or the model used the whole
+    reply limit on thinking the server hides, and the context still has room.
+    reply_limit_reached tells them apart, because the advice to the learner
+    is not the same: a new lesson for the first, a model setting for the
+    second.
     """
+
+    def __init__(self, message: str, reply_limit_reached: bool = False):
+        super().__init__(message)
+        self.reply_limit_reached = reply_limit_reached
 
 
 def is_context_overflow(error: Exception) -> bool:
     """True when the context is too full for an answer.
 
-    A refusal of the server, or a reply cut off before any text
-    (EmptyCutReplyError). llama-server names the refusal in the error type.
-    Other servers (LM Studio) only say it in words, so the message is read
-    too.
+    A refusal of the server, or a reply cut off before any text by the end
+    of the context (an EmptyCutReplyError that did not reach the reply
+    limit). llama-server names the refusal in the error type. Other servers
+    (LM Studio) only say it in words, so the message is read too.
     """
     if isinstance(error, EmptyCutReplyError):
-        return True
+        return not error.reply_limit_reached
     body = getattr(error, "body", None)
     if isinstance(body, dict):
         inner = body.get("error")
@@ -289,9 +298,17 @@ class LLMManager:
                 # An error and not a stand-in text: a stand-in in the history
                 # would show the model a reply outside the lesson contract.
                 if finish_reason == "length":
+                    # A reply as long as the limit was stopped by the limit;
+                    # a shorter one by the end of the context. Without a
+                    # usage report the cause is unknown, and the full context
+                    # stays the answer.
+                    reply_limit_reached = (
+                        usage is not None
+                        and usage.completion_tokens >= config.LLM_MAX_TOKENS)
                     raise EmptyCutReplyError(
                         "The reply was cut off before any text: the context "
-                        "or the reply limit is full.")
+                        "or the reply limit is full.",
+                        reply_limit_reached)
                 raise RuntimeError("The model returned an empty reply.")
 
             # The whole history is kept, without trimming. The lesson SUMMARY

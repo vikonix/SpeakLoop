@@ -1860,6 +1860,113 @@ Enter переходит на окно (вариант Б ревью), нуже�
 
 **На удаление:** нет.
 
+### 9.4. Проверка LM Studio (2026-10-02, проверен)
+
+Проверка варианта `"llm_backend": "lm-studio"`, отложенная в шаге R2.
+Модель в LM Studio: `google/gemma-4-12b-qat`.
+
+**Прогоны (2026-10-02):**
+
+- 22:32, `localhost:1234`, размышление включено: ответ на `Begin.` из 9 слов
+  стоил 407 токенов и 6,4 с (у llama-server 12 токенов). Вторая реплика:
+  размышление заняло весь предел ответа (512), текста нет,
+  `EmptyCutReplyError`, в чате неверная строка о полном контексте (2626
+  токенов из 16384). После выключения размышления в LM Studio урок прошёл:
+  10 ответов в контракте, usage есть у каждого, откат истории после ошибки
+  верный;
+- там же: от запроса до `HTTP 200` всегда 2,02-2,05 с (11 запросов из 12).
+  Причина: `localhost` на Windows сначала пробуется по IPv6, LM Studio
+  слушает только IPv4;
+- 22:41, `"lm_studio_host": "127.0.0.1:1234"`: от запроса до `HTTP 200` 5-30
+  мс, полный ответ 0,34-0,93 с, как у llama-server. Кнопки команд,
+  прерывание озвучки кнопкой, `SUMMARY`, выход без ошибок; в `meta`
+  транскрипта `"llm_model": "lm-studio"`;
+- 22:44, сервер LM Studio без загруженной модели: проверка связи проходит
+  (`GET /v1/models` 200), ошибка приходит на `Begin.`: `No models loaded.
+  Please load a model in the developer page or use the 'lms load' command.`
+  Строка в чате не называла, чья это фраза;
+- 22:46, LM Studio выключен: после предупреждения окно писало «Ready»,
+  создавало транскрипт и отправляло `Begin.`, вторая строка `LLM error:
+  Connection error.`, в логе traceback на 80 строк. Запуск LM Studio после
+  этого урок не открывал;
+- в двух последних прогонах записан `.md` урока без единой реплики.
+
+**Решения владельца (2026-10-02):**
+
+- размышление для LM Studio из приложения не выключается (решение 2b
+  остаётся), требование записано в README и `settings.example.json`;
+- пустой оборванный ответ различает причину: предел ответа или конец
+  контекста;
+- умолчание `lm_studio_host` - `127.0.0.1:1234`;
+- строка ошибки для LM Studio начинается с `LM Studio error:`;
+- без ответа LM Studio загрузка останавливается, как для llama-server;
+- `.md` для урока без реплик не создаётся.
+
+**Что сделано:**
+
+- `speakloop/llm.py`: у `EmptyCutReplyError` поле `reply_limit_reached`
+  (`completion_tokens` из отчёта usage дошёл до `LLM_MAX_TOKENS`);
+  `is_context_overflow` считает такую ошибку полным контекстом, только когда
+  поле ложно. Без отчёта usage поведение прежнее;
+- `speakloop/app.py`: `REPLY_LIMIT_MESSAGE` («The model used the whole reply
+  limit and wrote no text. If the model has a thinking mode, turn it off.»);
+  префикс `LM Studio error:` для варианта `lm-studio`; в `load_components`
+  при молчащем LM Studio строка ошибки с адресом, `view.server_failed` и
+  выход без «Ready», урока и транскрипта;
+- `speakloop/config.py`: `LM_STUDIO_DEFAULT_HOST = "127.0.0.1:1234"`;
+- `speakloop/transcript.py`: `save_markdown()` ничего не пишет, если среди
+  записей нет реплик урока (`learner`, `note`, `say`, `summary`);
+- тесты: `test_llm` (предел ответа и конец контекста), `test_config`
+  (умолчание адреса), `test_transcript` (урок из служебных строк без `.md`);
+- `config/settings.example.json`, `README.md`, `AGENTS.md`.
+
+**Проверка:**
+
+- `python -m unittest discover -s tests -v` проходит;
+- убрать `lm_studio_host` из `settings.json`: в логе `Initializing LLM
+  client → http://127.0.0.1:1234/v1`, от запроса до `HTTP 200` десятки
+  миллисекунд;
+- LM Studio выключен: одна строка `Error: LM Studio does not answer at
+  127.0.0.1:1234. ...`, состояние `LLM Server Error`, строки «Ready» нет,
+  микрофон и поле не работают, в `transcript/` нового файла нет, в
+  `main.log` нет traceback;
+- сервер LM Studio без модели: строка `LM Studio error: No models loaded.
+  ...`, в `transcript/` есть jsonl и нет `.md`;
+- размышление включено в LM Studio: при пустом ответе строка «The model
+  used the whole reply limit and wrote no text...», а не строка о полном
+  контексте;
+- размышление выключено: урок идёт как в прогоне 22:41;
+- `"llm_backend": "llama-server"`: урок идёт как раньше.
+
+**Прогон после правок (2026-10-02):** 593 теста проходят. Пять запусков:
+
+- 22:56, LM Studio выключен: в логе одна строка `LLM server not available:
+  Connection error.`, traceback нет, урок не открывался, файлов в
+  `transcript/` нет;
+- 22:57, сервер без модели: в чате `LM Studio error: No models loaded. ...`,
+  записан только `dialog-2026-10-02_22-57.jsonl`, `.md` нет;
+- 23:00, размышление включено: первый ответ 350 токенов и 5,6 с, на второй
+  реплике пустой оборванный ответ, в чате «The model used the whole reply
+  limit and wrote no text. If the model has a thinking mode, turn it off.»
+  (LM Studio присылает отчёт usage и при обрыве по длине);
+- 23:01, размышление выключено: урок из 8 ответов (10-70 токенов, 0,5-1,7
+  с), кнопки `hint`, `simpler`, `new topic`, `finish`, переключатель Notes,
+  оба файла транскрипта;
+- адрес везде `http://127.0.0.1:1234/v1`, от запроса до `HTTP 200` 4-30 мс.
+
+По словам владельца (2026-10-02): запуск без `lm_studio_host` в
+`settings.json` работает с адресом по умолчанию, обычный запуск с
+`llama-server` после правок работает.
+
+**Не проверено:** прерывание запроса во время генерации (ответы по 0,4 с).
+
+**Замечено, не по коду шага:** в уроке `22-32` `SUMMARY` вышел на
+английском, `hint` дал `NOTE` с исправлением реплики самого тьютора, Whisper
+распознал «I am C++ programmer» как `AMC++ Programmer` и `I am SC++
+Programmer`. В уроке `22-41` `SUMMARY` на русском.
+
+**На удаление:** нет.
+
 ---
 
 ## 10. Открытые вопросы

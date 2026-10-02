@@ -216,6 +216,15 @@ class WriterTests(unittest.TestCase):
         self.writer.save_markdown()
         self.assertEqual(list(self.directory.iterdir()), [])
 
+    def test_a_lesson_with_service_lines_only_leaves_no_markdown(self):
+        # A lesson that failed on its first request: the view would be a
+        # header with nothing under it. The jsonl file keeps the lines.
+        self.writer.add(transcript.event_record(
+            _START, 0, transcript.TYPE_SYSTEM, "Ready."))
+        self.writer.save_markdown()
+        self.assertFalse(self.writer.markdown_path.exists())
+        self.assertTrue(self.writer.jsonl_path.exists())
+
     def test_the_meta_line_comes_first_and_once(self):
         self.writer.add(transcript.event_record(_START, 0,
                                                 transcript.TYPE_SAY, "Hi."))

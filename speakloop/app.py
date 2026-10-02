@@ -44,7 +44,8 @@ from speakloop import (bootstrap, detect_hardware, lifecycle, prompt,
                        transcript)
 from speakloop.contract import Reply, split_sentences, strip_markdown
 from speakloop.conversation import Lesson, context_level_reached
-from speakloop.llm import LLMManager, error_message, is_context_overflow
+from speakloop.llm import (EmptyCutReplyError, LLMManager, error_message,
+                           is_context_overflow)
 from speakloop.llm_server_ctl import LLMServerController
 from speakloop.playback import PlaybackController
 from speakloop.recorder import AudioRecorder, normalize_audio, warm_up_resampler
@@ -96,6 +97,12 @@ CUT_REPLY_MESSAGE = ("The reply was cut off: the model context or the reply "
 CONTEXT_FULL_MESSAGE = ("The lesson is too long for the model context, so "
                         "the model cannot answer. Close the window and "
                         "start a new lesson.")
+
+# The [System] line when the model used the whole reply limit and wrote no
+# text, with room left in the context. A thinking mode does that: the server
+# keeps the thinking out of the reply, so the limit ends before the answer.
+REPLY_LIMIT_MESSAGE = ("The model used the whole reply limit and wrote no "
+                       "text. If the model has a thinking mode, turn it off.")
 
 
 class VoiceTutorController:
@@ -365,10 +372,17 @@ class VoiceTutorController:
                                  f"{config.EXTERNAL_N_CTX}. A long lesson "
                                  f"may not fit. See logs/main.log.")
             else:
+                self.root.after(0, self.view.enter_connecting)
                 if not self.llm_mgr.check_connection():
-                    self._system("Warning: LM Studio is offline. Start "
-                                 "it to use voice tutor!")
-                    logging.warning("LM Studio is offline during initialization.")
+                    # The same stop as for a llama-server that did not start:
+                    # the lesson is opened once, so a window made ready here
+                    # shows "Ready", fails on the first request and stays
+                    # without a lesson even after LM Studio is started.
+                    self._system(f"Error: LM Studio does not answer at "
+                                 f"{config.LM_STUDIO_HOST}. Start its server, "
+                                 f"load a model and start SpeakLoop again.")
+                    self.root.after(0, self.view.server_failed)
+                    return
 
             self.root.after(0, self.view.enter_warming_up)
             self.stt_mgr.warm_up()
@@ -707,8 +721,15 @@ class VoiceTutorController:
             # was queued for speech, so there is nothing to drop.
             if is_context_overflow(llm_error):
                 self._system(CONTEXT_FULL_MESSAGE)
+            elif isinstance(llm_error, EmptyCutReplyError):
+                self._system(REPLY_LIMIT_MESSAGE)
             else:
-                self._system(f"LLM error: {error_message(llm_error)}")
+                # LM Studio is named because the sentence after the label is
+                # its own ("load a model in the developer page"), and the
+                # learner has to know which program it speaks about.
+                label = ("LM Studio error" if self.llm_backend == "lm-studio"
+                         else "LLM error")
+                self._system(f"{label}: {error_message(llm_error)}")
             self._enter_later(self.view.enter_error, stop_event, "LLM Error")
             return
 

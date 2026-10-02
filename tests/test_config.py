@@ -391,6 +391,10 @@ class LlmSettingTests(unittest.TestCase):
         self.assertEqual(config._client_address("lm-studio"),
                          (config.LM_STUDIO_URL, config.LM_STUDIO_API_KEY))
 
+    def test_the_lm_studio_default_is_an_address_and_not_a_name(self):
+        # "localhost" costs about 2 s on every reply on Windows.
+        self.assertEqual(config.LM_STUDIO_DEFAULT_HOST, "127.0.0.1:1234")
+
     def test_the_client_address_follows_the_selected_backend(self):
         self.assertEqual((config.LLM_URL, config.LLM_API_KEY),
                          config._client_address(config.LLM_BACKEND))

@@ -236,9 +236,14 @@ class TranscriptWriter:
         closes, because the learner can speak after the summary. The file is
         replaced each time, which is why it is built from the records and not
         appended to.
+
+        No file for a lesson without a phrase, a correction or a summary: a
+        lesson that failed on its first request has service lines only, and
+        its view would be a header with nothing under it.
         """
         with self._lock:
-            if not self._records:
+            if not any(record.get("type") in _MD_TYPES
+                       for record in self._records):
                 return
             text = to_markdown(self._meta, self._records)
             try:

@@ -139,7 +139,14 @@ the key differ.
   markdown taken out of them for the speech alone. A reply outside the
   contract also gets a `[System]` line, written after the reply itself so the
   window and the file both hold the two in that order; the model is not asked
-  again.
+  again. A failed request gives one `[System]` line: `CONTEXT_FULL_MESSAGE`
+  for a full context, `REPLY_LIMIT_MESSAGE` for an empty reply that used the
+  whole reply limit (a thinking mode left on), else the server's sentence
+  after `LLM error:` or, for LM Studio, `LM Studio error:`.
+  With `"lm-studio"` `load_components` stops like it does for a llama-server
+  that did not start when LM Studio does not answer (`view.server_failed`,
+  no "Ready", no lesson, no transcript file): the lesson is opened once, so
+  a window made ready without a server stays without a lesson.
   Every window state a worker sets goes through `_enter_later`, which runs
   the intent on the Tk thread through `_enter_if_current`: only for the reply
   that is still current, so a late worker cannot draw over a new take.
@@ -279,7 +286,8 @@ the key differ.
   `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its
   meaning, not when an optional one is added. No file is created before the
   first record, and app.py creates the writer only when the lesson opens (its
-  first record is the "Ready" line). A file that cannot be written is logged
+  first record is the "Ready" line). `save_markdown()` writes nothing for a
+  lesson that has service lines only. A file that cannot be written is logged
   once and then left alone - a lesson must not end because a disk is full.
 - [`speakloop/llm.py`](speakloop/llm.py) - `LLMManager`: OpenAI-compatible
   client with the conversation history; used by both backends. app.py
@@ -297,9 +305,12 @@ the key differ.
   body, since `str()` of an API error is the whole HTTP problem.
   `is_context_overflow()` recognizes a refusal because the context is full:
   llama-server's error type `exceed_context_size_error`, a message about
-  the context length (LM Studio), or `EmptyCutReplyError`, which `ask()`
-  raises for a reply cut off by the length limit before any text (the model
-  used the last free tokens and wrote nothing). `last_reply_cut` is True when the server
+  the context length (LM Studio), or an `EmptyCutReplyError` without
+  `reply_limit_reached`. `ask()` raises that error for a reply cut off by the
+  length limit before any text, and sets `reply_limit_reached` when the usage
+  report shows a reply as long as `LLM_MAX_TOKENS`: then hidden thinking used
+  the limit and the context has room, else the model used the last free
+  tokens of the context. `last_reply_cut` is True when the server
   ended the last reply with `finish_reason: "length"` (the reply limit or the
   end of the context): such a reply looks complete, so app.py shows
   `CUT_REPLY_MESSAGE` under it.
@@ -405,6 +416,8 @@ the key differ.
   themselves stay frozen at import.
   `LLM_URL` and `LLM_API_KEY` are the address and the key of the selected
   backend (`_client_address`), the only ones the chat client uses.
+  `LM_STUDIO_DEFAULT_HOST` is `127.0.0.1:1234` and not `localhost`: on
+  Windows the name costs about 2 s on every reply.
   `LLAMA_SERVER_PATH` is only the `llama_server_path` setting (`""` when it
   is empty); the search for the binary is `llm_server_ctl.find_llama_server`,
   so config does not import the fetchers' `llama_server_fetch`. Also sets

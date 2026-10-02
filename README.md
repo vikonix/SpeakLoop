@@ -150,7 +150,7 @@ The configuration has three layers, lowest priority first:
    - `show_notes`: are the tutor's corrections shown in the chat (default `true`)? The **Notes** button writes this key back, so the next lesson opens the way the last one ended. The corrections are always part of the lesson; the key only hides them.
    - `prompt_file`: the lesson prompt. Absent (default) means [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). Use it to try a changed copy; the copy must keep the three `SETTINGS` lines, or the app does not start.
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
-   - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"localhost:1234"`).
+   - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"127.0.0.1:1234"`). For the same computer write `127.0.0.1` and not `localhost`: on Windows the name adds about 2 seconds to every reply.
    - `llama_server_path`: the `llama-server` binary to start. Empty (default) means `bin/llama/`, then a `llama-server` on PATH.
    - `external_model_path`: a GGUF model of your own. Absent (default) means the downloaded model in `models/`. For the fallback model: `"../models/llama-3.2-3b-instruct-q4_k_m.gguf"`.
    - `external_n_ctx`: context size of the local model (default 16384). `llama-server` is told not to make it smaller when it fits the model into the video memory; if the server still reports a smaller context, the chat shows a warning.
@@ -172,9 +172,9 @@ speakloop                # console script, after `pip install -e .`
 
 `speakloop --version` prints the version, `speakloop --detect-hardware` rewrites `config/hardware_config.json`.
 
-With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first.
+With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first, start its server and load a model: if the server does not answer, the app shows an error and does not open the lesson.
 
-With `llama-server` the app turns Gemma's thinking mode off in every request (the server turns it on by default), and it starts the server with `GGML_OP_OFFLOAD_MIN_BATCH=16` so that short prompts are computed on the GPU when the model does not fit into the video memory; set the variable before the start to try another value. The sampling values are the ones recommended for Gemma (temperature 1.0, top_p 0.95, top_k 64). With LM Studio, use its own thinking switch.
+With `llama-server` the app turns Gemma's thinking mode off in every request (the server turns it on by default), and it starts the server with `GGML_OP_OFFLOAD_MIN_BATCH=16` so that short prompts are computed on the GPU when the model does not fit into the video memory; set the variable before the start to try another value. The sampling values are the ones recommended for Gemma (temperature 1.0, top_p 0.95, top_k 64). The app sends none of this to LM Studio, so set it there for the model: turn the thinking mode off (with it on, the hidden thinking uses the reply limit and the chat shows "The model used the whole reply limit and wrote no text"), set the context length to `external_n_ctx` and Top K to 64. Checked with `google/gemma-4-12b-qat`.
 
 On a 4 GB card (GTX 1650 Ti) a short reply of the model takes about 8-10 seconds, and a reply with a correction about 15-17 seconds. Before the reply come the wait for silence (`silence_timeout`, 3 seconds by default) and speech recognition (about 1.8 seconds on the GPU).
 
@@ -200,7 +200,7 @@ A reply that does not follow this format is shown in full, is not read aloud, an
 Every lesson is written to `transcript/`, under a name taken from the time it started. The files are created when the lesson opens, after the models are loaded, so an application closed while it loads leaves no file:
 
 - `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a `[System]` line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
-- `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines.
+- `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines. A lesson without a phrase, a correction or a summary (for example, one that failed on its first request) gets no markdown file.
 
 The jsonl file is the one to read with a program: the markdown file can always be built from it again.
 

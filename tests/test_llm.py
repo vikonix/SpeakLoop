@@ -348,6 +348,30 @@ class FailureTests(unittest.TestCase):
         self.assertTrue(is_context_overflow(caught.exception))
         self.assertEqual(len(manager.messages), 1)
 
+    def _empty_cut_reply(self, completion_tokens):
+        """The error of an empty reply cut off after *completion_tokens*."""
+        manager = _manager()
+        manager.client.chat.completions.create.return_value = _stream_of(
+            [_chunk("", finish_reason="length"),
+             _usage_chunk(2000, completion_tokens)])
+        with self.assertLogs(level="ERROR"), \
+                self.assertRaises(EmptyCutReplyError) as caught:
+            manager.ask("Hi", threading.Event())
+        return caught.exception
+
+    def test_a_reply_limit_used_without_text_is_not_a_full_context(self):
+        # Hidden thinking used the whole reply limit and the context has
+        # room: "start a new lesson" would be the wrong advice.
+        error = self._empty_cut_reply(config.LLM_MAX_TOKENS)
+        self.assertTrue(error.reply_limit_reached)
+        self.assertFalse(is_context_overflow(error))
+
+    def test_an_empty_reply_cut_below_the_reply_limit_is_a_full_context(self):
+        # The reply limit was not reached, so the context ended.
+        error = self._empty_cut_reply(config.LLM_MAX_TOKENS - 1)
+        self.assertFalse(error.reply_limit_reached)
+        self.assertTrue(is_context_overflow(error))
+
 
 class HistoryTests(unittest.TestCase):
     """The conversation history is kept whole."""

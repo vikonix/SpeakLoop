@@ -388,12 +388,16 @@ if LLM_BACKEND not in LLM_BACKEND_CHOICES:
 # a full "http://host:port" URL; the port defaults to LM Studio's 1234
 # (loader.server_url normalizes every spelling to the same base URL).
 LM_STUDIO_DEFAULT_PORT = 1234
-LM_STUDIO_HOST = _USER.get("lm_studio_host", "localhost:1234")
+# The address and not the name "localhost": on Windows the name is tried as
+# IPv6 first, LM Studio listens on IPv4 only, and every new connection then
+# waits about 2 s for the second try. That was 2 s on each reply.
+LM_STUDIO_DEFAULT_HOST = "127.0.0.1:1234"
+LM_STUDIO_HOST = _USER.get("lm_studio_host", LM_STUDIO_DEFAULT_HOST)
 if not isinstance(LM_STUDIO_HOST, str) or not LM_STUDIO_HOST.strip():
     print(f"[config] settings.json: lm_studio_host must be a non-empty "
-          f"string, got {LM_STUDIO_HOST!r}; using 'localhost:1234'",
-          file=sys.stderr)
-    LM_STUDIO_HOST = "localhost:1234"
+          f"string, got {LM_STUDIO_HOST!r}; using "
+          f"{LM_STUDIO_DEFAULT_HOST!r}", file=sys.stderr)
+    LM_STUDIO_HOST = LM_STUDIO_DEFAULT_HOST
 LM_STUDIO_URL = loader.server_url(LM_STUDIO_HOST, LM_STUDIO_DEFAULT_PORT)
 # LM Studio checks no key, but the OpenAI client refuses to send an empty one.
 LM_STUDIO_API_KEY = "lm-studio"
