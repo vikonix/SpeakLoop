@@ -10,7 +10,7 @@ run SpeakLoop on a fresh machine:
   2. Detect an NVIDIA GPU / CUDA version (via nvidia-smi, no extra packages).
   3. (GPU only) install torch as a CUDA build.
   4. pip install the project dependencies (read from pyproject.toml).
-  5. Pre-download the Hugging Face models (faster-whisper large-v3-turbo,
+  5. Pre-download the Hugging Face models (faster-whisper large-v3,
      Kokoro) into model_cache/.
   6. Pre-download the Supertonic 3 TTS model into model_cache/supertonic3/
      (the Spanish TTS backend; kept outside the HF hub cache because the

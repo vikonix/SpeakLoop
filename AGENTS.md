@@ -205,7 +205,7 @@ the key differ.
   equal to the built-in palette) and `light_schema.json`. A user copy in
   `config/themes/` of the same name wins over these.
 - [`speakloop/stt.py`](speakloop/stt.py) - `STTManager`: faster-whisper
-  large-v3-turbo with VAD filtering, on `config.STT_DEVICE` (`int8_float16` on
+  large-v3 with VAD filtering, on `config.STT_DEVICE` (`int8_float16` on
   the GPU, which leaves more video memory to the chat model), in the language
   of the active profile
   (`config.WHISPER_LANGUAGE`; never automatic detection). Decoding falls back
@@ -457,7 +457,7 @@ offline once models are cached, exactly when a download would be wanted) and
 all keeping huggingface_hub out of their module-level imports so `install.py`
 can use them before the requirements step:
 
-- [`speakloop/model_fetch.py`](speakloop/model_fetch.py) - faster-whisper large-v3-turbo
+- [`speakloop/model_fetch.py`](speakloop/model_fetch.py) - faster-whisper large-v3
   and Kokoro (hub cache), Supertonic 3 (own cache directory). Owns
   `prepare_hf_env()` (Windows symlink and hf-xet workarounds).
 - [`speakloop/gguf_fetch.py`](speakloop/gguf_fetch.py) - the GGUF chat model
@@ -471,7 +471,9 @@ can use them before the requirements step:
 
 - [`speakloop/models_info.py`](speakloop/models_info.py) - model catalogue,
   the single place a repo id is written. `WHISPER` is faster-whisper
-  large-v3-turbo; every `HfRepo` names its `weights_file` (see loader).
+  large-v3 (the full model: large-v3-turbo got short phrases of a learner
+  wrong, see `docs/refactoring.md` section 9.5); every `HfRepo` names its
+  `weights_file` (see loader).
   `GGUF_CHAT` is Gemma 4 12B QAT Q4_0,
   `GGUF_CHAT_FALLBACK` is Llama 3.2 3B. Imports only `typing` (a test
   enforces it). Sizes are re-snapped with

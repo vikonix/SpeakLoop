@@ -11,7 +11,7 @@ The application is being moved to a new structure step by step. It runs from the
 ## Tech Stack
 
 - **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
-- **STT**: faster-whisper (Whisper large-v3-turbo)
+- **STT**: faster-whisper (Whisper large-v3)
 - **LLM**: Gemma 4 12B (GGUF, Q4_0 QAT) via `llama-server` (llama.cpp), or any model loaded in LM Studio
 - **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish (the Spanish lesson is not available yet)
 - **Python**: 3.11 or 3.12
@@ -49,7 +49,7 @@ The installer does these steps:
 2. Checks the Python version.
 3. Finds an NVIDIA GPU with `nvidia-smi` and, if there is one, installs the CUDA build of `torch`.
 4. Installs the Python dependencies from `pyproject.toml`.
-5. Downloads the Hugging Face models (faster-whisper large-v3-turbo, Kokoro) into `model_cache/`.
+5. Downloads the Hugging Face models (faster-whisper large-v3, Kokoro) into `model_cache/`.
 6. Downloads the Supertonic 3 speech model (Spanish) into `model_cache/supertonic3/`.
 7. Installs the pinned `llama-server` binary into `bin/llama/`.
 8. Downloads the GGUF chat model into `models/`.
@@ -77,7 +77,7 @@ Run these commands in the activated virtual environment:
 pip install -e .
 
 # Models and the llama-server binary
-python -m speakloop.model_fetch         # faster-whisper large-v3-turbo, Kokoro, Supertonic 3
+python -m speakloop.model_fetch         # faster-whisper large-v3, Kokoro, Supertonic 3
 python -m speakloop.llama_server_fetch  # pinned llama.cpp build into bin/llama/
 python -m speakloop.gguf_fetch          # GGUF chat model into models/
 # python -m speakloop.gguf_fetch --fallback   # optional smaller model, see Models
@@ -125,7 +125,7 @@ The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA b
 
 | Model | Used for | Download | Command |
 |---|---|---|---|
-| Whisper large-v3-turbo (`mobiuslabsgmbh/faster-whisper-large-v3-turbo`) | speech recognition | 1622 MB | `python -m speakloop.model_fetch --hf` |
+| Whisper large-v3 (`Systran/faster-whisper-large-v3`) | speech recognition | about 3090 MB | `python -m speakloop.model_fetch --hf` |
 | Kokoro-82M (`hexgrad/Kokoro-82M`) | speech output (English) | 363 MB | `python -m speakloop.model_fetch --hf` |
 | Supertonic 3 (`Supertone/supertonic-3`) | speech output (Spanish) | 404 MB | `python -m speakloop.model_fetch --supertonic`. The weights have the **OpenRAIL-M** license, so they are downloaded, not included |
 | `gemma-4-12B-it-QAT-Q4_0.gguf` (`lmstudio-community/gemma-4-12B-it-QAT-GGUF`) | conversation | 6976 MB | `python -m speakloop.gguf_fetch` |

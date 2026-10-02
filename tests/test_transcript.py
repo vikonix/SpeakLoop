@@ -45,7 +45,7 @@ def _meta():
         explanation_language="Russian",
         first_topic="shopping",
         llm_model="gemma-4-12B-it-QAT-Q4_0.gguf",
-        stt_model="mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+        stt_model="Systran/faster-whisper-large-v3",
         tts_voice="af_heart")
 
 

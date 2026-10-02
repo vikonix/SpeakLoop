@@ -114,20 +114,26 @@ class PackagedModel(NamedTuple):
 # Measure the WHOLE snapshot, not the weights the app loads: snapshot_download
 # without allow_patterns fetches every file in the repo.
 
-# The speech recognition model: Whisper large-v3-turbo in the CTranslate2
-# format, the repo faster-whisper resolves the model name "large-v3-turbo" to.
+# The speech recognition model: Whisper large-v3 in the CTranslate2 format,
+# the repo faster-whisper resolves the model name "large-v3" to.
 # The app must load it by this repo id (or by the name that maps to it), or the
 # load goes to a repo the installer never fetched. The record name carries no
 # model size, so a change of the model changes only this record.
 #
-# Turbo keeps the large-v3 encoder and has 4 decoder layers, so it recognizes
-# unfamiliar words much better than small and still answers fast. It is
-# multilingual: a Spanish lesson needs no other model.
+# The full model and not large-v3-turbo
+# ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1622 MB): turbo has 4
+# decoder layers on the same encoder where this one has 32, and on a
+# learner's accent it got 3 of 5 short phrases wrong that this model got
+# right ("I am a C++ programmer" came out as "IMSC++ Programmer"). The price
+# is about twice the video memory, which on a small card is taken from the
+# chat model, and a slower decoding. It is multilingual: a Spanish lesson
+# needs no other model.
 WHISPER = HfRepo(
-    "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
-    "faster-whisper large-v3-turbo (speech recognition)",
-    # 1 621 668 947 bytes, the sum of the repo file list.
-    size_mb=1622,  # summed 2026-09-16
+    "Systran/faster-whisper-large-v3",
+    "faster-whisper large-v3 (speech recognition)",
+    # About 3.1 GB by the size of model.bin; not summed from the repo file
+    # list with tools/measure_model_sizes.py.
+    size_mb=3090,
     weights_file="model.bin",
 )
 

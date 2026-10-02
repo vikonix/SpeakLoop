@@ -1967,6 +1967,106 @@ Programmer`. В уроке `22-41` `SUMMARY` на русском.
 
 **На удаление:** нет.
 
+### 9.5. Модель распознавания: large-v3 вместо турбо (2026-10-02, проверен)
+
+Причина: large-v3-turbo в уроках этого дня искажала короткие фразы
+(`AMC++ Programmer`, `kurfe`, `I like the word YouTube`), и тьютор исправлял
+то, чего ученик не говорил.
+
+**Сравнение (2026-10-02, RTX 3090, `int8_float16`, одни и те же пять фраз по
+одному произнесению):** «I am a C++ programmer», «I want to order coffee», «I
+like to watch YouTube», «I am working on different projects», «In the morning
+I have a daily meeting».
+
+| Вариант | Ошибок из 5 | Время распознавания |
+|---|---|---|
+| large-v3-turbo, beam 1 | 3 (`IMSC++ Programmer.`, `I won't draw the coffee.`, `I like the word YouTube.`) | 300-420 мс |
+| large-v3-turbo, beam 5 | 2 (`IMSC++ Programmer`, `I like the word YouTube.`) | 380-510 мс |
+| large-v3, beam 1 | 0 | 330-630 мс |
+
+Проверка на фразах с намеренными ошибками (large-v3, beam 1): «I am C++
+programmer» и «In the morning I have daily meeting» записаны как сказаны, без
+артикля; «I am working with difference projects» записано как `I'm working
+with different projects.` (форма слова исправлена, предлог остался). Турбо в
+уроке 22:35 записала `difference projects` дословно.
+
+**Решение владельца (2026-10-02):** large-v3, `WHISPER_BEAM_SIZE = 1`. Ключа
+настройки для модели по-прежнему нет, модель задаётся записью
+`models_info.WHISPER`. Выравнивание близких по звучанию форм слов -
+известное ограничение (раздел 11).
+
+**Что сделано:**
+
+- `speakloop/models_info.py`: `WHISPER` - `Systran/faster-whisper-large-v3`,
+  комментарий с причиной выбора и ценой;
+- `README.md`, `AGENTS.md`, `install.py` (docstring),
+  `docs/model-parameters.md`, `tests/test_transcript.py` (пример значения в
+  мета-записи): название модели.
+
+**Открыто:**
+
+- размер модели в записи (3090 МБ) приблизительный, пересчитать через
+  `tools/measure_model_sizes.py` и поправить в `models_info.py` и в таблице
+  `README.md`;
+- ноутбук с картой 4 ГБ: large-v3 занимает больше видеопамяти, чем турбо, и
+  она уходит у модели чата. Замера нет. Запасные ходы: `"stt_device":
+  "cpu"` или возврат к турбо с beam 5;
+- в `WHISPER_INITIAL_PROMPT` получается «a English tutor»; текст влияет на
+  распознавание, поэтому правка требует повторного прогона пяти фраз.
+
+**На удаление:** нет. Кэш турбо
+(`model_cache/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`,
+1,6 ГБ) и старой small (`models--Systran--faster-whisper-small`) больше не
+нужны, удалять по желанию.
+
+### 9.6. Эталонная машина для проверки: Mac M1, 16 ГБ (план)
+
+Решение владельца 2026-10-02: Mac M1 с 16 ГБ памяти - эталонная машина для
+проверки. На ней приложение ещё не запускалось.
+
+**Фразы для сравнения распознавания** (те же, что в разделе 9.5; результат
+вносится в ту же таблицу):
+
+Правильные:
+
+1. I am a C++ programmer.
+2. I want to order coffee.
+3. I like to watch YouTube.
+4. I am working on different projects.
+5. In the morning I have a daily meeting.
+
+С намеренными ошибками (записывает ли модель сказанное как есть):
+
+6. I am C++ programmer.
+7. In the morning I have daily meeting.
+8. I am working with difference projects.
+
+**Что на Mac идёт иначе и что проверять** (по коду, без запуска):
+
+| Часть | Windows, RTX 3090 | Mac M1 | Проверить |
+|---|---|---|---|
+| Whisper (ctranslate2) | cuda, `int8_float16` | только CPU, `int8` | время распознавания large-v3 по строкам `STT transcribed speech ... Latency` |
+| Kokoro | cuda | CPU (`DEVICE` определяется только по CUDA) | время синтеза предложения |
+| Gemma (`llama-server`) | CUDA | Metal, если `llama_server_fetch` ставит сборку macOS arm64 | установка бинарника, `--list-devices` в логе, скорость ответа |
+| Воспроизведение | winsound | sounddevice с `audio_io.AUDIO_LOCK` | путь не проверялся ни разу (шаг R1); прерывание озвучки новой записью |
+| Запись | WASAPI | CoreAudio | выбор устройства, разрешение на микрофон |
+| Память | 24 ГБ VRAM и 93 ГБ RAM | 16 ГБ общей памяти | Gemma (около 7 ГБ), large-v3 и Kokoro вместе; подкачка во время урока |
+
+**Список проверки:**
+
+- `python install.py` проходит до конца, `logs/install.log` без ошибок;
+- `python -m unittest discover -s tests -v` проходит;
+- урок открывается, в `main.log` названы устройство распознавания и
+  устройства `llama-server`;
+- восемь фраз выше: текст и время распознавания каждой;
+- время ответа модели на короткую реплику и на реплику с `NOTE`;
+- прерывание озвучки пробелом и кнопкой команды;
+- `finish`, оба файла транскрипта, выход без ошибок.
+
+**Возможные решения по итогам:** если large-v3 на CPU слишком медленная -
+турбо с beam 5 (2 ошибки из 5 на RTX 3090) или выбор модели по устройству;
+если не хватает памяти - меньший `external_n_ctx` или запасная модель чата.
+
 ---
 
 ## 10. Открытые вопросы
@@ -2091,7 +2191,9 @@ Programmer`. В уроке `22-41` `SUMMARY` на русском.
   размышление сервер включает по умолчанию, приложение выключает его с
   шага 2b.
 - **Whisper исправляет грамматику ученика** до того, как её увидит модель, и тогда
-  NOTE не находит ошибок. Проверка на этапе 3.
+  NOTE не находит ошибок. Проверено 2026-10-02 на large-v3 (раздел 9.5):
+  пропущенные артикли остаются как сказаны, близкие по звучанию формы слов
+  (`difference` и `different`) модель выравнивает. Известное ограничение v1.
 - **CUDA для faster-whisper:**
   - Windows: библиотеки cuBLAS и cuDNN, порядок импорта torch;
   - Linux: поиск тех же библиотек;
