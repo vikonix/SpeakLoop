@@ -187,14 +187,3 @@ GGUF_CHAT = HfFile(
     # 6 975 878 560 bytes.
     size_mb=6976,  # measured 2026-09-14
 )
-
-# The previous chat model, kept for a machine that cannot run GGUF_CHAT at a
-# usable speed. The installer does not fetch it: the owner downloads it with
-# `python -m speakloop.gguf_fetch --fallback` and names the file in
-# settings.json ("external_model_path").
-GGUF_CHAT_FALLBACK = HfFile(
-    "hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF",
-    "llama-3.2-3b-instruct-q4_k_m.gguf",
-    "Llama 3.2 3B Instruct Q4_K_M (fallback chat model for llama-server)",
-    size_mb=2019,  # measured 2026-07-28
-)

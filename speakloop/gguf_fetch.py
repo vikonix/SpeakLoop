@@ -14,7 +14,6 @@ Run it directly:
     python -m speakloop.gguf_fetch              # download if missing
     python -m speakloop.gguf_fetch --list       # show target path and state
     python -m speakloop.gguf_fetch --force      # download even if present
-    python -m speakloop.gguf_fetch --fallback   # the fallback model instead
 
 Design notes
 ------------
@@ -28,9 +27,6 @@ Design notes
   point above forbids. The default target matches config.EXTERNAL_MODEL_PATH's
   own default, and a caller that wants to honour an overridden path passes it
   as *target*.
-* The fallback model (models_info.GGUF_CHAT_FALLBACK) is fetched only on
-  request. The installer asks for the main model alone, because the fallback
-  is useful only to an owner who has measured that the main one is too slow.
 """
 
 from __future__ import annotations
@@ -68,10 +64,6 @@ DEFAULT_GGUF_PATH = MODELS_DIR / GGUF_FILENAME
 # Download size, for the "are you sure?" prompts a GUI will want.
 GGUF_SIZE_MB = models_info.GGUF_CHAT.size_mb
 
-# Where `--fallback` puts the fallback model. The same directory as the main
-# model, so a relative "external_model_path" in settings.json is short.
-FALLBACK_GGUF_PATH = MODELS_DIR / models_info.GGUF_CHAT_FALLBACK.filename
-
 
 class GgufFetchError(RuntimeError):
     """The GGUF model is not on disk and could not be downloaded."""
@@ -92,14 +84,11 @@ def gguf_present(target: Optional[Path] = None) -> bool:
 
 
 def ensure_gguf(target: Optional[Path] = None, *,
-                model: models_info.HfFile = models_info.GGUF_CHAT,
                 force: bool = False,
                 tqdm_class: Optional[type] = None) -> Path:
     """Make sure the GGUF chat model sits at *target*; return its path.
 
-    *model* is the catalogue record to fetch: GGUF_CHAT (the default, what the
-    installer asks for) or GGUF_CHAT_FALLBACK. Without a *target* the file goes
-    to models/<its filename>.
+    Without a *target* the file goes to DEFAULT_GGUF_PATH.
 
     local_dir is used rather than the plain hub cache so the file lands exactly
     where config.EXTERNAL_MODEL_PATH points, instead of inside the cache's
@@ -110,7 +99,7 @@ def ensure_gguf(target: Optional[Path] = None, *,
     1.24, against 0.x for snapshot_download), so this is the call that breaks
     on an old hub: model_fetch.progress_kwargs decides whether it goes.
     """
-    path = Path(target) if target is not None else MODELS_DIR / model.filename
+    path = Path(target) if target is not None else DEFAULT_GGUF_PATH
     if not force and gguf_present(path):
         log.info("Already downloaded: %s", path)
         return path
@@ -125,16 +114,16 @@ def ensure_gguf(target: Optional[Path] = None, *,
 
     path.parent.mkdir(parents=True, exist_ok=True)
     log.info("Downloading %s (%d MB) from %s into %s ...",
-             path.name, model.size_mb, model.repo_id, path.parent)
+             path.name, GGUF_SIZE_MB, GGUF_REPO_ID, path.parent)
     try:
         downloaded = hf_hub_download(
-            repo_id=model.repo_id, filename=path.name,
+            repo_id=GGUF_REPO_ID, filename=path.name,
             local_dir=str(path.parent),
             **model_fetch.progress_kwargs(hf_hub_download, tqdm_class),
         )
     except Exception as exc:  # noqa: BLE001 - network, disk, gated repo
         raise GgufFetchError(
-            f"Could not download {path.name} from {model.repo_id}: "
+            f"Could not download {path.name} from {GGUF_REPO_ID}: "
             f"{exc}") from exc
     log.info("-> downloaded: %s", downloaded)
     return Path(downloaded)
@@ -144,15 +133,15 @@ def ensure_gguf(target: Optional[Path] = None, *,
 # Command line
 # ---------------------------------------------------------------------------
 
-def _print_status(target: Path, model: models_info.HfFile) -> None:
+def _print_status(target: Path) -> None:
     """Report where the model would go and whether it is already there.
 
     A named helper rather than four print()s inside main(), mirroring
     model_fetch._print_status - it keeps the CLI's two paths (report vs.
     download) separable, in tests as well as by eye.
     """
-    print(f"Repo   : {model.repo_id}")
-    print(f"File   : {model.filename}  ({model.size_mb} MB)")
+    print(f"Repo   : {GGUF_REPO_ID}")
+    print(f"File   : {GGUF_FILENAME}  ({GGUF_SIZE_MB} MB)")
     print(f"Target : {target}")
     print(f"State  : {'present' if gguf_present(target) else 'MISSING'}")
 
@@ -160,15 +149,8 @@ def _print_status(target: Path, model: models_info.HfFile) -> None:
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download the GGUF chat model into models/.")
-    # No fixed default: the default file depends on --fallback, so main()
-    # resolves it once the model is known.
-    parser.add_argument("--target", type=Path, default=None,
-                        help=f"destination file (default: {DEFAULT_GGUF_PATH}, "
-                             f"or {FALLBACK_GGUF_PATH} with --fallback)")
-    parser.add_argument("--fallback", action="store_true",
-                        help="fetch the fallback model "
-                             f"({models_info.GGUF_CHAT_FALLBACK.filename}) "
-                             "instead of the main one")
+    parser.add_argument("--target", type=Path, default=DEFAULT_GGUF_PATH,
+                        help=f"destination file (default: {DEFAULT_GGUF_PATH})")
     parser.add_argument("--force", action="store_true",
                         help="download even when the file is already present")
     parser.add_argument("--list", action="store_true",
@@ -185,16 +167,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s",
                         stream=sys.stdout)
 
-    model = (models_info.GGUF_CHAT_FALLBACK if args.fallback
-             else models_info.GGUF_CHAT)
-    target = args.target or MODELS_DIR / model.filename
-
     if args.list:
-        _print_status(target, model)
+        _print_status(args.target)
         return 0
 
     try:
-        ensure_gguf(target, model=model, force=args.force)
+        ensure_gguf(args.target, force=args.force)
     except GgufFetchError as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         return 1

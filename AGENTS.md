@@ -33,7 +33,7 @@ language and `config.py` derives every per-run language constant from the active
 one. English is fixed; Spanish is postponed (the owner's decision), although its
 profile stays complete.
 
-The chat model is Gemma 4 12B (stage 2). How its server parameters were chosen,
+The chat model is Gemma 4 12B. How its server parameters were chosen,
 and what it does on a small card, is in
 [`docs/model-parameters.md`](docs/model-parameters.md) (Russian): read it before
 touching GPU layers, context size or the speech devices.
@@ -337,8 +337,8 @@ the key differ.
   `llama_server_command()` is pure and holds the tuning that must not be left
   to the binary's defaults (`--ctx-size`, `-fitc`, `--parallel 1`,
   `--cache-reuse 256`, `--api-key`, `--no-ui`; llama.cpp disables
-  `--cache-reuse` for Gemma with a warning, and it stays for the fallback
-  model); `log_compute_devices()` records `--list-devices`
+  `--cache-reuse` for Gemma with a warning, and it stays for a model of
+  the owner's own, set with `external_model_path`); `log_compute_devices()` records `--list-devices`
   before the launch, which is the only thing that reveals a silent CPU
   fallback. `start()` and `shutdown()` share one lock, so a quit during
   startup cannot orphan a server. `_use_running_server()` is the fork before
@@ -461,8 +461,7 @@ can use them before the requirements step:
   and Kokoro (hub cache), Supertonic 3 (own cache directory). Owns
   `prepare_hf_env()` (Windows symlink and hf-xet workarounds).
 - [`speakloop/gguf_fetch.py`](speakloop/gguf_fetch.py) - the GGUF chat model
-  into `models/`; `--fallback` (or `ensure_gguf(model=...)`) fetches
-  `GGUF_CHAT_FALLBACK` instead, which the installer never does.
+  into `models/`.
 - [`speakloop/llama_server_fetch.py`](speakloop/llama_server_fetch.py) - the
   pinned llama.cpp release into `bin/llama/`, sha256 per asset, then
   `--version` and `--list-devices` probes. `installed_exe()`, `list_devices()`
@@ -474,8 +473,7 @@ can use them before the requirements step:
   large-v3 (the full model: large-v3-turbo got short phrases of a learner
   wrong, see `docs/refactoring.md` section 9.5); every `HfRepo` names its
   `weights_file` (see loader).
-  `GGUF_CHAT` is Gemma 4 12B QAT Q4_0,
-  `GGUF_CHAT_FALLBACK` is Llama 3.2 3B. Imports only `typing` (a test
+  `GGUF_CHAT` is Gemma 4 12B QAT Q4_0. Imports only `typing` (a test
   enforces it). Sizes are re-snapped with
   [`tools/measure_model_sizes.py`](tools/measure_model_sizes.py).
 - [`install.py`](install.py) - interactive installer, a thin wrapper around the

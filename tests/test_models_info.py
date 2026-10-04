@@ -31,7 +31,7 @@ from speakloop import gguf_fetch, llama_server_fetch, model_fetch, models_info
 def _all_models():
     """Every record in the catalogue, whatever its type."""
     return (*models_info.HF_REPOS, models_info.SUPERTONIC,
-            models_info.GGUF_CHAT, models_info.GGUF_CHAT_FALLBACK)
+            models_info.GGUF_CHAT)
 
 
 class SizeCompletenessTests(unittest.TestCase):
@@ -131,14 +131,9 @@ class CatalogueShapeTests(unittest.TestCase):
                 self.assertNotIn("\\", repo.weights_file)
                 self.assertFalse(repo.weights_file.startswith("/"))
 
-    def test_the_fallback_is_a_different_gguf_file(self):
-        # Both land in models/ under their own filename. The same name would
-        # make --fallback overwrite the main model, or report it as present.
-        self.assertNotEqual(models_info.GGUF_CHAT.filename,
-                            models_info.GGUF_CHAT_FALLBACK.filename)
-        for model in (models_info.GGUF_CHAT, models_info.GGUF_CHAT_FALLBACK):
-            with self.subTest(model=model.label):
-                self.assertTrue(model.filename.endswith(".gguf"))
+    def test_the_chat_model_is_a_gguf_file(self):
+        # llama-server loads this file by its path in models/.
+        self.assertTrue(models_info.GGUF_CHAT.filename.endswith(".gguf"))
 
     def test_supertonic_is_not_a_hub_repo(self):
         # It has its own cache directory and its own ensure_*; listing it among

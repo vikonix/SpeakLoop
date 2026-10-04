@@ -118,7 +118,8 @@ def request_extra_body(backend: str):
       then thinks for 40 s or more before a one-line reply; the thinking goes
       to reasoning_content, which this module never reads
       (docs/model-parameters.md). A template without the
-      variable ignores it, so the fallback model is not affected.
+      variable ignores it, so a model set with external_model_path is not
+      affected.
     - top_k, which the OpenAI API does not have.
 
     LM Studio gets None: it has its own thinking switch and model settings,

@@ -159,33 +159,6 @@ def save_setting(path: Path, key: str, value, memory_dict: dict) -> bool:
     return True
 
 
-def reset_settings(path: Path, keys, memory_dict: dict) -> bool:
-    """Remove *keys* from the settings file, keeping every other key.
-
-    Companion to save_setting for a reset to defaults: with the overrides
-    gone, the built-in defaults (and the hardware-detection layer) take effect
-    again on the next start. The "_" comment keys and any
-    unknown keys are preserved. On success the in-memory *memory_dict* is
-    updated too. Failures are reported, never raised. Returns True on success.
-    """
-    data = read_json(path)
-    if _rewrite_would_lose_content(path, data):
-        print(f"[config] {path.name} could not be parsed; settings not reset "
-              f"(fix the file's JSON syntax first)", file=sys.stderr)
-        return False
-    for key in keys:
-        data.pop(key, None)
-    try:
-        _write_json_atomic(path, data)
-    except OSError as exc:
-        print(f"[config] cannot write {path.name} ({exc}); settings not reset",
-              file=sys.stderr)
-        return False
-    for key in keys:
-        memory_dict.pop(key, None)  # keep the in-memory view consistent
-    return True
-
-
 def server_url(address: str, default_port: int) -> str:
     """Normalize a user-entered server *address* to a base URL ending in /v1.
 

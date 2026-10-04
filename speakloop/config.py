@@ -35,9 +35,8 @@ from pathlib import Path
 from speakloop import loader, model_fetch, models_info, paths
 from speakloop.languages import english, spanish
 
-# What this machine writes (settings, downloads, logs). In a clone this is the
-# project directory; installed as a package it is the OS user-data directory.
-BASE_DIR = paths.data_root()
+# Under the data root: the project directory in a clone, the OS user-data
+# directory when installed as a package.
 CONFIG_DIR = paths.config_dir()
 
 # Before the first read below: in package mode none of these directories exists

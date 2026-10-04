@@ -47,11 +47,6 @@ class DefaultTargetTests(unittest.TestCase):
         self.assertEqual(gguf_fetch.DEFAULT_GGUF_PATH,
                          paths.models_dir() / models_info.GGUF_CHAT.filename)
 
-    def test_fallback_path_is_its_catalogue_file_in_models(self):
-        self.assertEqual(
-            gguf_fetch.FALLBACK_GGUF_PATH,
-            paths.models_dir() / models_info.GGUF_CHAT_FALLBACK.filename)
-
 
 class GgufPresentTests(unittest.TestCase):
     def setUp(self):
@@ -130,24 +125,14 @@ class EnsureGgufTests(unittest.TestCase):
             result = gguf_fetch.ensure_gguf(self.target, tqdm_class=object)
         self.assertEqual(result, self.target)
 
-    def test_the_fallback_model_comes_from_its_own_repo(self):
-        with patch("huggingface_hub.hf_hub_download",
-                   return_value=str(self.target), create=True) as download:
-            gguf_fetch.ensure_gguf(self.target,
-                                   model=models_info.GGUF_CHAT_FALLBACK)
-        self.assertEqual(download.call_args.kwargs["repo_id"],
-                         models_info.GGUF_CHAT_FALLBACK.repo_id)
-
-    def test_without_a_target_the_file_goes_to_models(self):
-        # The default target follows the model, so the fallback does not land
-        # on the main model's filename.
-        models_dir = Path(self._tmp.name) / "models"
-        expected = models_dir / models_info.GGUF_CHAT_FALLBACK.filename
-        with patch.object(gguf_fetch, "MODELS_DIR", models_dir), \
+    def test_without_a_target_the_file_goes_to_the_default_path(self):
+        # install.py and the app both rely on this default when the owner has
+        # set no path of their own.
+        expected = Path(self._tmp.name) / "models" / gguf_fetch.GGUF_FILENAME
+        with patch.object(gguf_fetch, "DEFAULT_GGUF_PATH", expected), \
                 patch("huggingface_hub.hf_hub_download",
                       return_value=str(expected), create=True) as download:
-            result = gguf_fetch.ensure_gguf(
-                model=models_info.GGUF_CHAT_FALLBACK)
+            result = gguf_fetch.ensure_gguf()
         self.assertEqual(result, expected)
         self.assertEqual(download.call_args.kwargs["filename"],
                          expected.name)
@@ -168,10 +153,8 @@ class CliTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_defaults(self):
-        # No target: main() picks it once --fallback is known.
         args = gguf_fetch.parse_args([])
-        self.assertIsNone(args.target)
-        self.assertFalse(args.fallback)
+        self.assertEqual(args.target, gguf_fetch.DEFAULT_GGUF_PATH)
         self.assertFalse(args.force)
         self.assertFalse(args.list)
 
@@ -180,20 +163,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(gguf_fetch.main([]), 0)
         target = ensure.call_args.args[0]
         self.assertEqual(target, gguf_fetch.DEFAULT_GGUF_PATH)
-        self.assertIs(ensure.call_args.kwargs["model"], models_info.GGUF_CHAT)
-
-    def test_fallback_fetches_the_fallback_model_into_models(self):
-        with patch.object(gguf_fetch, "ensure_gguf") as ensure:
-            self.assertEqual(gguf_fetch.main(["--fallback"]), 0)
-        target = ensure.call_args.args[0]
-        self.assertEqual(target, gguf_fetch.FALLBACK_GGUF_PATH)
-        self.assertIs(ensure.call_args.kwargs["model"],
-                      models_info.GGUF_CHAT_FALLBACK)
 
     def test_an_explicit_target_wins(self):
         target = Path("elsewhere") / "model.gguf"
         with patch.object(gguf_fetch, "ensure_gguf") as ensure:
-            gguf_fetch.main(["--fallback", "--target", str(target)])
+            gguf_fetch.main(["--target", str(target)])
         self.assertEqual(ensure.call_args.args[0], target)
 
     def test_list_runs_no_download(self):
