@@ -1,0 +1,32 @@
+{
+  "_readme": "SpeakLoop dark color scheme, the default. Selected with 'color_theme': 'dark' in config/settings.json; restart to apply. Keys starting with '_' are ignored. A missing key falls back to the built-in dark palette in speakloop/config.py, which holds these same values. Copy this file into config/themes/ to edit it without touching the installation.",
+
+  "_surfaces": "Backgrounds and borders. bg_main is the window, bg_panel the chat and the status bar, bg_accent the accent-tinted fill of the idle mic button. accent is the brand purple of the title and the focus highlight.",
+  "bg_main": "#121214",
+  "bg_panel": "#1a1a1e",
+  "bg_accent": "#1f1430",
+  "border": "#25252a",
+  "accent": "#8a2be2",
+
+  "_text": "text = chat body, text_emph = the partner's reply, text_bright = the learner's own line and the mic glyph, text_dim = secondary labels (stats, instruction), text_muted = [System] lines.",
+  "text": "#f8f8f2",
+  "text_emph": "#f1f1f6",
+  "text_bright": "#ffffff",
+  "text_dim": "#a0a0a5",
+  "text_muted": "#6272a4",
+
+  "_status": "Status line and mic outlines. partner marks everything the dialogue partner says or does.",
+  "good": "#50fa7b",
+  "ready": "#00e676",
+  "bad": "#ff5555",
+  "warn": "#ffb86c",
+  "info": "#8be9fd",
+  "partner": "#ff79c6",
+
+  "_mic": "Mic button per-state inner fill; the outlines reuse accent, bad, warn and good.",
+  "mic_loading_bg": "#1e1e24",
+  "mic_loading_outline": "#44475a",
+  "mic_recording_bg": "#3a0c10",
+  "mic_processing_bg": "#36220f",
+  "mic_speaking_bg": "#0f2c1d"
+}

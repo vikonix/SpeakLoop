@@ -1,0 +1,32 @@
+{
+  "_readme": "SpeakLoop light color scheme. Selected with 'color_theme': 'light' in config/settings.json; restart to apply. Keys starting with '_' are ignored. A missing key falls back to the built-in dark palette in speakloop/config.py, so every key of the dark scheme is answered here. Copy this file into config/themes/ to edit it without touching the installation.",
+
+  "_surfaces": "Backgrounds and borders. bg_main (the window) is tinted slightly grey so the near-white chat panel reads as raised. bg_accent is the accent-tinted fill of the idle mic button.",
+  "bg_main": "#eff0f4",
+  "bg_panel": "#f8f8fb",
+  "bg_accent": "#e7defa",
+  "border": "#dcdce4",
+  "accent": "#8b4fd1",
+
+  "_text": "Same roles as in the dark scheme, inverted: dark text on light surfaces. text_bright is the strongest of them (the learner's own line), and the mic glyph is drawn in it on the pale mic fills below.",
+  "text": "#23232a",
+  "text_emph": "#15151a",
+  "text_bright": "#000000",
+  "text_dim": "#5c5c66",
+  "text_muted": "#5a6796",
+
+  "_status": "Status line and mic outlines, darkened to stay readable on light surfaces.",
+  "good": "#1e9e4a",
+  "ready": "#009457",
+  "bad": "#d32f2f",
+  "warn": "#b86e00",
+  "info": "#0277bd",
+  "partner": "#c2185b",
+
+  "_mic": "Mic button per-state inner fill; the outlines reuse accent, bad, warn and good.",
+  "mic_loading_bg": "#e2e2e8",
+  "mic_loading_outline": "#9a9aa6",
+  "mic_recording_bg": "#fbe2e4",
+  "mic_processing_bg": "#faeedd",
+  "mic_speaking_bg": "#e0f3e7"
+}

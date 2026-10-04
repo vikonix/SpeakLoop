@@ -4,77 +4,265 @@ AI-powered voice tutor for practicing foreign languages through real conversatio
 
 ## About
 
-SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. Hold Space to speak, release to get a response — the app transcribes your speech, sends it to an LLM, and reads the reply aloud.
+SpeakLoop is a desktop application for practicing conversational foreign language with an AI partner. The tutor opens the lesson with a question. Press Space to answer: the recording stops by itself once you stop talking, then the app transcribes your speech, sends it to an LLM, shows the reply and reads its spoken part aloud. You can also type the answer in the control panel and send it with Enter. The lesson language is English; Spanish is not available yet.
+
+The application is being moved to a new structure step by step. It runs from the `speakloop/` package and serves the local model with the official `llama-server` binary from llama.cpp.
 
 ## Tech Stack
 
-- **GUI** — Tkinter
-- **STT** — faster-whisper (Whisper small by default)
-- **LLM** — local GGUF model via `llm_server/` or LM Studio
-- **TTS** — Kokoro (hexgrad/Kokoro-82M)
-- **Python** 3.11+
+- **GUI**: Tkinter with ttkbootstrap (dark and light color theme)
+- **STT**: faster-whisper (Whisper large-v3)
+- **LLM**: Gemma 4 12B (GGUF, Q4_0 QAT) via `llama-server` (llama.cpp), or any model loaded in LM Studio
+- **TTS**: Kokoro (hexgrad/Kokoro-82M) for English, Supertonic 3 for Spanish (the Spanish lesson is not available yet)
+- **Python**: 3.11 or 3.12
+
+## Requirements
+
+- **Python 3.11 or 3.12.** Newer versions need a C++ compiler for some dependencies, so `pip` refuses them.
+- **Windows, Linux or macOS.** The current application is used on Windows.
+- A microphone and speakers.
+- **NVIDIA GPU**: optional. It needs a CUDA build of PyTorch (see [Platform notes](#platform-notes)). For a conversational pace the chat model (about 7 GB) has to fit into the video memory completely; on a smaller card a reply takes several seconds more. [`docs/model-parameters.md`](docs/model-parameters.md) (Russian) has the measurements and what the owner of a small card can do.
+- **Disk**: about 10 GB for the models.
+- **tkinter** (Linux only): the Tk GUI toolkit is packaged apart from the interpreter (`python3-tk` on Debian/Ubuntu). It is not on PyPI.
+- **PortAudio** (Linux only): the native audio library (`libportaudio2` on Debian/Ubuntu). The Windows and macOS wheels of `sounddevice` include it, the Linux wheels do not.
 
 ## Installation
 
-```bash
-git clone https://github.com/yourusername/speakloop.git
-cd speakloop
+### With `install.py` (recommended)
 
+```bash
+git clone https://github.com/vikonix/SpeakLoop.git
+cd SpeakLoop
+
+# Create and activate a virtual environment, then run the installer INSIDE it
+# (the script installs into the interpreter that runs it):
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate            # Windows
+# source .venv/bin/activate       # macOS / Linux
 
-pip install -r requirements.txt
+python install.py
 ```
 
-For the LLM server — separate dependencies:
+The installer does these steps:
+
+1. Checks the environment: a virtual environment, the Visual C++ runtime (Windows), tkinter and PortAudio (Linux).
+2. Checks the Python version.
+3. Finds an NVIDIA GPU with `nvidia-smi` and, if there is one, installs the CUDA build of `torch`.
+4. Installs the Python dependencies from `pyproject.toml`.
+5. Downloads the Hugging Face models (faster-whisper large-v3, Kokoro) into `model_cache/`.
+6. Downloads the Supertonic 3 speech model (Spanish) into `model_cache/supertonic3/`.
+7. Installs the pinned `llama-server` binary into `bin/llama/`.
+8. Downloads the GGUF chat model into `models/`.
+9. Detects the hardware and writes `config/hardware_config.json`.
+10. Writes a launcher: `run_speakloop.bat` (Windows) or `run_speakloop.sh` (Linux, macOS).
+
+Before each step the installer shows the step and its command and asks: `Y` runs it, `n` stops the installer, `s` skips the step. A step that is already done is offered as skip or reinstall. The full run is written to `logs/install.log`.
+
+Useful flags:
+
+- `--yes`: run without questions (steps that are already done are skipped; add `--reinstall` to do them again)
+- `--dry-run`: show the steps and commands, do not run them
+- `--cpu` / `--gpu`: skip the CUDA installs / do them even if no GPU is found
+- `--skip-models`, `--skip-gguf`, `--skip-llm`: skip the model downloads, the GGUF download, or the whole LLM part (for LM Studio)
+
+On Windows, **Developer Mode** lets the model cache use symlinks. Without it the model downloads copy files instead, which uses more disk.
+
+### Manual installation
+
+Run these commands in the activated virtual environment:
+
 ```bash
-pip install -r llm_server/requirements.txt
+# Python dependencies. Editable (-e), so the code stays in this directory and
+# config/, models/ and logs/ stay in the project directory too.
+pip install -e .
+
+# Models and the llama-server binary
+python -m speakloop.model_fetch         # faster-whisper large-v3, Kokoro, Supertonic 3
+python -m speakloop.llama_server_fetch  # pinned llama.cpp build into bin/llama/
+python -m speakloop.gguf_fetch          # GGUF chat model into models/
+
+# Hardware detection
+python -m speakloop.detect_hardware
 ```
 
-For CUDA-enabled `llama-cpp-python`, see [`llm_server/README.md`](llm_server/README.md).
+Each fetcher accepts `--list` to show what is present and what is missing.
+
+The spaCy English pipeline for Kokoro is not installed by these commands: Kokoro's English text processing (misaki) downloads it with `pip` at the first English speech output, so that first run needs network access.
+
+### Platform notes
+
+**Windows with an NVIDIA GPU.** PyPI serves a CPU-only `torch` on Windows. Install a CUDA build that matches your driver (see [pytorch.org](https://pytorch.org/get-started/locally/)), for example:
+
+```powershell
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
+```
+
+`install.py` does this in its step 3. On Linux PyPI already serves a CUDA build, and macOS has no CUDA.
+
+**Linux.** Install tkinter and PortAudio with the system package manager:
+
+```bash
+sudo apt install python3-tk libportaudio2          # Debian / Ubuntu
+sudo dnf install python3-tkinter portaudio         # Fedora
+sudo pacman -S tk portaudio                        # Arch
+```
+
+If PortAudio is installed but no audio device is found (the installer shows `0 input / 0 output`), PortAudio is usually built without the PulseAudio backend (WSL is a known case). Install `libasound2-plugins` and set `pcm.!default pulse` in `~/.asoundrc`, or build PortAudio with `./configure --with-pulseaudio`.
+
+The microphone button shows its state with emoji. Tk cannot draw color emoji fonts, so on a new Linux system some icons show as empty boxes. Install a monochrome emoji font:
+
+```bash
+sudo apt install fonts-symbola     # in the Ubuntu "universe" repository
+fc-cache -f -v
+```
+
+The Linux GPU build of `llama-server` uses Vulkan (llama.cpp publishes no CUDA binary for Linux). If Vulkan finds no device (for example under WSL2), the fetcher installs the CPU build and writes the reason in the log.
+
+**macOS.** At the first run the system asks for access to the microphone. This request can cut the first recording: say the phrase again if it is not recognized. Intel Macs get an older stack automatically (torch 2.2.2, transformers 4.x, NumPy 1.x), because PyTorch publishes no newer wheel for them. The pinned `llama-server` build needs macOS 26 on Apple Silicon and macOS 13.3 on Intel; on an older Mac the installer says so before it downloads anything. Homebrew Python does not include tkinter: install `python-tk@<version>` for your Python version (`install.py` does this).
+
+### Models
+
+| Model | Used for | Download | Command |
+|---|---|---|---|
+| Whisper large-v3 (`Systran/faster-whisper-large-v3`) | speech recognition | about 3090 MB | `python -m speakloop.model_fetch --hf` |
+| Kokoro-82M (`hexgrad/Kokoro-82M`) | speech output (English) | 363 MB | `python -m speakloop.model_fetch --hf` |
+| Supertonic 3 (`Supertone/supertonic-3`) | speech output (Spanish) | 404 MB | `python -m speakloop.model_fetch --supertonic`. The weights have the **OpenRAIL-M** license, so they are downloaded, not included |
+| `gemma-4-12B-it-QAT-Q4_0.gguf` (`lmstudio-community/gemma-4-12B-it-QAT-GGUF`) | conversation | 6976 MB | `python -m speakloop.gguf_fetch` |
+| `llama-server` (pinned llama.cpp release) | runs the GGUF model | 641 MB CUDA, 18 MB CPU (Windows) | `python -m speakloop.llama_server_fetch` |
 
 ## Configuration
 
-All settings are in [`config.py`](config.py):
+The configuration has three layers, lowest priority first:
 
-```python
-# LLM backend selection
-LLM_BACKEND = "local_server"   # recommended
-# LLM_BACKEND = "lm-studio"   # if using LM Studio
+1. **Built-in defaults** in [`speakloop/config.py`](speakloop/config.py): the language profile ([`speakloop/languages/`](speakloop/languages)), the lesson settings (the explanation language is Russian), LLM backend and server address, generation parameters, recognition and synthesis settings.
+2. **`config/hardware_config.json`**, written by the installer or by `python -m speakloop.detect_hardware`: compute devices (`DEVICE`, `STT_DEVICE`, `TTS_DEVICE`) and audio devices. Speech recognition runs on the GPU whenever it can; speech output (Kokoro) runs on the CPU on a card smaller than 12 GB, so the chat model gets the rest of the video memory. The GPU layers of the chat model are not here: `llama-server` fits them into the free video memory at each start. Run the detection again after changing the hardware; a file written by an older version still holds layer and context values, which the app now ignores.
+3. **`config/settings.json`**, edited by hand: user preferences. Copy [`config/settings.example.json`](config/settings.example.json) to start. Keys:
+   - `max_record_seconds`: limit of one recording, in seconds (default 20).
+   - `silence_timeout`: seconds of silence, after you have started to speak, before the recording stops by itself (default 3).
+   - `silence_threshold`: loudness (RMS, 0..1) above which the microphone counts as hearing speech (default 0.01). Raise it in a noisy room, lower it for a quiet voice.
+   - `stt_device`: where speech recognition runs: `"auto"` (default: the GPU whenever it can be used, whatever the size of the card), `"cuda"` or `"cpu"`. On a small card Whisper takes video memory from the chat model; if the replies become slow, try `"cpu"`.
+   - `accent`: variant of the practiced language, `"american"` (default) or `"british"`. It selects the synthesis language code and the list of voices.
+   - `voice`: voice of the partner. It must belong to the variant above; absent (default) means the variant default (`af_heart` for american, `bf_emma` for british).
+   - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
+   - `first_topic`: the first topic of the lesson, in your own words. Empty (default) lets the tutor choose an everyday situation.
+   - `show_notes`: are the tutor's corrections shown in the chat (default `true`)? The **Notes** button writes this key back, so the next lesson opens the way the last one ended. The corrections are always part of the lesson; the key only hides them.
+   - `prompt_file`: the lesson prompt. Absent (default) means [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). Use it to try a changed copy; the copy must keep the three `SETTINGS` lines, or the app does not start.
+   - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
+   - `lm_studio_host`: address of LM Studio, `"host"`, `"host:port"` or a full URL (default `"127.0.0.1:1234"`). For the same computer write `127.0.0.1` and not `localhost`: on Windows the name adds about 2 seconds to every reply.
+   - `llama_server_path`: the `llama-server` binary to start. Empty (default) means `bin/llama/`, then a `llama-server` on PATH.
+   - `external_model_path`: a GGUF model of your own. Absent (default) means the downloaded model in `models/`.
+   - `external_n_ctx`: context size of the local model (default 16384). `llama-server` is told not to make it smaller when it fits the model into the video memory; if the server still reports a smaller context, the chat shows a warning.
+   - `external_n_gpu_layers`: model layers on the GPU. `"auto"` (default) lets `llama-server` choose from the free video memory. A whole number or `"all"` sets the value by hand and turns that choice off; use it only after measuring your computer and keep at least 500 MiB of video memory free.
 
-# Path to the GGUF model file (for local_server)
-EXTERNAL_MODEL_PATH = "models/llama-3.2-3b-instruct-q4_k_m.gguf"
+Both files are optional. A broken or missing file leaves the lower layers in effect, and the problem is printed to the console. Restart the app to apply a change.
 
-# Language pair
-NATIVE_LANGUAGE = "Russian"
-TARGET_LANGUAGE = "English"
-```
+Models are loaded from `model_cache/`. When all models of a run are there, the app does not connect to the Hugging Face Hub at all.
 
 ## Running
 
+In the activated virtual environment, any of these starts the same application:
+
 ```bash
 python main.py
+python -m speakloop
+speakloop                # console script, after `pip install -e .`
 ```
 
-With `LLM_BACKEND = "local_server"` the server starts automatically. With `LLM_BACKEND = "lm-studio"` start LM Studio first.
+`speakloop --version` prints the version, `speakloop --detect-hardware` rewrites `config/hardware_config.json`.
+
+With `"llm_backend": "llama-server"` (the default) the model server starts automatically. With `"llm_backend": "lm-studio"` start LM Studio first, start its server and load a model: if the server does not answer, the app shows an error and does not open the lesson.
+
+With `llama-server` the app turns Gemma's thinking mode off in every request (the server turns it on by default), and it starts the server with `GGML_OP_OFFLOAD_MIN_BATCH=16` so that short prompts are computed on the GPU when the model does not fit into the video memory; set the variable before the start to try another value. The sampling values are the ones recommended for Gemma (temperature 1.0, top_p 0.95, top_k 64). The app sends none of this to LM Studio, so set it there for the model: turn the thinking mode off (with it on, the hidden thinking uses the reply limit and the chat shows "The model used the whole reply limit and wrote no text"), set the context length to `external_n_ctx` and Top K to 64. Checked with `google/gemma-4-12b-qat`.
+
+On a 4 GB card (GTX 1650 Ti) a short reply of the model takes about 8-10 seconds, and a reply with a correction about 15-17 seconds. Before the reply come the wait for silence (`silence_timeout`, 3 seconds by default) and speech recognition (about 1.8 seconds on the GPU).
+
+The model gets the whole conversation of the session, without trimming, so it remembers the start of the lesson. After each reply `logs/main.log` records how much of the context the conversation uses (`Context tokens: ...`). When the conversation no longer fits `external_n_ctx`, the server refuses the request and the chat shows the error; start the app again for a new lesson.
+
+If a `llama-server` already answers on `127.0.0.1:8765` (the usual case is one left behind by a session that ended abnormally), the app uses that server as it is, says so in the chat and does not stop it on exit. Such a server keeps the model, context size and GPU layers it was started with, not the ones in the current settings, so `logs/main.log` records which model it serves and how large its context is, and warns when the model is not the configured one or the context is smaller. If the port is held by a program that does not answer the API, the app says the port is busy instead of starting a second server.
+
+Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_server.log` (the model server), `install.log` and `hwdetect.log` (kept across runs).
+
+## The Lesson
+
+The lesson follows the free-talk prompt in [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). When the models are loaded, the tutor asks the first question by itself. Each reply of the tutor has up to two lines:
+
+- **Note**: a correction of your last phrase, with a short reason in Russian. It is shown and never read aloud. The tutor corrects only words that change or hide your meaning, not grammar.
+- **Tutor**: the tutor's line, shown and read aloud.
+
+Voice commands (say the word alone): **simpler** makes the current question smaller, **hint** gives the first words of an answer, **new topic** changes the topic, **finish** ends the lesson. After "finish" the tutor shows a **Summary** in Russian; it is not read aloud. If you say goodbye in other words, the tutor asks whether to finish. The lesson never ends by itself. There is no grading.
+
+A reply that does not follow this format is shown in full, is not read aloud, and a `[System]` line below it says why. The tutor is not asked again: a second request would cost another half minute and change the lesson history. Markdown inside the tutor's line (`**tape**`) is read without the markers, while the screen keeps the line as the tutor wrote it.
+
+## The Transcript
+
+Every lesson is written to `transcript/`, under a name taken from the time it started. The files are created when the lesson opens, after the models are loaded, so an application closed while it loads leaves no file:
+
+- `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a `[System]` line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
+- `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines. A lesson without a phrase, a correction or a summary (for example, one that failed on its first request) gets no markdown file.
+
+The jsonl file is the one to read with a program: the markdown file can always be built from it again.
 
 ## Controls
 
-- **Space (hold)** — record speech
-- **ESC** — quit
+The control panel stands at the top of the window: the microphone button, the text entry and the instruction line. The lesson is below it, and the status bar shows the state of the window.
+
+- **Space** or the microphone button: start a recording. It stops by itself after `silence_timeout` seconds of silence, on the next press, or at `max_record_seconds`. While it runs, the button shows the live microphone level.
+- **Space** or the microphone button during a reply: stop the reply and start recording at once.
+- **Text entry and Enter**: send a written phrase instead of speaking. Enter during a reply stops the reply and sends the phrase. The entry is closed while a recording runs and while the model answers.
+- **simpler / hint / new topic / finish**: the lesson commands. A button sends the same word you would say, and it appears in the chat as your own line. They are closed together with the text entry.
+- **Notes**: hide or show the tutor's corrections. It works at any time and covers the whole lesson, including the corrections already on the screen; the summary stays visible. The choice is saved in `settings.json` (`show_notes`).
+- **ESC**: quit
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests download nothing and replace subprocesses and the network with stubs. `tests/test_config.py` imports the real configuration of the checkout, so it also imports torch, like the application does.
 
 ## Project Structure
 
 ```
-speakloop/
-├── main.py          — GUI, thread orchestration
-├── stt.py           — Speech-to-Text (Whisper)
-├── llm.py           — LLM client (OpenAI-compatible)
-├── tts.py           — Text-to-Speech (Kokoro)
-├── config.py        — all configuration
-├── models/          — GGUF model files
-└── llm_server/      — standalone process for local LLM
-    ├── server.py
-    ├── requirements.txt
-    └── README.md
+SpeakLoop/
+├── main.py              launcher shim for a source checkout
+├── install.py           guided installer
+├── pyproject.toml       package metadata, dependency list, console script
+├── speakloop/           application package
+│   ├── cli.py               entry point (--version, --detect-hardware)
+│   ├── __main__.py          python -m speakloop
+│   ├── app.py               controller: threads, voice loop, run()
+│   ├── ui.py                the window (widgets, states, wording)
+│   ├── ui_theme.py          palette and fonts of the window
+│   ├── themes/              dark_schema.json, light_schema.json
+│   ├── stt.py               Speech-to-Text (faster-whisper)
+│   ├── prompts/             free_talk.md, the lesson prompt
+│   ├── prompt.py            builds the system message from the prompt file
+│   ├── contract.py          splits a reply into NOTE, SAY and SUMMARY
+│   ├── conversation.py      the lesson: opening and answers
+│   ├── transcript.py        the lesson transcript (jsonl and markdown)
+│   ├── llm.py               LLM client (OpenAI-compatible) and history
+│   ├── llm_server_ctl.py    starts and stops the llama-server subprocess
+│   ├── tts.py               Text-to-Speech (Kokoro, Supertonic) and playback
+│   ├── recorder.py          microphone capture and the automatic stop
+│   ├── audio_io.py          shared audio-device plumbing
+│   ├── playback.py          the stop event of the current reply
+│   ├── languages/           language profiles (english.py, spanish.py)
+│   ├── config.py            configuration layers
+│   ├── bootstrap.py         early process setup, logging
+│   ├── lifecycle.py         process exit and relaunch helpers
+│   ├── paths.py             where every file lives (SPEAKLOOP_HOME)
+│   ├── loader.py            JSON reading and atomic writing
+│   ├── models_info.py       model catalogue
+│   ├── model_fetch.py       faster-whisper, Kokoro, Supertonic downloads
+│   ├── gguf_fetch.py        GGUF model download
+│   ├── llama_server_fetch.py  pinned llama-server binary
+│   └── detect_hardware.py   hardware probe, config/hardware_config.json
+├── config/              settings.example.json (settings.json, hardware_config.json are local)
+├── tests/               unit tests
+├── tools/               maintainer tools (measure_model_sizes.py)
+├── docs/                plans and reviews
+├── models/              GGUF model files
+├── transcript/          one jsonl and one markdown file per lesson
+└── bin/, model_cache/, logs/   created by the installer
 ```
