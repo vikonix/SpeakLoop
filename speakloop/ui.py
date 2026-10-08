@@ -23,6 +23,7 @@ threads reach them through ``root.after()``, never directly.
 """
 
 import tkinter as tk
+import tkinter.font as tkfont
 from dataclasses import dataclass
 from typing import Callable
 
@@ -34,8 +35,8 @@ from speakloop.ui_theme import (
     FONT_SIZE_BODY,
     FONT_SIZE_CHAT,
     FONT_SIZE_EMOJI,
+    FONT_SIZE_QUESTION,
     FONT_SIZE_SMALL,
-    FONT_SIZE_TITLE,
     THEME,
 )
 
@@ -43,7 +44,7 @@ from speakloop.ui_theme import (
 # modern flat themes). Aliased as ``ttk`` so ttk.Style keeps working unchanged.
 import ttkbootstrap as ttk
 
-# The application name, as the title bar and the header show it.
+# The application name, as the title bar shows it.
 APP_NAME = "SpeakLoop"
 
 # The dialogue partner's label in the chat. A role and not a person's name:
@@ -52,9 +53,30 @@ APP_NAME = "SpeakLoop"
 # writes the label at all.
 PARTNER_NAME = "Tutor"
 
-# Labels of the two lines that are shown and never spoken.
-NOTE_LABEL = "Note"
+# The learner's label and the label of a service line in the chat.
+USER_LABEL = "You"
+SYSTEM_LABEL = "System"
+
+# Labels of the two lines that are shown and never spoken. A NOTE is a
+# correction of the learner's last phrase, hence "Fix".
+NOTE_LABEL = "Fix"
 SUMMARY_LABEL = "Summary"
+
+# Chat layout, in pixels. Every line starts with its label in one column and
+# the text starts at one tab stop after the widest label, so the eye reads the
+# text straight down. _BAND_PADDING is the inner left edge of a Fix or Summary
+# band; _LABEL_GAP is the space between the widest label and the text.
+_BAND_PADDING = 12
+_LABEL_GAP = 12
+
+# The question block above the control panel. The caption names who asks only
+# while the block holds a question of the tutor; the other texts are states of
+# the lesson, and "TUTOR ASKS" over them would be wrong.
+QUESTION_CAPTION_ASKED = "TUTOR ASKS"
+QUESTION_CAPTION_STATE = "LESSON"
+QUESTION_LOADING = "Loading the lesson..."
+QUESTION_FAILED = "The lesson cannot start."
+QUESTION_FINISHED = "Lesson finished."
 
 # The switch that hides and shows the Note lines of the whole lesson. The
 # state is in the label itself (a ticked or an empty box): a tk.Button on
@@ -173,7 +195,8 @@ class ViewCallbacks:
 class TutorView:
     """Passive view facade: builds the window and renders its states.
 
-    Owns the header, the control panel at the top (the mic button, the text
+    Owns the question block at the top (the tutor's current question), the
+    control panel under it (the mic button, the text
     entry and the instruction line), the chat transcript below it and the
     status bar. Widget bindings forward to the :class:`ViewCallbacks` passed in
     (``self._cb``); the controller drives the window through the intent methods
@@ -247,7 +270,9 @@ class TutorView:
         self.root.geometry(centered_geometry(self.root.winfo_screenwidth(),
                                              self.root.winfo_screenheight()))
         self.root.configure(bg=THEME["bg_main"])
-        self._build_header()
+        # No header: the title bar of the window already names the
+        # application, and the space goes to the current question.
+        self._build_question()
         self._build_status_bar()
         # The controls stand at the top, under the header: the learner answers
         # from there and reads the lesson below it, so the panel never moves
@@ -257,17 +282,38 @@ class TutorView:
         # parts above and below have left.
         self._build_chat()
 
-    def _build_header(self):
-        header_frame = tk.Frame(self.root, bg=THEME["bg_main"], height=60)
-        header_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(10, 5))
+    def _build_question(self):
+        """The tutor's current question, large, above the control panel.
 
-        # The language of the lesson is part of the title; the explanation
-        # language is fixed and not shown.
-        tk.Label(header_frame,
-                 text=f"{APP_NAME.upper()} • "
-                      f"{self._settings.lesson_language} Voice Tutor",
-                 font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"),
-                 fg=THEME["accent"], bg=THEME["bg_main"]).pack(side=tk.LEFT)
+        In the chat the question is one line among many, and after a few
+        exchanges the learner has to look for it. Here it stays in one place.
+        """
+        question_frame = tk.Frame(self.root, bg=THEME["bg_main"])
+        question_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(12, 6))
+
+        self.question_caption = tk.Label(
+            question_frame, font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
+            fg=THEME["accent"], bg=THEME["bg_main"], anchor=tk.W)
+        self.question_caption.pack(side=tk.TOP, fill=tk.X)
+
+        self.question_label = tk.Label(
+            question_frame, font=(FONT_FAMILY, FONT_SIZE_QUESTION, "bold"),
+            bg=THEME["bg_main"], anchor=tk.W, justify=tk.LEFT)
+        self.question_label.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
+        # A Label wraps only at a fixed pixel width, so the width follows the
+        # frame; without it a long question would be cut at the window edge.
+        question_frame.bind(
+            "<Configure>",
+            lambda event: self.question_label.configure(wraplength=event.width))
+
+        self._set_question(QUESTION_LOADING, asked=False)
+
+    def _set_question(self, text: str, asked: bool):
+        """Show a question of the tutor (asked=True) or a state of the lesson."""
+        self.question_caption.configure(
+            text=QUESTION_CAPTION_ASKED if asked else QUESTION_CAPTION_STATE)
+        self.question_label.configure(
+            text=text, fg=THEME["text_bright"] if asked else THEME["text_dim"])
 
     def _build_status_bar(self):
         # The state of the window alone. The STT and LLM durations are in
@@ -420,8 +466,12 @@ class TutorView:
             highlightcolor=THEME["accent"],
             padx=15,
             pady=15,
-            spacing2=6,
-            spacing3=10,
+            # A wrapped line stays close to its first line (spacing2) and a new
+            # line of the chat gets more room (spacing1 + spacing3): with the
+            # two nearly equal a wrapped word read as a new line.
+            spacing1=4,
+            spacing2=2,
+            spacing3=6,
         )
         # A ttk scrollbar: the classic tk one is drawn by Windows itself, light
         # grey whatever colors it is given. The style is set in
@@ -436,34 +486,70 @@ class TutorView:
         # flag for the insert and puts it back.
         self.chat_display.configure(state=tk.DISABLED)
 
+        # The text column: one tab stop after the widest label (the Fix label
+        # also has the band padding before it). Measured in the label font,
+        # so it follows the font and the screen scaling. Tk sets the indent of
+        # a wrapped line from the tag of its first character, which is always
+        # text, so lmargin2 goes on the text tags and not on the labels.
+        # Each label is measured in the font it is drawn with: the System label
+        # is smaller and not bold, and measured in the chat label font it was
+        # the widest one and made the column too wide.
+        label_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE_CHAT,
+                                 weight="bold")
+        system_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE_BODY)
+        label_width = max(
+            max(label_font.measure(label)
+                for label in (PARTNER_NAME, USER_LABEL, NOTE_LABEL)),
+            system_font.measure(SYSTEM_LABEL))
+        text_column = _BAND_PADDING + label_width + _LABEL_GAP
+        self.chat_display.configure(tabs=(text_column,))
+
         self.chat_display.tag_configure(
             "user", foreground=THEME["info"],
             font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
+        # The accent and not the "partner" pink: one brand color for the tutor
+        # in the question block and in the chat.
         self.chat_display.tag_configure(
-            "partner", foreground=THEME["partner"],
+            "partner", foreground=THEME["accent"],
             font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
         # Upright and not italic: italic Segoe UI at the body size is hard to
         # read in a muted color.
         self.chat_display.tag_configure(
-            "system", foreground=THEME["text_muted"],
+            "system_label", foreground=THEME["text_muted"],
             font=(FONT_FAMILY, FONT_SIZE_BODY))
         self.chat_display.tag_configure(
+            "system", foreground=THEME["text_muted"],
+            font=(FONT_FAMILY, FONT_SIZE_BODY), lmargin2=text_column)
+        self.chat_display.tag_configure(
             "text_user", foreground=THEME["text_bright"],
-            font=(FONT_FAMILY, FONT_SIZE_CHAT))
+            font=(FONT_FAMILY, FONT_SIZE_CHAT), lmargin2=text_column)
         self.chat_display.tag_configure(
             "text_partner", foreground=THEME["text_emph"],
-            font=(FONT_FAMILY, FONT_SIZE_CHAT))
+            font=(FONT_FAMILY, FONT_SIZE_CHAT), lmargin2=text_column)
         # NOTE and SUMMARY take colors of existing palette keys, so a user
         # theme written before them still has every color it needs.
+        # Both are drawn as bands: the label and the text share the
+        # background, and lmargincolor paints the left margin too, so the band
+        # starts at the edge and the text has room inside it.
+        band = dict(background=THEME["bg_accent"],
+                    lmargincolor=THEME["bg_accent"],
+                    lmargin1=_BAND_PADDING, lmargin2=_BAND_PADDING,
+                    rmargin=_BAND_PADDING)
         self.chat_display.tag_configure(
             "note", foreground=THEME["warn"],
-            font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
+            font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"), **band)
         self.chat_display.tag_configure(
-            "text_note", foreground=THEME["text_dim"],
-            font=(FONT_FAMILY, FONT_SIZE_CHAT))
+            "text_note", foreground=THEME["text"],
+            font=(FONT_FAMILY, FONT_SIZE_CHAT),
+            **{**band, "lmargin2": text_column})
+        # The Summary label stands on a line of its own, so its text keeps the
+        # band padding and not the text column.
         self.chat_display.tag_configure(
             "summary", foreground=THEME["good"],
-            font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
+            font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"), **band)
+        self.chat_display.tag_configure(
+            "text_summary", foreground=THEME["text_emph"],
+            font=(FONT_FAMILY, FONT_SIZE_CHAT), **band)
 
     def bind_events(self):
         # One press starts a take, the next one ends it. The bindings are
@@ -652,24 +738,35 @@ class TutorView:
         self.chat_display.see(tk.END)
 
     def append_system_msg(self, text: str):
-        """Add a [System] line: progress, a warning or an error for the user."""
-        self._append((f"[System] {text}\n", "system"))
+        """Add a System line: progress, a warning or an error for the user."""
+        self._append((f"{SYSTEM_LABEL}\t", "system_label"),
+                     (f"{text}\n", "system"))
 
     def append_user_msg(self, text: str):
         """Add what the learner said, as recognized."""
-        self._append(("You: ", "user"), (f"{text}\n", "text_user"))
+        self._append((f"{USER_LABEL}\t", "user"), (f"{text}\n", "text_user"))
 
     def append_partner_msg(self, text: str):
         """Add what the partner says (the SAY line of a reply).
 
-        Also used for a reply outside the contract, which is shown whole.
+        The line also becomes the current question above the control panel.
         """
-        self._append((f"{PARTNER_NAME}: ", "partner"),
+        self._append((f"{PARTNER_NAME}\t", "partner"),
+                     (f"{text}\n", "text_partner"))
+        self._set_question(text, asked=True)
+
+    def append_raw_reply(self, text: str):
+        """Add a reply outside the contract, shown whole.
+
+        Chat only: such a reply can be long and is not a question, so the
+        question block keeps the last real question.
+        """
+        self._append((f"{PARTNER_NAME}\t", "partner"),
                      (f"{text}\n", "text_partner"))
 
     def append_note(self, text: str):
         """Add a correction (the NOTE line of a reply). It is never spoken."""
-        self._append((f"{NOTE_LABEL}: ", "note"), (f"{text}\n", "text_note"))
+        self._append((f"{NOTE_LABEL}\t", "note"), (f"{text}\n", "text_note"))
 
     def append_summary(self, text: str):
         """Add the lesson summary. It may have several lines and is never spoken.
@@ -677,8 +774,11 @@ class TutorView:
         The label stands on a line of its own, so the summary lines start at
         the same edge.
         """
-        self._append((f"{SUMMARY_LABEL}:\n", "summary"),
-                     (f"{text}\n", "text_partner"))
+        self._append((f"{SUMMARY_LABEL}\n", "summary"),
+                     (f"{text}\n", "text_summary"))
+        # The last question would stay in the block and read as if the tutor
+        # still waited for an answer. A later SAY replaces this again.
+        self._set_question(QUESTION_FINISHED, asked=False)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -794,11 +894,13 @@ class TutorView:
         self.update_status("LLM Server Error", THEME["bad"])
         self.update_instruction(INSTRUCTION_SERVER_FAILED)
         self._set_input_enabled(False)
+        self._set_question(QUESTION_FAILED, asked=False)
 
     def init_failed(self):
         """Startup stopped on an unexpected error."""
         self.update_status("Initialization Failed", THEME["bad"])
         self._set_input_enabled(False)
+        self._set_question(QUESTION_FAILED, asked=False)
 
     def recording_failed(self):
         """The microphone input stream failed: the take is gone.

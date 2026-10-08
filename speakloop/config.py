@@ -585,7 +585,7 @@ _DARK_THEME = {
     "bg_panel": "#1a1a1e",           # chat, status bar, control panel
     "bg_accent": "#1f1430",          # accent-tinted fill: the idle mic button
     "border": "#25252a",             # chat outline
-    "accent": "#8a2be2",             # brand purple: title, focus highlight
+    "accent": "#a678f5",             # brand purple: the tutor, focus, mic ring
     # Text
     "text": "#f8f8f2",               # chat body
     "text_emph": "#f1f1f6",          # the partner's reply

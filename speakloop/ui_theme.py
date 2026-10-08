@@ -57,7 +57,7 @@ FONT_FAMILY = _FONT_FAMILIES.get(platform.system(), "DejaVu Sans")  # Linux/othe
 # names instead of hard-coding numbers, so the whole interface can be rescaled
 # from one place. Sizes that share a value are still kept as separate,
 # role-named constants so each can be tuned independently later.
-FONT_SIZE_TITLE = 16     # header title ("SPEAKLOOP • English Voice Tutor")
+FONT_SIZE_QUESTION = 15  # the tutor's current question above the panel
 FONT_SIZE_EMOJI = 20     # emoji glyph drawn on the round mic button
 FONT_SIZE_CHAT = 11      # chat transcript
 FONT_SIZE_BODY = 10      # [System] lines, the instruction under the button

@@ -191,20 +191,20 @@ The lesson follows the free-talk prompt in [`speakloop/prompts/free_talk.md`](sp
 
 Voice commands (say the word alone): **simpler** makes the current question smaller, **hint** gives the first words of an answer, **new topic** changes the topic, **finish** ends the lesson. After "finish" the tutor shows a **Summary** in Russian; it is not read aloud. If you say goodbye in other words, the tutor asks whether to finish. The lesson never ends by itself. There is no grading.
 
-A reply that does not follow this format is shown in full, is not read aloud, and a `[System]` line below it says why. The tutor is not asked again: a second request would cost another half minute and change the lesson history. Markdown inside the tutor's line (`**tape**`) is read without the markers, while the screen keeps the line as the tutor wrote it.
+A reply that does not follow this format is shown in full, is not read aloud, and a System line below it says why. The tutor is not asked again: a second request would cost another half minute and change the lesson history. Markdown inside the tutor's line (`**tape**`) is read without the markers, while the screen keeps the line as the tutor wrote it.
 
 ## The Transcript
 
 Every lesson is written to `transcript/`, under a name taken from the time it started. The files are created when the lesson opens, after the models are loaded, so an application closed while it loads leaves no file:
 
-- `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a `[System]` line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
+- `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a System line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
 - `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines. A lesson without a phrase, a correction or a summary (for example, one that failed on its first request) gets no markdown file.
 
 The jsonl file is the one to read with a program: the markdown file can always be built from it again.
 
 ## Controls
 
-The control panel stands at the top of the window: the microphone button, the text entry and the instruction line. The lesson is below it, and the status bar shows the state of the window.
+The tutor's current question stands at the top of the window, in large type; after the summary it says that the lesson is finished. The control panel is under it: the microphone button, the text entry and the instruction line. The lesson is below the panel, each line labelled in one column (Tutor, You, Fix, System) with the text starting at one edge, each correction (**Fix**) on a band under the phrase it corrects and the summary on a band of its own, and the status bar shows the state of the window.
 
 - **Space** or the microphone button: start a recording. It stops by itself after `silence_timeout` seconds of silence, on the next press, or at `max_record_seconds`. While it runs, the button shows the live microphone level.
 - **Space** or the microphone button during a reply: stop the reply and start recording at once.

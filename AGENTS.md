@@ -111,7 +111,7 @@ the key differ.
   one. `on_notes_toggled` only remembers the choice
   (`config.save_user_setting`); the hiding itself is the view's.
   `_record` and `_system` are the two ways into the transcript: every event of
-  the lesson becomes a record, and `_system` is the ONE place a `[System]`
+  the lesson becomes a record, and `_system` is the ONE place a System
   line is written, so the window and the file always say the same. A phrase
   of the learner gets its number from `_next_turn` (under a lock: typed
   phrases are numbered on the Tk thread, spoken ones on the exchange thread)
@@ -132,14 +132,14 @@ the key differ.
   (`_start_transcript`) and then opens the lesson (`_open_lesson`): the first
   model request runs like an exchange, with its own stop event and under the
   same lock. Until the writer exists `_record` keeps nothing, so the
-  `[System]` lines of the loading stay in the window alone, a run closed while
+  System lines of the loading stay in the window alone, a run closed while
   it loads leaves no file, and the file name is the time the lesson opened. `_ask_model` is the one path to the model: it shows the reply
   (`_show_reply`: NOTE, SAY, SUMMARY in this order, or the whole text of a
   reply outside the contract) and queues only the sentences of SAY, with the
   markdown taken out of them for the speech alone. A reply outside the
-  contract also gets a `[System]` line, written after the reply itself so the
+  contract also gets a System line, written after the reply itself so the
   window and the file both hold the two in that order; the model is not asked
-  again. A failed request gives one `[System]` line: `CONTEXT_FULL_MESSAGE`
+  again. A failed request gives one System line: `CONTEXT_FULL_MESSAGE`
   for a full context, `REPLY_LIMIT_MESSAGE` for an empty reply that used the
   whole reply limit (a thinking mode left on), else the server's sentence
   after `LLM error:` or, for LM Studio, `LM Studio error:`.
@@ -153,15 +153,29 @@ the key differ.
   Module-level `run(append_log)` configures logging, logs
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
-- [`speakloop/ui.py`](speakloop/ui.py) - `TutorView`: the whole window (header,
-  the control panel at the top - mic canvas, text entry and instruction line -
-  the chat transcript below it, and the status bar) plus the *intent* methods the
+- [`speakloop/ui.py`](speakloop/ui.py) - `TutorView`: the whole window (the
+  question block at the top, the control panel under it - mic canvas, text
+  entry and instruction line - the chat transcript below it, and the status
+  bar) plus the *intent* methods the
   controller calls (`enter_recording`, `enter_thinking`, `enter_error`, …) and
   the `append_*` transcript writers (`append_partner_msg`, `append_note`,
   `append_summary`, ...). The partner is labelled `PARTNER_NAME = "Tutor"`,
   a role and not a name, because the prompt gives the model no name. NOTE and
   SUMMARY use existing palette keys, so an older user theme still has every
-  color. Widget bindings call only the callables in
+  color; a NOTE is labelled "Fix", and it and SUMMARY are drawn as bands (tag
+  background and `lmargincolor`). Every chat line starts with its label
+  (Tutor, You, Fix, System) and a tab: the text column is one tab stop after
+  the widest label, each label measured with `tkinter.font` in the font it is
+  drawn with (System is smaller and not bold), and the text tags carry the
+  same value as `lmargin2`, so a wrapped line hangs under the text and not
+  under the label. The window has no header: the title bar names the
+  application. The question block (`_set_question`) shows the last SAY,
+  because `append_partner_msg` sets it; a reply outside the contract goes
+  through `append_raw_reply`, which writes the chat alone, so a long raw reply
+  never fills the block. `append_summary` puts "Lesson finished." there, and
+  `server_failed` and `init_failed` say the lesson cannot start. The `accent`
+  color is also text (the question caption, the Tutor label), so it must stay
+  readable on `bg_panel`. Widget bindings call only the callables in
   the `ViewCallbacks` passed in, so the view never references the controller.
   What the window shows from outside comes in `ViewSettings` (the lesson
   language, the first Notes state, the commands); the view imports neither
@@ -505,7 +519,7 @@ can use them before the requirements step:
   SUMMARY needs its start, and a trimmed start changes the prompt prefix, so
   the server processes the whole history again on every request. A history
   that does not fit the context makes the server refuse the request. Before
-  that, app.py (`_warn_if_context_fills`) shows one `[System]` line at 80 and
+  that, app.py (`_warn_if_context_fills`) shows one System line at 80 and
   one at 90 percent of the context (the server's `served_n_ctx`, or
   `external_n_ctx` when the server reports none, as LM Studio does) with the
   advice to say "finish" (not after a SUMMARY: the lesson is over); after a

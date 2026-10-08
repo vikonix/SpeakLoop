@@ -808,7 +808,7 @@ class VoiceTutorController:
         whole, so the learner still sees what the model wrote.
         """
         if not reply.follows_contract:
-            self.view.append_partner_msg(reply.raw)
+            self.view.append_raw_reply(reply.raw)
             return
         if reply.note:
             self.view.append_note(reply.note)
