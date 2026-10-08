@@ -591,7 +591,7 @@ _DARK_THEME = {
     "text_emph": "#f1f1f6",          # the partner's reply
     "text_bright": "#ffffff",        # the learner's own line, mic glyph, caret
     "text_dim": "#a0a0a5",           # secondary labels: instruction, notes
-    "text_muted": "#6272a4",         # [System] lines
+    "text_muted": "#8b95b8",         # [System] lines (about 5.9:1 on bg_panel)
     # Status / feedback
     "good": "#50fa7b",               # mic outline while the partner speaks
     "ready": "#00e676",              # "Ready"

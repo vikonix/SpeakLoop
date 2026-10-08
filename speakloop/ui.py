@@ -56,8 +56,11 @@ PARTNER_NAME = "Tutor"
 NOTE_LABEL = "Note"
 SUMMARY_LABEL = "Summary"
 
-# The switch that hides and shows the Note lines of the whole lesson.
-NOTES_BUTTON_LABEL = "Notes"
+# The switch that hides and shows the Note lines of the whole lesson. The
+# state is in the label itself (a ticked or an empty box): a tk.Button on
+# Windows draws no highlight border, so a colored outline could not show it.
+NOTES_LABEL_SHOWN = "\u2611 Notes"
+NOTES_LABEL_HIDDEN = "\u2610 Notes"
 
 # The tags of a NOTE line. Hiding a note means eliding both of them, so the
 # line disappears with its own line break and leaves no empty row behind.
@@ -218,10 +221,7 @@ class TutorView:
         that class is created, which would overwrite configure() calls made
         beforehand. The second pass makes the THEME colors win.
 
-        The scrollbar entry styles a ttk scrollbar, of which this window has
-        none yet: the chat's own is a classic tk one (see _build_chat). It is
-        kept so the first ttk scrollbar added here is themed instead of arriving
-        in the base theme's colors.
+        The scrollbar entry styles the chat's scrollbar (see _build_chat).
         """
         self.style.configure("Vertical.TScrollbar",
                              gripcount=0,
@@ -342,31 +342,41 @@ class TutorView:
         command_row = tk.Frame(parent, bg=THEME["bg_panel"])
         command_row.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(0, 12))
 
-        # Packed before the commands: a widget packed to the right keeps its
-        # place while the buttons left of it share what is left.
-        self.notes_button = self._panel_button(
-            command_row, NOTES_BUTTON_LABEL, self._toggle_notes)
-        self.notes_button.pack(side=tk.RIGHT, padx=(6, 0))
-        tk.Frame(command_row, bg=THEME["border"], width=1).pack(
-            side=tk.RIGHT, fill=tk.Y, padx=6, pady=2)
-
+        # A grid and not pack: the "uniform" group gives every command column
+        # the same width, while pack(expand=True) shares only the free space,
+        # so a longer word ("new topic") made its button wider.
         self.command_buttons = []
-        for command in self._settings.commands:
+        for column, command in enumerate(self._settings.commands):
             button = self._panel_button(
                 command_row, command,
                 # command=command binds this loop value; without it every
                 # button would send the last command of the loop.
                 lambda text=command: self._cb.on_command_pressed(text))
-            button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            button.grid(row=0, column=column, sticky="ew", padx=(0, 6))
+            command_row.columnconfigure(column, weight=1, uniform="command")
             button.configure(state=tk.DISABLED)
             self.command_buttons.append(button)
 
+        # The separator and the switch keep their own width; only the command
+        # columns left of them grow with the window.
+        notes_column = len(self.command_buttons)
+        tk.Frame(command_row, bg=THEME["border"], width=1).grid(
+            row=0, column=notes_column, sticky="ns", padx=6, pady=2)
+        self.notes_button = self._panel_button(
+            command_row, NOTES_LABEL_SHOWN, self._toggle_notes)
+        self.notes_button.grid(row=0, column=notes_column + 1, padx=(6, 0))
+
     def _panel_button(self, parent, text: str, command) -> tk.Button:
-        """One flat button of the control panel, in the colors of the theme."""
-        return tk.Button(
+        """One flat button of the control panel, in the colors of the theme.
+
+        The neutral "border" fill stands out from the panel, which the
+        accent-tinted fill did not: an enabled button looked disabled. The
+        accent tint is kept for the hover and the press.
+        """
+        button = tk.Button(
             parent, text=text, command=command,
             font=(FONT_FAMILY, FONT_SIZE_SMALL),
-            bg=THEME["bg_accent"], fg=THEME["text_dim"],
+            bg=THEME["border"], fg=THEME["text"],
             activebackground=THEME["bg_accent"],
             activeforeground=THEME["text_bright"],
             disabledforeground=THEME["text_muted"],
@@ -374,6 +384,19 @@ class TutorView:
             highlightthickness=1,
             highlightbackground=THEME["border"],
             padx=6, pady=4, cursor="hand2")
+        # Tk buttons have no hover color of their own. A disabled button gets
+        # no hover, so it does not look clickable.
+        button.bind("<Enter>", lambda _e: self._hover_button(button, True))
+        button.bind("<Leave>", lambda _e: self._hover_button(button, False))
+        return button
+
+    @staticmethod
+    def _hover_button(button: tk.Button, inside: bool):
+        """Paint a panel button for the mouse over it, or back to its rest look."""
+        if inside and str(button.cget("state")) == tk.DISABLED:
+            return
+        button.configure(bg=THEME["bg_accent"] if inside else THEME["border"],
+                         fg=THEME["text_bright"] if inside else THEME["text"])
 
     def _build_chat(self):
         chat_frame = tk.Frame(self.root, bg=THEME["bg_main"])
@@ -400,8 +423,12 @@ class TutorView:
             spacing2=6,
             spacing3=10,
         )
-        scrollbar = tk.Scrollbar(chat_frame, orient=tk.VERTICAL,
-                                 command=self.chat_display.yview)
+        # A ttk scrollbar: the classic tk one is drawn by Windows itself, light
+        # grey whatever colors it is given. The style is set in
+        # _apply_ttk_palette.
+        scrollbar = ttk.Scrollbar(chat_frame, orient=tk.VERTICAL,
+                                  command=self.chat_display.yview,
+                                  style="Vertical.TScrollbar")
         self.chat_display.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_display.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -415,9 +442,11 @@ class TutorView:
         self.chat_display.tag_configure(
             "partner", foreground=THEME["partner"],
             font=(FONT_FAMILY, FONT_SIZE_CHAT, "bold"))
+        # Upright and not italic: italic Segoe UI at the body size is hard to
+        # read in a muted color.
         self.chat_display.tag_configure(
             "system", foreground=THEME["text_muted"],
-            font=(FONT_FAMILY, FONT_SIZE_BODY, "italic"))
+            font=(FONT_FAMILY, FONT_SIZE_BODY))
         self.chat_display.tag_configure(
             "text_user", foreground=THEME["text_bright"],
             font=(FONT_FAMILY, FONT_SIZE_CHAT))
@@ -505,6 +534,10 @@ class TutorView:
         self.text_entry.configure(state=state)
         for button in self.command_buttons:
             button.configure(state=state)
+            # A clicked button is disabled with the mouse still over it, and
+            # its hover color would make it look active while the model
+            # answers. The next <Enter> paints the hover again.
+            self._hover_button(button, False)
 
     # ------------------------------------------------------------------
     # The Notes switch
@@ -526,9 +559,7 @@ class TutorView:
         for tag in _NOTE_TAGS:
             self.chat_display.tag_configure(tag, elide=not self._notes_shown)
         self.notes_button.configure(
-            fg=THEME["text_bright"] if self._notes_shown else THEME["text_muted"],
-            highlightbackground=(THEME["accent"] if self._notes_shown
-                                 else THEME["border"]))
+            text=NOTES_LABEL_SHOWN if self._notes_shown else NOTES_LABEL_HIDDEN)
 
     # ------------------------------------------------------------------
     # Mic button
