@@ -78,6 +78,16 @@ QUESTION_LOADING = "Loading the lesson..."
 QUESTION_FAILED = "The lesson cannot start."
 QUESTION_FINISHED = "Lesson finished."
 
+# The stages of one exchange, in the order the bar above the question shows
+# them. Speech recognition and the model's answer are one wait for the learner,
+# so both are Thinking. While the application loads, or after it failed to
+# start, no stage is active.
+STAGE_READY = "Ready"
+STAGE_LISTENING = "Listening"
+STAGE_THINKING = "Thinking"
+STAGE_SPEAKING = "Speaking"
+STAGES = (STAGE_READY, STAGE_LISTENING, STAGE_THINKING, STAGE_SPEAKING)
+
 # The switch that hides and shows the Note lines of the whole lesson. The
 # state is in the label itself (a ticked or an empty box): a tk.Button on
 # Windows draws no highlight border, so a colored outline could not show it.
@@ -92,7 +102,11 @@ _NOTE_TAGS = ("note", "text_note")
 # press and ends by itself after a pause, so the wording says press, never hold.
 # It names the two ways to answer, because the text entry has no placeholder of
 # its own (Tk has none, and a fake one has to be cleared on every focus change).
-INSTRUCTION_LOADING = "Loading components..."
+# Empty while loading: the question block already says "Loading the
+# lesson...", and a second loading line under the entry only repeated it.
+# The label keeps its height, so the panel does not move when the ready
+# instruction arrives.
+INSTRUCTION_LOADING = ""
 INSTRUCTION_READY_FIRST = "Press SPACE to speak, or type and press Enter. ESC quits."
 INSTRUCTION_READY = "Press SPACE to speak, or type a phrase and press Enter."
 INSTRUCTION_RECORDING = "Speak. Recording stops after a pause, or press again."
@@ -271,16 +285,57 @@ class TutorView:
                                              self.root.winfo_screenheight()))
         self.root.configure(bg=THEME["bg_main"])
         # No header: the title bar of the window already names the
-        # application, and the space goes to the current question.
+        # application, and the space goes to the stage bar and the current
+        # question.
+        self._build_stage_bar()
         self._build_question()
         self._build_status_bar()
-        # The controls stand at the top, under the header: the learner answers
+        # The controls stand under the question: the learner answers
         # from there and reads the lesson below it, so the panel never moves
         # when the transcript grows.
         self._build_controls()
         # Last, and packed with expand=True: it takes whatever space the fixed
         # parts above and below have left.
         self._build_chat()
+
+    def _build_stage_bar(self):
+        """The stages of the exchange in one row, the active one marked.
+
+        Labels and not buttons: nothing here can be clicked, and the default
+        cursor tells the learner so. The status bar at the bottom stays: it
+        also shows the loading steps and the errors, which have no stage.
+        """
+        stage_bar = tk.Frame(self.root, bg=THEME["bg_main"])
+        stage_bar.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(10, 0))
+
+        self._stage_labels = {}
+        self._stage_lines = {}
+        last_column = len(STAGES) - 1
+        for column, stage in enumerate(STAGES):
+            # The same "uniform" group as the command buttons: equal columns
+            # whatever the length of the word.
+            stage_bar.columnconfigure(column, weight=1, uniform="stage")
+            gap = (0, 0 if column == last_column else 6)
+            label = tk.Label(stage_bar, text=stage, bg=THEME["bg_main"],
+                             anchor=tk.W)
+            label.grid(row=0, column=column, sticky="ew", padx=gap)
+            line = tk.Frame(stage_bar, height=3)
+            line.grid(row=1, column=column, sticky="ew", padx=gap, pady=(3, 0))
+            self._stage_labels[stage] = label
+            self._stage_lines[stage] = line
+
+        self._set_stage(None)
+
+    def _set_stage(self, active):
+        """Mark the stage *active* in the stage bar; None marks no stage."""
+        for stage in STAGES:
+            is_active = stage == active
+            self._stage_labels[stage].configure(
+                fg=THEME["text_bright"] if is_active else THEME["text_dim"],
+                font=(FONT_FAMILY, FONT_SIZE_SMALL,
+                      "bold" if is_active else "normal"))
+            self._stage_lines[stage].configure(
+                bg=THEME["accent"] if is_active else THEME["border"])
 
     def _build_question(self):
         """The tutor's current question, large, above the control panel.
@@ -815,6 +870,7 @@ class TutorView:
         self.update_status("Ready", THEME["ready"])
         self.update_instruction(INSTRUCTION_READY_FIRST)
         self._set_input_enabled(True)
+        self._set_stage(STAGE_READY)
 
     # ------------------------------------------------------------------
     # Exchange intents
@@ -825,6 +881,7 @@ class TutorView:
         self.update_status("Ready", THEME["ready"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
+        self._set_stage(STAGE_READY)
 
     def enter_recording(self):
         """The microphone is open.
@@ -837,12 +894,14 @@ class TutorView:
         self.update_status("Recording...", THEME["bad"])
         self.update_instruction(INSTRUCTION_RECORDING)
         self._set_input_enabled(False)
+        self._set_stage(STAGE_LISTENING)
 
     def enter_processing(self):
         """The recording is being transcribed."""
         self.draw_mic_button("processing")
         self.update_status("Processing Speech (STT)...", THEME["warn"])
         self._set_input_enabled(False)
+        self._set_stage(STAGE_THINKING)
 
     def enter_thinking(self):
         """The model is answering.
@@ -855,6 +914,7 @@ class TutorView:
         self.update_status("Thinking (LLM)...", THEME["info"])
         self.draw_mic_button("processing")
         self._set_input_enabled(False)
+        self._set_stage(STAGE_THINKING)
 
     def enter_speaking(self):
         """The partner's reply is being spoken.
@@ -866,6 +926,7 @@ class TutorView:
         self.update_status(f"{PARTNER_NAME} is speaking...", THEME["partner"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
+        self._set_stage(STAGE_SPEAKING)
 
     # ------------------------------------------------------------------
     # Failure intents
@@ -883,6 +944,7 @@ class TutorView:
         self.update_status(status, THEME["bad"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
+        self._set_stage(STAGE_READY)
 
     def server_failed(self):
         """The LLM server did not start: the session cannot continue.
@@ -895,12 +957,14 @@ class TutorView:
         self.update_instruction(INSTRUCTION_SERVER_FAILED)
         self._set_input_enabled(False)
         self._set_question(QUESTION_FAILED, asked=False)
+        self._set_stage(None)
 
     def init_failed(self):
         """Startup stopped on an unexpected error."""
         self.update_status("Initialization Failed", THEME["bad"])
         self._set_input_enabled(False)
         self._set_question(QUESTION_FAILED, asked=False)
+        self._set_stage(None)
 
     def recording_failed(self):
         """The microphone input stream failed: the take is gone.
@@ -913,3 +977,4 @@ class TutorView:
         self.update_status("Recording Error", THEME["bad"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
+        self._set_stage(STAGE_READY)

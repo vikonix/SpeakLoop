@@ -204,7 +204,7 @@ The jsonl file is the one to read with a program: the markdown file can always b
 
 ## Controls
 
-The tutor's current question stands at the top of the window, in large type; after the summary it says that the lesson is finished. The control panel is under it: the microphone button, the text entry and the instruction line. The lesson is below the panel, each line labelled in one column (Tutor, You, Fix, System) with the text starting at one edge, each correction (**Fix**) on a band under the phrase it corrects and the summary on a band of its own, and the status bar shows the state of the window.
+A row of stages at the top of the window marks what the application is doing: Ready, Listening, Thinking (recognition and the answer) or Speaking. The tutor's current question stands under it, in large type; after the summary it says that the lesson is finished. The control panel is under it: the microphone button, the text entry and the instruction line. The lesson is below the panel, each line labelled in one column (Tutor, You, Fix, System) with the text starting at one edge, each correction (**Fix**) on a band under the phrase it corrects and the summary on a band of its own, and the status bar shows the state of the window.
 
 - **Space** or the microphone button: start a recording. It stops by itself after `silence_timeout` seconds of silence, on the next press, or at `max_record_seconds`. While it runs, the button shows the live microphone level.
 - **Space** or the microphone button during a reply: stop the reply and start recording at once.

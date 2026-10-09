@@ -154,9 +154,9 @@ the key differ.
   `detect_hardware.warn_if_gpu_unused`, and opens the window. **Imports
   `speakloop.config` before `stt`/`tts`** (see config below).
 - [`speakloop/ui.py`](speakloop/ui.py) - `TutorView`: the whole window (the
-  question block at the top, the control panel under it - mic canvas, text
-  entry and instruction line - the chat transcript below it, and the status
-  bar) plus the *intent* methods the
+  stage bar and the question block at the top, the control panel under them -
+  mic canvas, text entry and instruction line - the chat transcript below it,
+  and the status bar) plus the *intent* methods the
   controller calls (`enter_recording`, `enter_thinking`, `enter_error`, …) and
   the `append_*` transcript writers (`append_partner_msg`, `append_note`,
   `append_summary`, ...). The partner is labelled `PARTNER_NAME = "Tutor"`,
@@ -173,7 +173,12 @@ the key differ.
   because `append_partner_msg` sets it; a reply outside the contract goes
   through `append_raw_reply`, which writes the chat alone, so a long raw reply
   never fills the block. `append_summary` puts "Lesson finished." there, and
-  `server_failed` and `init_failed` say the lesson cannot start. The `accent`
+  `server_failed` and `init_failed` say the lesson cannot start. The stage
+  bar (`_set_stage`, `STAGES`) is set by the same intents: Ready (app ready,
+  idle, an error), Listening (recording), Thinking (transcribing and
+  answering, one wait for the learner), Speaking; while loading and after a
+  failed start no stage is marked. The status bar stays, because the loading
+  steps and the errors have no stage. The `accent`
   color is also text (the question caption, the Tutor label), so it must stay
   readable on `bg_panel`. Widget bindings call only the callables in
   the `ViewCallbacks` passed in, so the view never references the controller.
