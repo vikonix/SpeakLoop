@@ -338,6 +338,23 @@ class LLMManager:
             # told about a failure is the window's decision.
             raise
 
+    def replace_last_reply(self, text: str) -> bool:
+        """Put *text* in place of the last reply of the model in the history.
+
+        For a reply the lesson changed after it arrived (a NOTE about a
+        command, see speakloop/conversation.py): the model must see the reply
+        as the learner saw it, or it copies what was dropped. Only the last
+        message changes, so the server still reuses the processed history
+        before it. False, and nothing changes, when the last message is not a
+        reply of the model.
+        """
+        with self._messages_lock:
+            last = self.messages[-1] if self.messages else {}
+            if last.get("role") != "assistant":
+                return False
+            self.messages[-1] = {"role": "assistant", "content": text}
+            return True
+
     def _roll_back_user_message(self):
         """Remove the user message of a failed or interrupted request.
 

@@ -33,7 +33,7 @@ import threading
 import time
 import tkinter as tk
 from datetime import datetime
-from typing import NamedTuple, Optional
+from typing import List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -41,7 +41,7 @@ import numpy as np
 # which huggingface_hub reads when stt and tts import their engines below.
 from speakloop import config
 from speakloop import (bootstrap, detect_hardware, lifecycle, prompt,
-                       transcript)
+                       topics, transcript)
 from speakloop.contract import Reply, split_sentences, strip_markdown
 from speakloop.conversation import Lesson, context_level_reached
 from speakloop.llm import (EmptyCutReplyError, LLMManager, error_message,
@@ -205,6 +205,13 @@ class VoiceTutorController:
         # opening question answers no phrase and has 0.
         self._turn = 0
         self._turn_lock = threading.Lock()
+        # The topics (speakloop/topics.py): the list, read by load_components,
+        # and every topic of this lesson in order, the first one first. A
+        # typed or pressed "new topic" adds to it on the Tk thread and a
+        # spoken one on its exchange thread, hence the lock.
+        self._topic_list: Tuple[str, ...] = ()
+        self._topics_used: List[str] = []
+        self._topic_lock = threading.Lock()
 
         # The window. Built last of the members, because the loader thread
         # started below drives it at once.
@@ -254,7 +261,8 @@ class VoiceTutorController:
                 started_at=lesson_start,
                 target_language=config.TARGET_LANGUAGE,
                 explanation_language=config.EXPLANATION_LANGUAGE,
-                first_topic=config.FIRST_TOPIC,
+                # The topic the lesson really opened with, chosen or set.
+                first_topic=self._topics_used[0],
                 llm_model=self._chat_model_name(),
                 stt_model=config.WHISPER_MODEL,
                 tts_voice=config.TTS_VOICE))
@@ -298,6 +306,22 @@ class VoiceTutorController:
         self.root.after(0, self.view.append_system_msg, text)
         self._record(transcript.TYPE_SYSTEM, text, turn)
 
+    def _with_topic(self, learner_text: str) -> str:
+        """The phrase as it goes to the model. (Any thread.)
+
+        A bare "new topic" gets the next topic from the list, so the program
+        and not the model chooses it, and the window can show it. Every other
+        phrase is returned as it is.
+        """
+        if not topics.is_new_topic_command(learner_text):
+            return learner_text
+        with self._topic_lock:
+            topic = topics.pick_topic(self._topic_list, self._topics_used)
+            self._topics_used.append(topic)
+        logging.info(f"New topic chosen: {topic!r}.")
+        self.root.after(0, self.view.set_topic, topic)
+        return topics.topic_command(topic)
+
     def _report_unanswered(self, turn: int) -> None:
         """Say that phrase *turn* gets no answer. (Exchange thread.)
 
@@ -318,11 +342,23 @@ class VoiceTutorController:
         self.root.after(0, self.view.enter_loading)
 
         try:
-            # First of all: a missing or edited prompt file stops the start at
-            # once, and not after a minute of model loading.
+            # First of all: a missing topic list or a missing or edited prompt
+            # file stops the start at once, and not after a minute of model
+            # loading. The list comes before the prompt, because the first
+            # topic is a line of the prompt.
+            self._topic_list = topics.load_topics(config.TOPICS_FILE)
+            # strip(): a value of spaces is empty for the prompt too.
+            configured_topic = config.FIRST_TOPIC.strip()
+            first_topic = (configured_topic
+                           or topics.pick_topic(self._topic_list, ()))
+            self._topics_used.append(first_topic)
+            source = ("from settings.json" if configured_topic
+                      else "chosen at random")
+            logging.info(f"First topic: {first_topic!r} ({source}).")
+            self.root.after(0, self.view.set_topic, first_topic)
             system_prompt = prompt.build_system_prompt(
                 config.PROMPT_FILE, config.TARGET_LANGUAGE,
-                config.EXPLANATION_LANGUAGE, config.FIRST_TOPIC)
+                config.EXPLANATION_LANGUAGE, first_topic)
             self.lesson = Lesson(self.llm_mgr, system_prompt)
             logging.info(f"Lesson prompt loaded from {config.PROMPT_FILE} "
                          f"({len(system_prompt)} characters).")
@@ -503,6 +539,8 @@ class VoiceTutorController:
         """
         if not self.app_ready:
             return
+        # The chat and the transcript show the phrase the model receives.
+        learner_text = self._with_topic(learner_text)
         self.playback.stop()
         self.view.append_user_msg(learner_text)
         turn = self._next_turn()
@@ -673,12 +711,16 @@ class VoiceTutorController:
                 self._enter_later(self.view.enter_idle, stop_event)
                 return
 
-            # Update User Speech to GUI
-            self.root.after(0, self.view.append_user_msg, user_text)
+            # A spoken "new topic" gets its topic like a pressed one. The chat
+            # and the transcript show the phrase the model receives; the
+            # record keeps the recognized words too, when they differ.
+            phrase = self._with_topic(user_text)
+            self.root.after(0, self.view.append_user_msg, phrase)
             turn = self._next_turn()
-            self._record(transcript.TYPE_LEARNER, user_text, turn,
+            self._record(transcript.TYPE_LEARNER, phrase, turn,
                          source=transcript.SOURCE_VOICE,
-                         stt_ms=round(stt_ms))
+                         stt_ms=round(stt_ms),
+                         recognized=user_text if phrase != user_text else None)
 
             if stop_event.is_set():
                 # A new take began while this one was being transcribed. The
@@ -690,7 +732,7 @@ class VoiceTutorController:
                 self._report_unanswered(turn)
                 return
 
-            self._ask_model(user_text, stop_event, turn)
+            self._ask_model(phrase, stop_event, turn)
 
         except Exception:
             logging.exception("Error in the exchange:")
@@ -713,7 +755,10 @@ class VoiceTutorController:
             if learner_text is None:
                 reply = self.lesson.open(stop_event)
             else:
-                reply = self.lesson.answer(learner_text, stop_event)
+                # A command gets no NOTE: see Lesson.answer.
+                reply = self.lesson.answer(
+                    learner_text, stop_event,
+                    command=prompt.is_lesson_command(learner_text))
         except Exception as llm_error:
             # Handled here and not by the caller: without this the status bar
             # keeps saying "Thinking" and the failure is only in the log.

@@ -210,6 +210,25 @@ class StartConversationTests(unittest.TestCase):
         manager.client.chat.completions.create.assert_not_called()
 
 
+class ReplaceLastReplyTests(unittest.TestCase):
+    def test_the_last_reply_of_the_model_is_replaced(self):
+        manager = _manager()
+        manager.messages.append({"role": "user", "content": "finish"})
+        manager.messages.append({"role": "assistant",
+                                 "content": "NOTE: x\nSAY: Why?"})
+        self.assertTrue(manager.replace_last_reply("SAY: Why?"))
+        self.assertEqual(manager.messages[-1],
+                         {"role": "assistant", "content": "SAY: Why?"})
+        self.assertEqual(manager.messages[-2]["content"], "finish")
+
+    def test_nothing_changes_when_the_last_message_is_not_a_reply(self):
+        manager = _manager()
+        manager.messages.append({"role": "user", "content": "finish"})
+        before = list(manager.messages)
+        self.assertFalse(manager.replace_last_reply("SAY: Why?"))
+        self.assertEqual(manager.messages, before)
+
+
 class AskRequestTests(unittest.TestCase):
     """The request ask() sends and the text it returns, with a stand-in client."""
 

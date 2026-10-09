@@ -18,7 +18,8 @@ Run from the project root with:
 
 import unittest
 
-from speakloop.contract import parse_reply, split_sentences, strip_markdown
+from speakloop.contract import (parse_reply, split_sentences, strip_markdown,
+                                without_note)
 
 NOTE_LINE = ('NOTE: "I fix my bicycle with a scotch" -> "with tape". '
              'Scotch это виски, а лента это tape.')
@@ -176,6 +177,24 @@ class ContractBreakTests(unittest.TestCase):
         reply = parse_reply("")
         self.assertEqual((reply.note, reply.say, reply.summary, reply.raw),
                          (None, None, None, ""))
+
+
+class WithoutNoteTests(unittest.TestCase):
+    def test_the_note_is_gone_and_the_say_stays(self):
+        reply = without_note(parse_reply('NOTE: "a" -> "b".\nSAY: Why?'))
+        self.assertIsNone(reply.note)
+        self.assertEqual(reply.say, "Why?")
+        self.assertEqual(reply.raw, "SAY: Why?")
+
+    def test_a_summary_stays_after_the_say(self):
+        original = parse_reply('NOTE: x\nSUMMARY: Итог.\nВторая строка.')
+        reply = without_note(original)
+        self.assertEqual(reply.summary, original.summary)
+        self.assertEqual(reply.raw, "SUMMARY: Итог.\nВторая строка.")
+
+    def test_the_new_raw_text_parses_to_the_same_reply(self):
+        reply = without_note(parse_reply('NOTE: x\nSAY: Why?'))
+        self.assertEqual(parse_reply(reply.raw), reply)
 
 
 class StripMarkdownTests(unittest.TestCase):

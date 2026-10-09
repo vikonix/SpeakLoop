@@ -20,6 +20,8 @@ config nor torch.
 import re
 from pathlib import Path
 
+from speakloop.topics import NEW_TOPIC_COMMAND, command_words, topic_command
+
 # The SETTINGS lines, with the exact words of the prompt. A line renamed in the
 # file must stop the start: otherwise the lesson silently runs on the default
 # in brackets and looks correct.
@@ -37,7 +39,21 @@ SETTING_NAMES = (
 # strings, so the model reads a pressed button like a spoken command. A command
 # renamed in the prompt has to be renamed here as well - tests/test_prompt.py
 # checks that the shipped prompt still names every one of them.
-LESSON_COMMANDS = ("simpler", "hint", "new topic", "finish")
+LESSON_COMMANDS = ("simpler", "hint", NEW_TOPIC_COMMAND, "finish")
+
+
+def is_lesson_command(text: str) -> bool:
+    """True when *text* is a command of the learner and nothing else.
+
+    A command from LESSON_COMMANDS, whatever the case and punctuation of
+    recognition, or the "new topic: <topic>" phrase the program sends
+    (speakloop/topics.py). The controller uses it to keep a NOTE about a
+    command out of the lesson (see Lesson.answer).
+    """
+    if text.strip().lower().startswith(topic_command("")):
+        return True
+    words = command_words(text)
+    return any(words == command.split() for command in LESSON_COMMANDS)
 
 
 def _setting_pattern(name: str) -> "re.Pattern":

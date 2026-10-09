@@ -73,6 +73,8 @@ _LABEL_GAP = 12
 # while the block holds a question of the tutor; the other texts are states of
 # the lesson, and "TUTOR ASKS" over them would be wrong.
 QUESTION_CAPTION_ASKED = "TUTOR ASKS"
+# Beside the caption of a question, when the program knows the topic.
+TOPIC_CAPTION = "/  TOPIC: {topic}"
 QUESTION_CAPTION_STATE = "LESSON"
 QUESTION_LOADING = "Loading the lesson..."
 QUESTION_FAILED = "The lesson cannot start."
@@ -229,6 +231,9 @@ class TutorView:
         self._cb = callbacks
         self._settings = settings
         self._notes_shown = settings.show_notes
+        # The topic the next question belongs to (set_topic). None until the
+        # controller has one.
+        self._topic = None
         self.setup_styles()
         self.build_ui()
         self.bind_events()
@@ -346,10 +351,17 @@ class TutorView:
         question_frame = tk.Frame(self.root, bg=THEME["bg_main"])
         question_frame.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(12, 6))
 
+        # One row: who asks, in the accent, and the topic beside it, dim.
+        caption_row = tk.Frame(question_frame, bg=THEME["bg_main"])
+        caption_row.pack(side=tk.TOP, fill=tk.X)
         self.question_caption = tk.Label(
-            question_frame, font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
+            caption_row, font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
             fg=THEME["accent"], bg=THEME["bg_main"], anchor=tk.W)
-        self.question_caption.pack(side=tk.TOP, fill=tk.X)
+        self.question_caption.pack(side=tk.LEFT)
+        self.topic_caption = tk.Label(
+            caption_row, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+            fg=THEME["text_dim"], bg=THEME["bg_main"], anchor=tk.W)
+        self.topic_caption.pack(side=tk.LEFT, padx=(6, 0))
 
         self.question_label = tk.Label(
             question_frame, font=(FONT_FAMILY, FONT_SIZE_QUESTION, "bold"),
@@ -364,9 +376,16 @@ class TutorView:
         self._set_question(QUESTION_LOADING, asked=False)
 
     def _set_question(self, text: str, asked: bool):
-        """Show a question of the tutor (asked=True) or a state of the lesson."""
+        """Show a question of the tutor (asked=True) or a state of the lesson.
+
+        The topic stands beside a question only: "Lesson finished." belongs to
+        no topic.
+        """
         self.question_caption.configure(
             text=QUESTION_CAPTION_ASKED if asked else QUESTION_CAPTION_STATE)
+        self.topic_caption.configure(
+            text=(TOPIC_CAPTION.format(topic=self._topic.upper())
+                  if asked and self._topic else ""))
         self.question_label.configure(
             text=text, fg=THEME["text_bright"] if asked else THEME["text_dim"])
 
@@ -809,6 +828,15 @@ class TutorView:
         self._append((f"{PARTNER_NAME}\t", "partner"),
                      (f"{text}\n", "text_partner"))
         self._set_question(text, asked=True)
+
+    def set_topic(self, topic: str):
+        """Take *topic* for the next question of the tutor.
+
+        Not shown at once: the question on the screen still belongs to the old
+        topic until the model answers, and the topic beside it would be
+        wrong for that second. The next append_partner_msg shows it.
+        """
+        self._topic = topic
 
     def append_raw_reply(self, text: str):
         """Add a reply outside the contract, shown whole.

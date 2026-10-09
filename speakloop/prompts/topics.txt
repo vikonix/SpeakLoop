@@ -1,0 +1,130 @@
+# Topics of the free-talk lesson, one per line, in the target language.
+#
+# The program takes the first topic from "first_topic" in settings.json, or
+# from this list at random when that key is empty. On "new topic" it takes
+# another topic from this list, one the lesson has not had yet, and sends it
+# to the model as "new topic: <topic>".
+#
+# Write a short, concrete topic about the learner's own life: the model asks
+# about it, and the window shows it above the question. Lines that start with
+# "#" and empty lines are skipped. A topic that is here twice counts once.
+
+# Home
+your home
+your neighbours
+moving house
+a room you would change
+cleaning and tidying up
+something in your home that is broken
+plants at home
+a view from your window
+
+# Food
+cooking at home
+a dish from your childhood
+a restaurant you remember
+shopping for food
+a meal with friends
+a recipe you know well
+street food
+
+# People
+a good friend
+your family
+a person who taught you something
+a neighbour or a colleague you like
+meeting new people
+a birthday you remember
+a gift you gave or got
+
+# Free time
+a hobby
+a book you read
+a film or a series
+music you listen to
+a game you play
+a sport you do or watch
+a museum or an exhibition
+a weekend you remember
+doing nothing
+
+# Places and travel
+a trip you remember
+a city you like
+a place you want to visit
+travelling by train or by plane
+a holiday that went wrong
+your street
+a park or a walk you like
+the town where you grew up
+packing a suitcase
+
+# Things
+your phone
+a thing you bought recently
+a thing you cannot throw away
+clothes you like to wear
+a tool you use often
+something you made with your hands
+a car or a bicycle
+a broken device
+
+# Daily life
+your morning
+your evening
+the weather today
+getting around your town
+waiting in a queue
+a visit to the doctor or the dentist
+paperwork and offices
+the post and parcels
+paying for things
+a bank or a shop problem
+noise around you
+
+# Work and study
+your work
+your workplace
+a work problem you solved
+learning a new skill
+your school days
+an exam you remember
+learning languages
+a course you took
+
+# Nature and seasons
+animals and pets
+the sea or the mountains
+your favourite season
+a garden
+a storm or very hot weather
+the night sky
+
+# Plans and changes
+plans for next week
+plans for the next year
+a change in your life
+something you want to learn
+a decision you made
+a habit you want to start
+a habit you want to stop
+
+# Technology
+an app you use every day
+the internet at home
+a computer problem
+photos on your phone
+social networks
+a program you wrote or want to write
+
+# Situations
+ordering in a cafe
+asking for directions
+calling a support line
+renting a flat
+buying a ticket
+returning something to a shop
+a party you went to
+a surprise
+a small accident
+a lost thing

@@ -108,7 +108,14 @@ the key differ.
   own, so voice and keyboard share every step from `_ask_model` on. A command
   button takes the same path through `_submit_phrase` (`on_command_pressed`):
   a command is an ordinary phrase of the learner and stays in the history as
-  one. `on_notes_toggled` only remembers the choice
+  one. The one exception is a bare "new topic", typed, pressed or spoken:
+  `_with_topic` turns it into `new topic: <topic>` with the next topic of
+  `topics.pick_topic` (under `_topic_lock`, because a spoken one arrives on
+  the exchange thread), passes the topic to `view.set_topic`, and the chat,
+  the transcript and the model all get that phrase; a voice record also keeps
+  the words as recognized (`recognized`). The program, and not the model,
+  chooses every topic: left to itself the model opened almost every lesson
+  with breakfast or work. `on_notes_toggled` only remembers the choice
   (`config.save_user_setting`); the hiding itself is the view's.
   `_record` and `_system` are the two ways into the transcript: every event of
   the lesson becomes a record, and `_system` is the ONE place a System
@@ -126,9 +133,11 @@ the key differ.
   a lesson that ended without one.
   `_exchange_lock` keeps one exchange at a time, so a
   take made during the previous exchange waits instead of being dropped.
-  `load_components` builds the lesson (`prompt.build_system_prompt`, then
-  `Lesson`) before it loads any model, so a bad prompt file stops the start at
-  once. `make_app_ready` creates the transcript writer
+  `load_components` reads the topic list (`config.TOPICS_FILE`), takes the
+  first topic (`first_topic` from settings.json, else a random one) and builds
+  the lesson with it (`prompt.build_system_prompt`, then `Lesson`) before it
+  loads any model, so a bad list or prompt file stops the start at once. The
+  meta record of the transcript names the first topic the lesson really had. `make_app_ready` creates the transcript writer
   (`_start_transcript`) and then opens the lesson (`_open_lesson`): the first
   model request runs like an exchange, with its own stop event and under the
   same lock. Until the writer exists `_record` keeps nothing, so the
@@ -173,7 +182,11 @@ the key differ.
   because `append_partner_msg` sets it; a reply outside the contract goes
   through `append_raw_reply`, which writes the chat alone, so a long raw reply
   never fills the block. `append_summary` puts "Lesson finished." there, and
-  `server_failed` and `init_failed` say the lesson cannot start. The stage
+  `server_failed` and `init_failed` say the lesson cannot start.
+  `set_topic` takes the topic for the NEXT question: the caption
+  `TUTOR ASKS  /  TOPIC: ...` changes with `append_partner_msg`, because the
+  question on the screen belongs to the old topic until the model answers.
+  The stage
   bar (`_set_stage`, `STAGES`) is set by the same intents: Ready (app ready,
   idle, an error), Listening (recording), Thinking (transcribing and
   answering, one wait for the learner), Speaking; while loading and after a
@@ -265,7 +278,21 @@ the key differ.
   once and never changes during a session (prefix cache). `LESSON_COMMANDS`
   lives here too - the four command words of the prompt, which the window's
   buttons send as they are (`tests/test_prompt.py` checks that the shipped
-  prompt still names each of them).
+  prompt still names each of them). The "new topic" word comes from
+  `topics.NEW_TOPIC_COMMAND`. `is_lesson_command()` tells a command alone
+  (a command word whatever the case and punctuation of recognition, or the
+  program's `new topic: <topic>`) from a phrase that only contains one;
+  app.py passes it to `Lesson.answer`.
+- [`speakloop/topics.py`](speakloop/topics.py) - the topics of the lesson,
+  pure and without config: `load_topics()` reads `speakloop/prompts/topics.txt`
+  (one topic per line, `#` comments, repeats counted once; an empty or
+  unreadable list **raises**), `pick_topic()` gives a random topic the lesson
+  has not had (after the whole list, any but the last one) from its own
+  `random.SystemRandom`, because a library that calls `random.seed()` would
+  otherwise give every lesson the same topics,
+  `is_new_topic_command()` matches the bare command whatever the case and
+  punctuation of recognition, and `topic_command()` is the phrase
+  `new topic: <topic>` that the Commands line of the prompt explains.
 - [`speakloop/contract.py`](speakloop/contract.py) - pure code for the output
   contract: `parse_reply()` gives a `Reply` (`note`, `say`, `summary`, `raw`,
   `follows_contract`). SUMMARY takes everything from its line to the end,
@@ -276,6 +303,8 @@ the key differ.
   in capitals at the start of a line only - a NOTE read as SAY would be spoken
   in the explanation language, and a label with markdown around it
   (`**SAY:**`) is therefore a reply outside the contract, not a line to speak.
+  `without_note()` gives the reply without its NOTE and writes `raw` again
+  from SAY and SUMMARY, so that `parse_reply(raw)` gives the same reply.
   `split_sentences()` cuts SAY for speech, and `strip_markdown()` takes the
   inline markers out of it first: the synthesis reads a marker as a sound. A
   marker counts only as a pair with no space against the text, and an
@@ -286,8 +315,13 @@ the key differ.
 - [`speakloop/conversation.py`](speakloop/conversation.py) - `Lesson` over
   `LLMManager`: `open()` sends `OPENING_MESSAGE` ("Begin.", a user message the
   chat template needs before the first question; it stays in the history and
-  is never shown), `answer()` sends the learner's phrase **as recognized**
-  (the prompt commands get no special handling). Both return a parsed
+  is never shown), `answer()` sends the learner's phrase **as recognized**.
+  With `command=True` a NOTE in the reply is dropped (`contract.without_note`)
+  from the reply and from the history (`LLMManager.replace_last_reply`), with
+  a WARNING in the log: the model copies its own replies, and one NOTE about
+  "new topic" became a NOTE on every later command, "finish" included. A
+  reply outside the contract keeps its NOTE, there is nothing else to show.
+  The prompt is not changed for this (owner's decision). Both return a parsed
   `Reply`, or None after an interrupt, and log a warning for a reply outside
   the contract. `context_level_reached()` is the pure rule of the context
   warning: the highest of `CONTEXT_WARNING_LEVELS` (80 and 90 percent) that
@@ -320,6 +354,9 @@ the key differ.
   before the call and never has two user messages in a row. A failed request
   or an empty reply **raises** after the same rollback: the window owns what
   the user is told.
+  `replace_last_reply()` puts a changed reply in place of the last assistant
+  message (only the last one, so the server's prefix cache still holds) and
+  does nothing when the last message is not a reply.
   `error_message()` is that text - the server's own sentence out of the JSON
   body, since `str()` of an API error is the whole HTTP problem.
   `is_context_overflow()` recognizes a refusal because the context is full:
@@ -419,8 +456,9 @@ the key differ.
   profile, never a branch. `PRACTICE_LANGUAGE` is fixed to `"english"` and has
   no settings key (Spanish is postponed). The lesson section holds
   `EXPLANATION_LANGUAGE` (fixed to Russian, no key: the NOTE example in the
-  prompt is Russian), `FIRST_TOPIC` and `PROMPT_FILE` (default: the file in
-  `speakloop/prompts/`). The UI palette is resolved here too: `_DARK_THEME` is the built-in
+  prompt is Russian), `FIRST_TOPIC`, `PROMPT_FILE` (default: the file in
+  `speakloop/prompts/`) and `TOPICS_FILE` (`speakloop/prompts/topics.txt`, no
+  settings key). The UI palette is resolved here too: `_DARK_THEME` is the built-in
   palette, the complete list of valid color keys and the fallback for a missing
   file or key, and `THEME` is it overlaid with the selected
   `<name>_schema.json` (tests pin that the shipped dark schema equals
@@ -598,7 +636,8 @@ capture thread against a stand-in `sd.InputStream`, so it is the one file with
 short waits in it; `tests/test_tts.py` replaces the synthesis backend and never
 loads a model; `tests/test_languages.py` imports the profile modules alone and
 needs neither config nor torch, and so do `tests/test_prompt.py` (which also
-reads the shipped prompt file), `tests/test_contract.py` and
+reads the shipped prompt file), `tests/test_topics.py` (which also reads the
+shipped topic list), `tests/test_contract.py` and
 `tests/test_conversation.py` (a stand-in for `LLMManager`).
 `tests/test_transcript.py` needs neither config nor torch either; its writer
 tests run against a temporary directory, and the two failure tests replace

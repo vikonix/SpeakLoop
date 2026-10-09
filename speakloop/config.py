@@ -269,6 +269,11 @@ SHOW_NOTES = _flag("show_notes", True)
 # file is read once, when the models are loaded.
 PROMPT_FILE = _path("prompt_file", paths.shipped_root() / "prompts" / "free_talk.md")
 
+# The topics the program chooses from (speakloop/topics.py): the first topic
+# when "first_topic" is empty, and every topic of "new topic". No settings key:
+# the list is a text file, edited in place.
+TOPICS_FILE = paths.shipped_root() / "prompts" / "topics.txt"
+
 # =====================================================================
 # Controls
 # =====================================================================

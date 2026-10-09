@@ -137,6 +137,23 @@ def parse_reply(text: str) -> Reply:
     return Reply(note=note, say=say, summary=summary, raw=raw)
 
 
+def without_note(reply: Reply) -> Reply:
+    """*reply* without its NOTE, and *raw* written again from what is left.
+
+    The SAY line, then the SUMMARY, in the order of the contract, so that
+    parse_reply(raw) gives the same reply back. Used for a NOTE about a
+    command (see speakloop/conversation.py): the new raw text replaces the
+    reply in the history of the model.
+    """
+    lines = []
+    if reply.say is not None:
+        lines.append(f"{SAY_PREFIX} {reply.say}")
+    if reply.summary is not None:
+        lines.append(f"{SUMMARY_PREFIX} {reply.summary}")
+    return Reply(note=None, say=reply.say, summary=reply.summary,
+                 raw="\n".join(lines))
+
+
 def strip_markdown(text: str) -> str:
     """*text* without the inline markdown markers, for speech only.
 

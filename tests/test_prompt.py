@@ -161,10 +161,37 @@ class ShippedPromptTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(command, command.strip().lower())
 
+    def test_the_prompt_explains_a_command_with_a_topic(self):
+        # The program sends "new topic: <topic>" (speakloop/topics.py), and
+        # the Commands line has to tell the model to take that topic.
+        self.assertIn('"new topic: ', self.system_prompt)
+
     def test_the_prompt_defines_the_three_prefixes(self):
         # speakloop/contract.py parses exactly these.
         for prefix in ("NOTE:", "SAY:", "SUMMARY:"):
             self.assertIn(prefix, self.system_prompt)
+
+
+
+class IsLessonCommandTests(unittest.TestCase):
+    def test_a_button_word_is_a_command(self):
+        for command in prompt.LESSON_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(prompt.is_lesson_command(command))
+
+    def test_a_recognized_command_is_a_command(self):
+        for text in ("Simpler.", "Hint!", "  FINISH  ", "New topic."):
+            with self.subTest(text=text):
+                self.assertTrue(prompt.is_lesson_command(text))
+
+    def test_the_new_topic_phrase_of_the_program_is_a_command(self):
+        self.assertTrue(prompt.is_lesson_command("new topic: travel"))
+
+    def test_a_phrase_with_a_command_word_is_not_a_command(self):
+        for text in ("I want to finish my project", "give me a hint please",
+                     "a simpler way", "topic", ""):
+            with self.subTest(text=text):
+                self.assertFalse(prompt.is_lesson_command(text))
 
 
 if __name__ == "__main__":

@@ -7,16 +7,18 @@ Lesson sits between the controller and LLMManager. It opens the lesson, sends
 the learner's phrases, and returns every reply split by the contract
 (speakloop/contract.py). The conversation history itself stays in LLMManager.
 
-The commands of the prompt (simpler, hint, new topic, finish) get no special
-handling: they go to the model as the learner gave them, like any other
-phrase.
+The commands of the prompt (simpler, hint, new topic, finish) go to the
+model like any other phrase. The one difference is in the reply: a NOTE about
+a command is dropped (Lesson.answer), because the model copies its own
+replies from the history, and one "correction" of a command became a NOTE on
+every later command of the lesson, "finish" included.
 """
 
 import logging
 import threading
 from typing import Optional
 
-from speakloop.contract import Reply, parse_reply
+from speakloop.contract import Reply, parse_reply, without_note
 
 # The user message that opens the lesson. The prompt tells the model to begin
 # with its first question, but the request still needs a user message after
@@ -64,10 +66,27 @@ class Lesson:
         logging.info("Opening the lesson.")
         return self._exchange(OPENING_MESSAGE, stop_event)
 
-    def answer(self, learner_text: str,
-               stop_event: threading.Event) -> Optional[Reply]:
-        """Send a phrase of the learner and return the reply."""
-        return self._exchange(learner_text, stop_event)
+    def answer(self, learner_text: str, stop_event: threading.Event,
+               command: bool = False) -> Optional[Reply]:
+        """Send a phrase of the learner and return the reply.
+
+        *command* True means the phrase is a command of the learner
+        (prompt.is_lesson_command). A NOTE in the reply to a command corrects
+        nothing the learner said: it is dropped from the reply and from the
+        history of the model, so the model does not see it and repeat it, and
+        a warning in the log names it. A reply outside the contract is left
+        as it is: without the NOTE nothing of it would be left to show.
+        """
+        reply = self._exchange(learner_text, stop_event)
+        if (command and reply is not None and reply.note
+                and reply.follows_contract):
+            logging.warning(f"The model wrote a NOTE for the command "
+                            f"{learner_text!r}: {reply.note!r}. The NOTE is "
+                            f"dropped from the window, the transcript and the "
+                            f"history of the model.")
+            reply = without_note(reply)
+            self._llm.replace_last_reply(reply.raw)
+        return reply
 
     def _exchange(self, text: str,
                   stop_event: threading.Event) -> Optional[Reply]:

@@ -24,7 +24,12 @@ class FakeLLM:
     def __init__(self, answers=()):
         self.system_prompt = None
         self.requests = []
+        self.replaced = []
         self._answers = list(answers)
+
+    def replace_last_reply(self, text):
+        self.replaced.append(text)
+        return True
 
     def start_conversation(self, system_prompt):
         self.system_prompt = system_prompt
@@ -121,6 +126,47 @@ class LessonTests(unittest.TestCase):
             reply = lesson.answer("text", threading.Event())
         self.assertFalse(reply.follows_contract)
         self.assertEqual(reply.raw, "Where do you work?")
+
+    def test_a_note_about_a_command_is_dropped_with_a_warning(self):
+        # The model copies its own replies from the history: one NOTE about
+        # "new topic" became a NOTE on every later command.
+        lesson = self._lesson(
+            'NOTE: "new topic: travel" -> "Let\'s talk about travel."\n'
+            'SAY: Where did you go last?')
+        with self.assertLogs(level="WARNING") as logs:
+            reply = lesson.answer("new topic: travel", threading.Event(),
+                                  command=True)
+        self.assertIsNone(reply.note)
+        self.assertEqual(reply.say, "Where did you go last?")
+        self.assertIn("new topic: travel", "\n".join(logs.output))
+
+    def test_the_history_gets_the_reply_without_the_note(self):
+        lesson = self._lesson('NOTE: "finish" -> "I want to finish."\n'
+                              'SAY: Shall we finish?')
+        with self.assertLogs(level="WARNING"):
+            lesson.answer("finish", threading.Event(), command=True)
+        self.assertEqual(self.llm.replaced, ["SAY: Shall we finish?"])
+
+    def test_a_command_without_a_note_changes_nothing(self):
+        lesson = self._lesson("SAY: Where did you go last?")
+        reply = lesson.answer("new topic: travel", threading.Event(),
+                              command=True)
+        self.assertEqual(reply.raw, "SAY: Where did you go last?")
+        self.assertEqual(self.llm.replaced, [])
+
+    def test_a_note_about_a_phrase_of_the_learner_stays(self):
+        lesson = self._lesson('NOTE: "a" -> "b". Причина.\nSAY: Why?')
+        reply = lesson.answer("text", threading.Event())
+        self.assertEqual(reply.note, '"a" -> "b". Причина.')
+        self.assertEqual(self.llm.replaced, [])
+
+    def test_a_note_alone_after_a_command_stays_to_be_shown(self):
+        # Without the NOTE nothing would be left: the reply is shown whole.
+        lesson = self._lesson('NOTE: "hint" -> "a hint".')
+        with self.assertLogs(level="WARNING"):
+            reply = lesson.answer("hint", threading.Event(), command=True)
+        self.assertFalse(reply.follows_contract)
+        self.assertEqual(self.llm.replaced, [])
 
     def test_a_failed_request_is_raised(self):
         # The controller tells the learner; the lesson does not hide it.

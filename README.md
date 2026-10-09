@@ -144,7 +144,7 @@ The configuration has three layers, lowest priority first:
    - `accent`: variant of the practiced language, `"american"` (default) or `"british"`. It selects the synthesis language code and the list of voices.
    - `voice`: voice of the partner. It must belong to the variant above; absent (default) means the variant default (`af_heart` for american, `bf_emma` for british).
    - `color_theme`: `"dark"` (default) or `"light"`. Each theme is one `<name>_schema.json`: the shipped ones are in [`speakloop/themes/`](speakloop/themes), and a file of the same name in `config/themes/` wins over them, so a theme can be edited or added without touching the installation. A missing color falls back to the built-in dark palette.
-   - `first_topic`: the first topic of the lesson, in your own words. Empty (default) lets the tutor choose an everyday situation.
+   - `first_topic`: the first topic of the lesson, in your own words. Empty (default) means a random topic from `speakloop/prompts/topics.txt`.
    - `show_notes`: are the tutor's corrections shown in the chat (default `true`)? The **Notes** button writes this key back, so the next lesson opens the way the last one ended. The corrections are always part of the lesson; the key only hides them.
    - `prompt_file`: the lesson prompt. Absent (default) means [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). Use it to try a changed copy; the copy must keep the three `SETTINGS` lines, or the app does not start.
    - `llm_backend`: `"llama-server"` (default) or `"lm-studio"`.
@@ -184,12 +184,12 @@ Logs are in `logs/`: `main.log` (the application, replaced at each start), `llm_
 
 ## The Lesson
 
-The lesson follows the free-talk prompt in [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). When the models are loaded, the tutor asks the first question by itself. Each reply of the tutor has up to two lines:
+The lesson follows the free-talk prompt in [`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md). When the models are loaded, the tutor asks the first question by itself, on the first topic: `first_topic` from `settings.json`, or a random topic from [`speakloop/prompts/topics.txt`](speakloop/prompts/topics.txt). The tutor keeps the topic until you change it, and the window shows it above the question. Edit `topics.txt` to change the list: one topic per line, lines starting with `#` are comments. Each reply of the tutor has up to two lines:
 
 - **Note**: a correction of your last phrase, with a short reason in Russian. It is shown and never read aloud. The tutor corrects only words that change or hide your meaning, not grammar.
 - **Tutor**: the tutor's line, shown and read aloud.
 
-Voice commands (say the word alone): **simpler** makes the current question smaller, **hint** gives the first words of an answer, **new topic** changes the topic, **finish** ends the lesson. After "finish" the tutor shows a **Summary** in Russian; it is not read aloud. If you say goodbye in other words, the tutor asks whether to finish. The lesson never ends by itself. There is no grading.
+Voice commands (say the word alone): **simpler** makes the current question smaller, **hint** gives the first words of an answer, **new topic** changes the topic (the app chooses the new one from [`speakloop/prompts/topics.txt`](speakloop/prompts/topics.txt) and sends it as "new topic: <topic>"; the chat shows that line), **finish** ends the lesson. After "finish" the tutor shows a **Summary** in Russian; it is not read aloud. If you say goodbye in other words, the tutor asks whether to finish. The lesson never ends by itself. There is no grading.
 
 A reply that does not follow this format is shown in full, is not read aloud, and a System line below it says why. The tutor is not asked again: a second request would cost another half minute and change the lesson history. Markdown inside the tutor's line (`**tape**`) is read without the markers, while the screen keeps the line as the tutor wrote it.
 
@@ -197,7 +197,7 @@ A reply that does not follow this format is shown in full, is not read aloud, an
 
 Every lesson is written to `transcript/`, under a name taken from the time it started. The files are created when the lesson opens, after the models are loaded, so an application closed while it loads leaves no file:
 
-- `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a System line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
+- `dialog-<date>_<time>.jsonl` is the main file, one JSON record per line. The first record (`meta`) holds the settings of the lesson: the languages, the first topic, the models and the voice. Each record after it is one event of the lesson (`learner`, `note`, `say`, `summary`, `system` for a System line, `broken` for a reply outside the format) with the time, the number of the phrase it belongs to (`turn`) and the text. A phrase of the learner also says where it came from (`voice`, `text` or `button`) and how long the recognition took (`stt_ms`); a spoken "new topic" is written as the phrase the tutor received ("new topic: <topic>") and keeps the recognized words in `recognized`; a reply of the tutor carries `llm_ms` and the size of the conversation in `tokens`. Each line is written as the event happens, so a lesson that ends in a crash is on disk up to its last event.
 - `dialog-<date>_<time>.md` is the same lesson as a page to read. It is built from the same records when the lesson ends (after the summary, and again when the window closes) and holds the lesson alone, without the service lines. A lesson without a phrase, a correction or a summary (for example, one that failed on its first request) gets no markdown file.
 
 The jsonl file is the one to read with a program: the markdown file can always be built from it again.
@@ -236,8 +236,9 @@ SpeakLoop/
 │   ├── ui_theme.py          palette and fonts of the window
 │   ├── themes/              dark_schema.json, light_schema.json
 │   ├── stt.py               Speech-to-Text (faster-whisper)
-│   ├── prompts/             free_talk.md, the lesson prompt
+│   ├── prompts/             free_talk.md, the lesson prompt; topics.txt, the topics
 │   ├── prompt.py            builds the system message from the prompt file
+│   ├── topics.py            the topic list and the choice of a topic
 │   ├── contract.py          splits a reply into NOTE, SAY and SUMMARY
 │   ├── conversation.py      the lesson: opening and answers
 │   ├── transcript.py        the lesson transcript (jsonl and markdown)

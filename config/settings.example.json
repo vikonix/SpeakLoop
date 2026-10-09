@@ -14,7 +14,7 @@
   "voice": "af_heart",
   "_color_theme": "UI colors: 'dark' (the default) or 'light'. Each theme is one <name>_schema.json; the shipped ones live in speakloop/themes/, and a file of the same name in config/themes/ wins over them. A color missing from the file falls back to the built-in dark palette.",
   "color_theme": "dark",
-  "_first_topic": "First topic of the lesson, in your own words (for example 'my morning routine'). An empty value (the default) lets the tutor choose an everyday situation.",
+  "_first_topic": "First topic of the lesson, in your own words (for example 'my morning routine'). An empty value (the default) means a random topic from speakloop/prompts/topics.txt.",
   "first_topic": "",
   "_show_notes": "Are the tutor's corrections (the Note lines) shown in the chat? true by default. The Notes button in the window writes this key back, so the next lesson opens the way the last one ended. The corrections are always in the lesson itself; the key only hides them.",
   "show_notes": true,
