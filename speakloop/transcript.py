@@ -48,6 +48,8 @@ PAUSE_BY_BUTTON = "button"
 PAUSE_BY_KEY = "key"
 PAUSE_BY_FOCUS = "focus"
 PAUSE_AT_LADDER_END = "ladder_end"
+# The end of a pause by a typed phrase or a command button.
+PAUSE_BY_PHRASE = "phrase"
 
 # Where a phrase of the learner came from. Only a "voice" phrase can hold a
 # recognition error, which is what tells a mistake of the learner from a

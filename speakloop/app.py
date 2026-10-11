@@ -50,7 +50,7 @@ from speakloop.llm_server_ctl import LLMServerController
 from speakloop.playback import PlaybackController
 from speakloop.recorder import AudioRecorder, normalize_audio, warm_up_resampler
 from speakloop.stt import STTManager
-from speakloop.tts import TTSManager
+from speakloop.tts import TTSManager, slowed_playback
 from speakloop.ui import TutorView, ViewCallbacks, ViewSettings
 
 
@@ -66,6 +66,21 @@ class _ReplyEnd(NamedTuple):
     interrupt final: a take started meanwhile has already set that event, so the
     buffered sentences are dropped instead of being spoken over the new take.
     """
+    stop_event: threading.Event
+
+
+class _Repeat(NamedTuple):
+    """Queue item: say the question again (help step 1, or after a pause).
+
+    *waveform* is the saved audio of the question, or None when it was never
+    spoken (the reply came during a pause); the speech thread synthesizes
+    *text* then. *factor* is the playback speed against the tutor's speed
+    (tts.slowed_playback). The repeat goes through the same queue as a reply,
+    so it never plays over a reply.
+    """
+    text: str
+    waveform: Optional[np.ndarray]
+    factor: float
     stop_event: threading.Event
 
 
@@ -103,6 +118,20 @@ CONTEXT_FULL_MESSAGE = ("The lesson is too long for the model context, so "
 # keeps the thinking out of the reply, so the limit ends before the answer.
 REPLY_LIMIT_MESSAGE = ("The model used the whole reply limit and wrote no "
                        "text. If the model has a thinking mode, turn it off.")
+
+# The proactive tutor (docs/proactive-tutor-spec.md): the [System] line of
+# each help step, and the command the program sends for the learner at steps 2
+# and 3. The commands are the prompt's own words (prompt.LESSON_COMMANDS), so
+# the model reads them exactly like a pressed button.
+ESCALATION_MESSAGES = {
+    proactive.STEP_REPEAT: "No answer. Again, slower:",
+    proactive.STEP_SIMPLER: "No answer. A simpler question:",
+    proactive.STEP_HINT: "No answer. A hint:",
+}
+AUTO_COMMANDS = {
+    proactive.STEP_SIMPLER: "simpler",
+    proactive.STEP_HINT: "hint",
+}
 
 
 class VoiceTutorController:
@@ -213,6 +242,28 @@ class VoiceTutorController:
         self._topics_used: List[str] = []
         self._topic_lock = threading.Lock()
 
+        # The proactive tutor (speakloop/proactive.py). No lesson file exists
+        # yet, so "auto" resolves to off. Everything below is used on the Tk
+        # thread only, except _paused, which the speech thread and the
+        # exchange threads read too.
+        self._proactive_on = proactive.is_enabled(config.PROACTIVE,
+                                                  has_lesson_file=False)
+        self._ladder = proactive.Ladder()
+        # The Tk "after" ids of the running wait (the countdown and the help
+        # step). Empty when no wait runs.
+        self._wait_ids: List[str] = []
+        self._paused = threading.Event()
+        # True after the SUMMARY: the lesson is over, nobody waits for an
+        # answer, and the lesson cannot be paused.
+        self._lesson_finished = False
+        # True from a failed exchange to the next phrase: there is no
+        # question to wait for, so neither the ladder nor the pause runs.
+        self._in_error = False
+        # The question of the help steps: the last sentence of SAY of the last
+        # reply, as it is spoken, and its audio once it was synthesized.
+        self._question_text: Optional[str] = None
+        self._question_audio: Optional[np.ndarray] = None
+
         # The window. Built last of the members, because the loader thread
         # started below drives it at once.
         self.view = TutorView(self.root, ViewCallbacks(
@@ -223,12 +274,16 @@ class VoiceTutorController:
             on_command_pressed=self.on_command_pressed,
             on_notes_toggled=self.on_notes_toggled,
             on_quit=self.quit_app,
+            on_pause_pressed=self.on_pause_pressed,
+            on_focus_lost=self.on_focus_lost,
+            on_typing=self.on_typing,
         ), ViewSettings(
             lesson_language=config.TARGET_LANGUAGE,
             show_notes=config.SHOW_NOTES,
             # The buttons send the words of the prompt, so the model reads a
             # pressed button like the spoken command.
             commands=prompt.LESSON_COMMANDS,
+            proactive=self._proactive_on,
         ))
 
         # Start loading models in a background thread to prevent UI freezing
@@ -266,9 +321,7 @@ class VoiceTutorController:
                 llm_model=self._chat_model_name(),
                 stt_model=config.WHISPER_MODEL,
                 tts_voice=config.TTS_VOICE,
-                # No lesson file exists yet, so "auto" resolves to off.
-                proactive=proactive.is_enabled(config.PROACTIVE,
-                                               has_lesson_file=False),
+                proactive=self._proactive_on,
                 proactive_wait_seconds=config.PROACTIVE_WAIT_SECONDS,
                 speech_speed=config.SPEECH_SPEED,
                 repeat_speed=config.REPEAT_SPEED))
@@ -481,13 +534,18 @@ class VoiceTutorController:
                 logging.exception("Error while opening the lesson:")
                 self._system("The lesson could not be opened. "
                              "Speak to start it.")
-                self._enter_later(self.view.enter_error, stop_event, "Error")
+                self._enter_later(self._enter_error, stop_event, "Error")
 
     # ------------------------------------------------------------------
     # Press handlers (called by the view's bindings, on the Tk main thread)
     # ------------------------------------------------------------------
     def on_mic_pressed(self):
         logging.info("GUI microphone button clicked.")
+        if self._paused.is_set():
+            # Like Space: the learner is ready to answer, so the take opens
+            # at once. The question is not said again (the owner's decision:
+            # a repeat between the press and the take confuses).
+            self._end_pause(transcript.PAUSE_BY_BUTTON, say_question=False)
         self._toggle_recording()
 
     def on_space_pressed(self):
@@ -496,6 +554,10 @@ class VoiceTutorController:
             return
         self._record_key_held = True
         logging.info("Spacebar keyboard press event.")
+        if self._paused.is_set():
+            # The press ends the pause and opens the take at once, without
+            # the repeat of the question (P and Resume repeat it).
+            self._end_pause(transcript.PAUSE_BY_KEY, say_question=False)
         self._toggle_recording()
 
     def on_space_released(self):
@@ -545,10 +607,19 @@ class VoiceTutorController:
         """
         if not self.app_ready:
             return
-        # The chat and the transcript show the phrase the model receives.
-        learner_text = self._with_topic(learner_text)
+        automatic = source == transcript.SOURCE_AUTO
+        if not automatic:
+            # A phrase during a pause ends it and goes to the model as usual.
+            # The question is not said again: the learner already answers.
+            self._end_pause(transcript.PAUSE_BY_PHRASE, say_question=False)
+            # The chat and the transcript show the phrase the model receives.
+            learner_text = self._with_topic(learner_text)
+            self._on_learner_phrase(learner_text)
         self.playback.stop()
-        self.view.append_user_msg(learner_text)
+        if not automatic:
+            # An automatic command is not a phrase of the learner: the chat
+            # has the [System] line of its help step instead.
+            self.view.append_user_msg(learner_text)
         turn = self._next_turn()
         self._record(transcript.TYPE_LEARNER, learner_text, turn,
                      source=source)
@@ -579,7 +650,7 @@ class VoiceTutorController:
             except Exception:
                 logging.exception("Error in the typed exchange:")
                 self._system("Processing Error. Please try again.")
-                self._enter_later(self.view.enter_error, stop_event, "Error")
+                self._enter_later(self._enter_error, stop_event, "Error")
 
     def _toggle_recording(self):
         """One press starts a take, the next one ends it.
@@ -609,6 +680,7 @@ class VoiceTutorController:
         self.playback.stop()
         if not self.recorder.start():
             return
+        self._on_take_started()
         self.view.enter_recording()
 
     def trigger_recording_stop(self) -> bool:
@@ -686,7 +758,7 @@ class VoiceTutorController:
             # race the writer, so the take is dropped.
             self._system("The audio device did not stop in time. "
                          "The take was dropped, please try again.")
-            self._enter_later(self.view.enter_idle, stop_event)
+            self._enter_later(self._after_empty_take, stop_event)
             return
         audio = self.recorder.get_audio(take)
         with self._exchange_lock:
@@ -700,7 +772,7 @@ class VoiceTutorController:
                 logging.warning("Captured audio too short or empty.")
                 self._system("The recording is too short. "
                              "Please speak a little longer.")
-                self._enter_later(self.view.enter_idle, stop_event)
+                self._enter_later(self._after_empty_take, stop_event)
                 return
 
             audio = normalize_audio(audio)
@@ -714,13 +786,14 @@ class VoiceTutorController:
             if not user_text:
                 logging.info("STT returned empty transcription.")
                 self._system("Could not hear you clearly. Please try again.")
-                self._enter_later(self.view.enter_idle, stop_event)
+                self._enter_later(self._after_empty_take, stop_event)
                 return
 
             # A spoken "new topic" gets its topic like a pressed one. The chat
             # and the transcript show the phrase the model receives; the
             # record keeps the recognized words too, when they differ.
             phrase = self._with_topic(user_text)
+            self.root.after(0, self._on_learner_phrase, phrase)
             self.root.after(0, self.view.append_user_msg, phrase)
             turn = self._next_turn()
             self._record(transcript.TYPE_LEARNER, phrase, turn,
@@ -743,7 +816,7 @@ class VoiceTutorController:
         except Exception:
             logging.exception("Error in the exchange:")
             self._system("Processing Error. Please try again.")
-            self._enter_later(self.view.enter_error, stop_event, "Error")
+            self._enter_later(self._enter_error, stop_event, "Error")
 
     def _ask_model(self, learner_text: Optional[str],
                    stop_event: threading.Event, turn: int):
@@ -754,7 +827,10 @@ class VoiceTutorController:
         recorded one is written by _run_exchange after recognition, a typed
         one by on_text_submitted.
         """
-        self._enter_later(self.view.enter_thinking, stop_event)
+        if not self._paused.is_set():
+            # During a pause the window keeps showing the pause; the reply is
+            # shown when it comes, and not spoken.
+            self._enter_later(self.view.enter_thinking, stop_event)
         llm_start = time.perf_counter()
 
         try:
@@ -781,7 +857,7 @@ class VoiceTutorController:
                 label = ("LM Studio error" if self.llm_backend == "lm-studio"
                          else "LLM error")
                 self._system(f"{label}: {error_message(llm_error)}")
-            self._enter_later(self.view.enter_error, stop_event, "LLM Error")
+            self._enter_later(self._enter_error, stop_event, "LLM Error")
             return
 
         if reply is None:
@@ -816,10 +892,20 @@ class VoiceTutorController:
         # the model wrote it.
         spoken = strip_markdown(reply.say) if reply.say else ""
         sentences = split_sentences(spoken)
+        # The question of the help steps: the last sentence, as it is spoken.
+        # Taken from every reply, so a reply without SAY leaves no old
+        # question behind (help step 1 is skipped then).
+        self.root.after(0, self._take_question,
+                        sentences[-1] if sentences else None)
         if not sentences:
             # A SUMMARY, a reply outside the contract, or a SAY of markers
             # alone: shown, not spoken.
-            self._enter_later(self.view.enter_idle, stop_event)
+            self._enter_later(self._enter_waiting, stop_event)
+            return
+        if self._paused.is_set():
+            # Paused while the model answered: the reply is shown and not
+            # spoken. The end of the pause says the question.
+            self._enter_later(self._enter_waiting, stop_event)
             return
         for sentence in sentences:
             logging.info(f"Queued sentence to TTS: {sentence!r}")
@@ -867,6 +953,9 @@ class VoiceTutorController:
             self.view.append_partner_msg(reply.say)
         if reply.summary:
             self.view.append_summary(reply.summary)
+            # The lesson is over: no wait and no help steps after this.
+            self._lesson_finished = True
+            self._cancel_wait()
 
     def _record_reply(self, reply: Reply, llm_ms: float, turn: int) -> None:
         """Write one reply of the model into the transcript. (Exchange thread.)
@@ -928,6 +1017,11 @@ class VoiceTutorController:
                 continue
 
             try:
+                if isinstance(item, _Repeat):
+                    # Queued only while no reply is being buffered: a repeat
+                    # starts from a wait or from a pause.
+                    self._speak_repeat(item)
+                    continue
                 if not isinstance(item, _ReplyEnd):
                     logging.info(f"TTS buffering sentence (waiting for the model): {item!r}")
                     pending_sentences.append(item)
@@ -943,12 +1037,21 @@ class VoiceTutorController:
     def _speak_reply(self, sentences: list, stop_event: threading.Event):
         """Synthesize and play one reply, sentence by sentence."""
         logging.info(f"TTS reply ready: {len(sentences)} sentence(s).")
-        for sentence in sentences:
-            if stop_event.is_set() or self.shutdown_event.is_set():
+        last_index = len(sentences) - 1
+        for index, sentence in enumerate(sentences):
+            # The pause is checked as well: a pause that came while the model
+            # answered does not set the stop event (the reply must still
+            # arrive), and its speech is dropped here.
+            if (stop_event.is_set() or self.shutdown_event.is_set()
+                    or self._paused.is_set()):
                 logging.info("Speech stopped; the rest of the reply is dropped.")
                 break
             try:
                 waveform = self.tts_mgr.synthesize(sentence)
+                if index == last_index:
+                    # Kept for help step 1, which repeats it slower.
+                    self.root.after(0, self._keep_question_audio,
+                                    stop_event, sentence, waveform)
                 if stop_event.is_set() or self.shutdown_event.is_set():
                     break
                 logging.info(f"TTS playing synthesized block: {sentence!r}")
@@ -963,7 +1066,230 @@ class VoiceTutorController:
         # Back to waiting for the learner - but only for the reply that is still
         # the current one. A reply that was interrupted must not overwrite the
         # window state of the take that interrupted it.
-        self._enter_later(self.view.enter_idle, stop_event)
+        self._enter_later(self._enter_waiting, stop_event)
+
+    def _speak_repeat(self, item: _Repeat):
+        """Say the question again: the saved audio, or a new synthesis.
+
+        (Speech thread.) Slowed by item.factor (tts.slowed_playback). The
+        window goes back to the wait afterwards, like after a reply.
+        """
+        if not (item.stop_event.is_set() or self.shutdown_event.is_set()
+                or self._paused.is_set()):
+            try:
+                waveform = item.waveform
+                if waveform is None:
+                    waveform = self.tts_mgr.synthesize(item.text)
+                waveform, rate = slowed_playback(
+                    waveform, self.tts_mgr.sample_rate, item.factor)
+                if not (item.stop_event.is_set() or self._paused.is_set()):
+                    logging.info(f"TTS repeating the question at "
+                                 f"{item.factor:.2f}: {item.text!r}")
+                    self.tts_mgr.play_array(waveform, rate, item.stop_event,
+                                            self.shutdown_event)
+            except Exception:
+                logging.exception(f"TTS repeat error for {item.text!r}:")
+        if self.shutdown_event.is_set():
+            return
+        self._enter_later(self._enter_waiting, item.stop_event)
+
+    # ------------------------------------------------------------------
+    # The proactive tutor: the wait, the help steps and the pause
+    # (docs/proactive-tutor-spec.md). Tk thread only.
+    # ------------------------------------------------------------------
+    def _ladder_runs(self) -> bool:
+        """True when the program waits for an answer and helps after a timeout."""
+        return (self._proactive_on and not self._lesson_finished
+                and not self._ladder.stopped and not self._in_error)
+
+    def _enter_waiting(self):
+        """A reply (or a repeat) is over: wait for the learner's answer.
+
+        Called through _enter_later, so a reply that a new take interrupted
+        starts no wait. Without the proactive tutor this is the old idle
+        state.
+        """
+        if self._paused.is_set():
+            # A reply that came during the pause: the window keeps the pause.
+            self.view.enter_paused()
+            return
+        if not self._ladder_runs():
+            self.view.enter_idle()
+            return
+        self.view.enter_waiting()
+        self._start_wait()
+
+    def _start_wait(self):
+        """Start the timer of the current step, with its countdown."""
+        self._cancel_wait()
+        wait_seconds = config.PROACTIVE_WAIT_SECONDS
+        for at_seconds, number in proactive.countdown_marks(wait_seconds):
+            self._wait_ids.append(self.root.after(
+                int(at_seconds * 1000), self.view.show_countdown, number))
+        self._wait_ids.append(self.root.after(int(wait_seconds * 1000),
+                                              self._on_wait_timeout))
+
+    def _cancel_wait(self):
+        """Stop the running wait, if there is one."""
+        for after_id in self._wait_ids:
+            self.root.after_cancel(after_id)
+        self._wait_ids.clear()
+
+    def _on_wait_timeout(self):
+        """No answer in time: take the next help step, or pause at the end."""
+        self._wait_ids.clear()
+        step = self._ladder.advance()
+        if step == proactive.STEP_REPEAT and not self._question_text:
+            # The last reply had no SAY: there is no question to repeat.
+            step = self._ladder.advance()
+        if step is None:
+            logging.info("The help ladder is over; the lesson pauses.")
+            self._pause(transcript.PAUSE_AT_LADDER_END)
+            return
+        logging.info(f"No answer: help step {step}.")
+        self._system(ESCALATION_MESSAGES[step])
+        self._record(transcript.TYPE_ESCALATION, self._question_text or "",
+                     step=step)
+        if step == proactive.STEP_REPEAT:
+            self._say_question(config.REPEAT_SPEED / config.SPEECH_SPEED)
+        else:
+            self._submit_phrase(AUTO_COMMANDS[step], transcript.SOURCE_AUTO)
+
+    def _say_question(self, factor: float):
+        """Queue the question again, at *factor* of the tutor's speed."""
+        if not self._question_text:
+            self._enter_waiting()
+            return
+        # Installed here, on the Tk thread: Space, Enter and the pause stop
+        # the repeat exactly like a reply.
+        stop_event = self.playback.new_event()
+        self.view.enter_speaking()
+        self.tts_queue.put(_Repeat(self._question_text, self._question_audio,
+                                   factor, stop_event))
+
+    def _take_question(self, text: Optional[str]):
+        """A new reply arrived: its question replaces the old one and its audio.
+
+        The audio is dropped now and not when the new reply is spoken: a reply
+        that is interrupted or comes during a pause is never spoken, and help
+        step 1 would then repeat the question of the reply before it.
+        """
+        self._question_text = text
+        self._question_audio = None
+
+    def _keep_question_audio(self, stop_event: threading.Event, text: str,
+                             waveform: np.ndarray):
+        """Keep the synthesized question for help step 1."""
+        if self.playback.is_current(stop_event) and text == self._question_text:
+            self._question_audio = waveform
+
+    def _on_take_started(self):
+        """A take opened: the learner answers. The step is kept for an empty take."""
+        self._cancel_wait()
+        self._in_error = False
+        self._ladder.begin_take()
+
+    def _after_empty_take(self):
+        """The take held no phrase: no answer, so the ladder goes on from its step."""
+        self._ladder.take_was_empty()
+        self._enter_waiting()
+
+    def _on_learner_phrase(self, phrase: str):
+        """A phrase of the learner (spoken, typed or a button) moves the ladder."""
+        self._cancel_wait()
+        self._in_error = False
+        self._ladder.on_learner_phrase(phrase)
+
+    def _enter_error(self, status: str):
+        """A failed exchange: no question to wait for, so no wait and no pause."""
+        self._in_error = True
+        self._cancel_wait()
+        self.view.enter_error(status)
+
+    def _can_pause(self) -> bool:
+        """True when the lesson runs and waits for the learner at some point.
+
+        Not while it loads, after an error and after the summary: there is
+        no question to come back to.
+        """
+        return (self._proactive_on and self.app_ready
+                and not self._lesson_finished and not self._in_error)
+
+    def _pause(self, reason: str):
+        """Pause the lesson: no timer, no speech, no take.
+
+        An open take is dropped without recognition. A reply the model is
+        still writing is not stopped (its stop event would end the request):
+        it is shown when it comes, and _ask_model and _speak_reply do not
+        speak it while the pause lasts. With no request running, the speech
+        is stopped for good through its stop event. The known limit of
+        winsound applies: the sentence being played is finished first.
+        """
+        if self._paused.is_set() or not self._can_pause():
+            return
+        self._paused.set()
+        self._cancel_wait()
+        if self.recorder.is_active():
+            # Dropped: the take is not joined and never reaches recognition.
+            self.recorder.stop()
+        elif not self._exchange_lock.locked():
+            self.playback.stop()
+        self.view.enter_paused()
+        logging.info(f"The lesson is paused ({reason}).")
+        self._record(transcript.TYPE_PAUSE, "", action=transcript.PAUSE_START,
+                     reason=reason)
+
+    def _end_pause(self, reason: str, say_question: bool):
+        """End the pause; the ladder starts again from the wait.
+
+        With *say_question* (P and Resume) the question is said again at the
+        tutor's speed (it is not a help step). While the model is still
+        answering, its reply is the question, and it is spoken now that the
+        pause is over. Space, the mic button, a typed phrase and a command
+        end the pause without the repeat: the learner answers at once.
+        """
+        if not self._paused.is_set():
+            return
+        self._paused.clear()
+        self.view.end_pause()
+        logging.info(f"The pause is over ({reason}).")
+        self._record(transcript.TYPE_PAUSE, "", action=transcript.PAUSE_END,
+                     reason=reason)
+        self._ladder.reset()
+        if not say_question:
+            return
+        if self._exchange_lock.locked():
+            self.view.enter_thinking()
+            return
+        self._say_question(1.0)
+
+    def on_pause_pressed(self, by_key: bool):
+        """The Pause button or the P key: pause, or end the pause."""
+        reason = (transcript.PAUSE_BY_KEY if by_key
+                  else transcript.PAUSE_BY_BUTTON)
+        if self._paused.is_set():
+            self._end_pause(reason, say_question=True)
+        else:
+            self._pause(reason)
+
+    def on_focus_lost(self):
+        """The window lost the focus: the learner went away.
+
+        Getting the focus back does not end the pause.
+        """
+        self._pause(transcript.PAUSE_BY_FOCUS)
+
+    def on_typing(self):
+        """A key in the text entry: the learner is answering.
+
+        The wait starts again from step 0, so no help step comes while the
+        learner types.
+        """
+        if not self._wait_ids:
+            return
+        self._ladder.reset()
+        self.view.enter_waiting()
+        self._start_wait()
 
     # ------------------------------------------------------------------
     # Shutdown

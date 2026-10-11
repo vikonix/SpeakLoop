@@ -133,5 +133,72 @@ class TypingTests(unittest.TestCase):
         self.assertFalse(ui.TutorView._typing(view))
 
 
+class PauseKeyTests(unittest.TestCase):
+    """The P key pauses the lesson, but a "p" typed into a phrase is a letter."""
+
+    @staticmethod
+    def _view(typing: bool):
+        presses = []
+        callbacks = SimpleNamespace(on_pause_pressed=presses.append)
+        view = SimpleNamespace(_typing=lambda: typing, _cb=callbacks)
+        return view, presses
+
+    def test_the_key_pauses_outside_the_entry(self):
+        view, presses = self._view(typing=False)
+        ui.TutorView._on_pause_key(view, None)
+        self.assertEqual(presses, [True])
+
+    def test_the_key_in_the_entry_is_a_letter(self):
+        view, presses = self._view(typing=True)
+        ui.TutorView._on_pause_key(view, None)
+        self.assertEqual(presses, [])
+
+
+class FocusLostTests(unittest.TestCase):
+    """Only a focus that left the window is a focus loss."""
+
+    @staticmethod
+    def _view(focused):
+        lost = []
+
+        def focus_get():
+            if isinstance(focused, Exception):
+                raise focused
+            return focused
+
+        view = SimpleNamespace(root=SimpleNamespace(focus_get=focus_get),
+                               _cb=SimpleNamespace(
+                                   on_focus_lost=lambda: lost.append(True)))
+        return view, lost
+
+    def test_no_focus_in_the_window_is_a_loss(self):
+        view, lost = self._view(None)
+        ui.TutorView._check_focus_lost(view)
+        self.assertEqual(lost, [True])
+
+    def test_a_move_inside_the_window_is_not_a_loss(self):
+        view, lost = self._view(object())
+        ui.TutorView._check_focus_lost(view)
+        self.assertEqual(lost, [])
+
+    def test_a_popup_tk_cannot_name_is_not_a_loss(self):
+        view, lost = self._view(KeyError("popdown"))
+        ui.TutorView._check_focus_lost(view)
+        self.assertEqual(lost, [])
+
+
+class ProactiveSettingsTests(unittest.TestCase):
+    def test_the_proactive_tutor_is_off_by_default(self):
+        # Without it the window is as before: no Pause button, no P key.
+        settings = ui.ViewSettings(lesson_language="English",
+                                   show_notes=True, commands=())
+        self.assertFalse(settings.proactive)
+
+    def test_the_proactive_stages_replace_ready_by_waiting(self):
+        self.assertNotIn(ui.STAGE_READY, ui.PROACTIVE_STAGES)
+        self.assertIn(ui.STAGE_WAITING, ui.PROACTIVE_STAGES)
+        self.assertIn(ui.STAGE_PAUSED, ui.PROACTIVE_STAGES)
+
+
 if __name__ == "__main__":
     unittest.main()

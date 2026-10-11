@@ -131,6 +131,36 @@ the key differ.
   (the same numbers on a NOTE and a SAY would read as two answers) and writes
   the markdown view when the summary arrives; `quit_app` writes it again, for
   a lesson that ended without one.
+  **Proactive tutor** (`_proactive_on`, from `proactive.is_enabled`; off,
+  every method below falls back to the old idle state and the pause is
+  refused). Every place that went back to `view.enter_idle` after a reply now
+  calls `_enter_waiting` through `_enter_later`, so an interrupted reply
+  starts no wait; it starts the timer (`_start_wait`: Tk `after` ids in
+  `_wait_ids`, the countdown from `proactive.countdown_marks`) unless the
+  lesson is paused, finished (SUMMARY, set in `_show_reply`), stopped by
+  "finish" or in error (`_enter_error`, which every failed exchange uses).
+  `_on_wait_timeout` takes the next step of the `Ladder`: step 1 queues a
+  `_Repeat` of the question (the last spoken sentence of SAY, kept by
+  `_take_question` when the reply arrives, its audio by `_keep_question_audio`
+  when it is synthesized) at `REPEAT_SPEED / SPEECH_SPEED`; steps 2 and 3
+  send `simpler` / `hint` through `_submit_phrase` with `SOURCE_AUTO`, which
+  writes the [System] line instead of a learner line and does not move the
+  ladder; the end of the ladder pauses. A take (`_on_take_started`), an empty
+  take (`_after_empty_take`), a phrase (`_on_learner_phrase`) and a key in the
+  entry (`on_typing`) move the ladder as proactive.py says. The pause is
+  `_paused`, a threading.Event, and NOT the reply's stop event: a pause while
+  the model writes must let the reply arrive, so `_ask_model` then queues no
+  speech and `_speak_reply` checks the pause before each sentence; with no
+  request running (`_exchange_lock` free) `_pause` stops the speech through
+  `playback.stop()`. An open take is dropped without recognition
+  (`recorder.stop()` and no join). `_end_pause` resets the ladder and, for
+  P and Resume, says the question again at the tutor's speed (a `_Repeat`
+  with factor 1.0, synthesized when the reply was never spoken). Space and
+  the mic button end the pause and open the take at once, and a typed
+  phrase or a command ends it and goes to the model: no repeat for these,
+  because the learner already answers (the owner's decision).
+  A `_Repeat` goes through the speech queue like a reply, with a stop event of
+  its own, so it never plays over a reply and Space interrupts it.
   `_exchange_lock` keeps one exchange at a time, so a
   take made during the previous exchange waits instead of being dropped.
   `load_components` reads the topic list (`config.TOPICS_FILE`), takes the
@@ -219,6 +249,18 @@ the key differ.
   speaks, where Enter interrupts it), so the controller never enables the entry
   by hand. The status bar shows the state alone: the STT and LLM durations are
   in `logs/main.log` and `update_stats` is gone.
+  With `ViewSettings.proactive` the window also has the proactive tutor:
+  the stages are `PROACTIVE_STAGES` (Waiting, Listening, Thinking, Speaking,
+  Paused; no stage is marked in an idle state that is not a wait, such as an
+  error or the end of the lesson), a Pause button behind the Notes switch
+  (label Resume during the pause), the English P key (`_on_pause_key`, which
+  obeys `_typing()` like Space; a Russian layout gives Cyrillic_ze and does
+  nothing, the owner's decision), `<FocusOut>` on the root checked after
+  `_FOCUS_CHECK_MS` (`_check_focus_lost`: only `focus_get() is None` is a
+  loss, because a FocusOut also comes when the focus moves inside the
+  window), and `<Key>` on the entry (`on_typing`). The intents are
+  `enter_waiting`, `show_countdown`, `enter_paused` and `end_pause`. Without
+  the setting none of these exist and the window is as before.
   The second row of the panel holds the lesson commands and the Notes switch.
   The command buttons are built from `ViewSettings.commands`, which app.py
   fills with `prompt.LESSON_COMMANDS`, so a button sends the word of the
@@ -305,8 +347,7 @@ the key differ.
   manual "simpler" or "hint" moves it to that step (never back), "new topic"
   resets it and "finish" stops it until the next phrase. `begin_take()` resets
   it but keeps the old step, which `take_was_empty()` gives back: Space starts
-  a take, but a take without speech is no answer. Not used by app.py yet
-  except for `is_enabled` (P1b of the spec wires the timers and the window).
+  a take, but a take without speech is no answer. app.py owns the timers.
 - [`speakloop/contract.py`](speakloop/contract.py) - pure code for the output
   contract: `parse_reply()` gives a `Reply` (`note`, `say`, `summary`, `raw`,
   `follows_contract`). SUMMARY takes everything from its line to the end,
@@ -358,6 +399,8 @@ the key differ.
   such a command as an italic "no answer" line and never as the learner's
   phrase, shows the step 1 escalation the same way, and leaves the other
   escalations (their command line already shows them) and `pause` to the jsonl.
+  A pause has the reason `button`, `key`, `focus` or `ladder_end` when it
+  starts, and `button`, `key` or `phrase` when it ends.
   `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its
   meaning, not when an optional one is added. No file is created before the
   first record, and app.py creates the writer only when the lesson opens (its

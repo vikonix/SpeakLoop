@@ -89,6 +89,30 @@ STAGE_LISTENING = "Listening"
 STAGE_THINKING = "Thinking"
 STAGE_SPEAKING = "Speaking"
 STAGES = (STAGE_READY, STAGE_LISTENING, STAGE_THINKING, STAGE_SPEAKING)
+# With the proactive tutor the tutor waits for an answer and helps after a
+# timeout, so the first stage is Waiting and not Ready; Paused is a stage of
+# its own (docs/proactive-tutor-spec.md, section 8). In the states that are
+# not a wait for an answer (an error, the lesson after its summary) no stage
+# is marked then: Waiting would promise help that does not come.
+STAGE_WAITING = "Waiting"
+STAGE_PAUSED = "Paused"
+PROACTIVE_STAGES = (STAGE_WAITING, STAGE_LISTENING, STAGE_THINKING,
+                    STAGE_SPEAKING, STAGE_PAUSED)
+
+# The pause button of the proactive tutor: its label is the action it does.
+PAUSE_LABEL = "Pause"
+RESUME_LABEL = "Resume"
+
+# The status line of a wait for the answer, and its countdown before a help
+# step. The countdown is the last seconds only (the controller decides when).
+STATUS_WAITING = "Waiting for your answer"
+STATUS_COUNTDOWN = "Waiting \u00b7 {seconds}"
+STATUS_PAUSED = "Paused"
+
+# The delay before the window checks where the focus went. Tk reports a
+# FocusOut also when the focus moves between two widgets of this window, and
+# only after the move does focus_get() say whether the window still has it.
+_FOCUS_CHECK_MS = 50
 
 # The switch that hides and shows the Note lines of the whole lesson. The
 # state is in the label itself (a ticked or an empty box): a tk.Button on
@@ -113,6 +137,7 @@ INSTRUCTION_READY_FIRST = "Press SPACE to speak, or type and press Enter. ESC qu
 INSTRUCTION_READY = "Press SPACE to speak, or type a phrase and press Enter."
 INSTRUCTION_RECORDING = "Speak. Recording stops after a pause, or press again."
 INSTRUCTION_SERVER_FAILED = "LLM server failed to start. Check the log and restart."
+INSTRUCTION_PAUSED = "Paused. Press SPACE to answer, or P to hear the question again."
 
 # Window size.
 WINDOW_WIDTH = 500
@@ -172,10 +197,14 @@ class ViewSettings:
     show_notes      - the first state of the Notes switch.
     commands        - the lesson commands; each button shows and sends one
                       of them exactly as given.
+    proactive       - the proactive tutor is on: the window gets the Waiting
+                      and Paused stages, the Pause button, the P key and the
+                      pause on focus loss. Off, the window is as before.
     """
     lesson_language: str
     show_notes: bool
     commands: tuple
+    proactive: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,6 +235,13 @@ class ViewCallbacks:
     on_command_pressed: Callable[[str], None]
     on_notes_toggled: Callable[[bool], None]
     on_quit: Callable[[], None]
+    # The proactive tutor. on_pause_pressed carries True for the P key and
+    # False for the button, because the transcript records which one it was.
+    # on_focus_lost: the window lost the focus to another window. on_typing:
+    # a key was pressed in the text entry, so the learner is answering.
+    on_pause_pressed: Callable[[bool], None] = lambda by_key: None
+    on_focus_lost: Callable[[], None] = lambda: None
+    on_typing: Callable[[], None] = lambda: None
 
 
 class TutorView:
@@ -231,6 +267,12 @@ class TutorView:
         self._cb = callbacks
         self._settings = settings
         self._notes_shown = settings.show_notes
+        # The stages of the bar and the stage of a wait for the learner. None
+        # with the proactive tutor: see STAGE_WAITING.
+        self._stages = PROACTIVE_STAGES if settings.proactive else STAGES
+        self._ready_stage = None if settings.proactive else STAGE_READY
+        # The Pause button, built only with the proactive tutor.
+        self.pause_button = None
         # The topic the next question belongs to (set_topic). None until the
         # controller has one.
         self._topic = None
@@ -315,8 +357,8 @@ class TutorView:
 
         self._stage_labels = {}
         self._stage_lines = {}
-        last_column = len(STAGES) - 1
-        for column, stage in enumerate(STAGES):
+        last_column = len(self._stages) - 1
+        for column, stage in enumerate(self._stages):
             # The same "uniform" group as the command buttons: equal columns
             # whatever the length of the word.
             stage_bar.columnconfigure(column, weight=1, uniform="stage")
@@ -333,7 +375,7 @@ class TutorView:
 
     def _set_stage(self, active):
         """Mark the stage *active* in the stage bar; None marks no stage."""
-        for stage in STAGES:
+        for stage in self._stages:
             is_active = stage == active
             self._stage_labels[stage].configure(
                 fg=THEME["text_bright"] if is_active else THEME["text_dim"],
@@ -485,6 +527,18 @@ class TutorView:
         self.notes_button = self._panel_button(
             command_row, NOTES_LABEL_SHOWN, self._toggle_notes)
         self.notes_button.grid(row=0, column=notes_column + 1, padx=(6, 0))
+
+        if self._settings.proactive:
+            # Behind a second separator: like the Notes switch, it sends
+            # nothing to the model.
+            pause_column = notes_column + 2
+            tk.Frame(command_row, bg=THEME["border"], width=1).grid(
+                row=0, column=pause_column, sticky="ns", padx=6, pady=2)
+            self.pause_button = self._panel_button(
+                command_row, PAUSE_LABEL,
+                lambda: self._cb.on_pause_pressed(False))
+            self.pause_button.grid(row=0, column=pause_column + 1, padx=(6, 0))
+            self.pause_button.configure(state=tk.DISABLED)
 
     def _panel_button(self, parent, text: str, command) -> tk.Button:
         """One flat button of the control panel, in the colors of the theme.
@@ -639,6 +693,16 @@ class TutorView:
         # Both ways out of the application end in the same controller handler.
         self.root.bind("<Escape>", lambda _e: self._cb.on_quit())
         self.root.protocol("WM_DELETE_WINDOW", self._cb.on_quit)
+        if self._settings.proactive:
+            # The English P only (the owner's decision): in a Russian layout
+            # the key gives Cyrillic_ze and does nothing; the button and the
+            # focus loss remain. "P" is the key with Caps Lock on.
+            self.root.bind("<KeyPress-p>", self._on_pause_key)
+            self.root.bind("<KeyPress-P>", self._on_pause_key)
+            # On the root, so a FocusOut of any widget of the window arrives;
+            # _check_focus_lost tells a real loss from a move inside it.
+            self.root.bind("<FocusOut>", self._on_focus_out)
+            self.text_entry.bind("<Key>", lambda _e: self._cb.on_typing())
 
     def _typing(self) -> bool:
         """True while the keyboard belongs to the text entry.
@@ -664,6 +728,27 @@ class TutorView:
         if self._typing():
             return
         self._cb.on_space_released()
+
+    def _on_pause_key(self, _event):
+        # A "p" typed into a phrase is a letter, not a pause (the same rule as
+        # for Space).
+        if self._typing():
+            return
+        self._cb.on_pause_pressed(True)
+
+    def _on_focus_out(self, _event):
+        self.root.after(_FOCUS_CHECK_MS, self._check_focus_lost)
+
+    def _check_focus_lost(self):
+        """Report the focus loss when no widget of this window has the focus."""
+        try:
+            focused = self.root.focus_get()
+        except KeyError:
+            # Tk raises this for a focus in a widget it did not create (a
+            # popup of a ttk widget). The focus is still in this application.
+            return
+        if focused is None:
+            self._cb.on_focus_lost()
 
     def _submit_text(self):
         """Send the typed phrase to the controller and empty the entry.
@@ -898,7 +983,8 @@ class TutorView:
         self.update_status("Ready", THEME["ready"])
         self.update_instruction(INSTRUCTION_READY_FIRST)
         self._set_input_enabled(True)
-        self._set_stage(STAGE_READY)
+        self._set_stage(self._ready_stage)
+        self._set_pause_enabled(True)
 
     # ------------------------------------------------------------------
     # Exchange intents
@@ -909,7 +995,54 @@ class TutorView:
         self.update_status("Ready", THEME["ready"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
-        self._set_stage(STAGE_READY)
+        self._set_stage(self._ready_stage)
+
+    def enter_waiting(self):
+        """The proactive tutor waits for the answer; help comes after a timeout."""
+        self.draw_mic_button("idle")
+        self.update_status(STATUS_WAITING, THEME["ready"])
+        self.update_instruction(INSTRUCTION_READY)
+        self._set_input_enabled(True)
+        self._set_stage(STAGE_WAITING)
+
+    def show_countdown(self, seconds: int):
+        """The last seconds before the next help step, in the status line.
+
+        The next state of the window overwrites it, so a countdown that the
+        learner stopped never stays on the screen.
+        """
+        self.update_status(STATUS_COUNTDOWN.format(seconds=seconds),
+                           THEME["warn"])
+
+    def enter_paused(self):
+        """The lesson is paused: no timer, no speech, no recording.
+
+        The entry and the commands stay open: a typed phrase or a command
+        ends the pause and goes to the model as usual.
+        """
+        self.draw_mic_button("idle")
+        self.update_status(STATUS_PAUSED, THEME["warn"])
+        self.update_instruction(INSTRUCTION_PAUSED)
+        self._set_input_enabled(True)
+        self._set_stage(STAGE_PAUSED)
+        if self.pause_button is not None:
+            self.pause_button.configure(text=RESUME_LABEL)
+
+    def end_pause(self):
+        """The pause is over: the button offers the pause again.
+
+        Only the label: the controller sets the next state of the window
+        (the repeat of the question or the wait).
+        """
+        if self.pause_button is not None:
+            self.pause_button.configure(text=PAUSE_LABEL)
+
+    def _set_pause_enabled(self, enabled: bool):
+        """Open or close the Pause button (when the window has one)."""
+        if self.pause_button is None:
+            return
+        self.pause_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        self._hover_button(self.pause_button, False)
 
     def enter_recording(self):
         """The microphone is open.
@@ -972,7 +1105,7 @@ class TutorView:
         self.update_status(status, THEME["bad"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
-        self._set_stage(STAGE_READY)
+        self._set_stage(self._ready_stage)
 
     def server_failed(self):
         """The LLM server did not start: the session cannot continue.
@@ -986,6 +1119,7 @@ class TutorView:
         self._set_input_enabled(False)
         self._set_question(QUESTION_FAILED, asked=False)
         self._set_stage(None)
+        self._set_pause_enabled(False)
 
     def init_failed(self):
         """Startup stopped on an unexpected error."""
@@ -993,6 +1127,7 @@ class TutorView:
         self._set_input_enabled(False)
         self._set_question(QUESTION_FAILED, asked=False)
         self._set_stage(None)
+        self._set_pause_enabled(False)
 
     def recording_failed(self):
         """The microphone input stream failed: the take is gone.
@@ -1005,4 +1140,4 @@ class TutorView:
         self.update_status("Recording Error", THEME["bad"])
         self.update_instruction(INSTRUCTION_READY)
         self._set_input_enabled(True)
-        self._set_stage(STAGE_READY)
+        self._set_stage(self._ready_stage)
