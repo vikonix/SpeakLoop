@@ -275,6 +275,7 @@ class VoiceTutorController:
             on_notes_toggled=self.on_notes_toggled,
             on_quit=self.quit_app,
             on_pause_pressed=self.on_pause_pressed,
+            on_repeat_pressed=self.on_repeat_pressed,
             on_focus_lost=self.on_focus_lost,
             on_typing=self.on_typing,
         ), ViewSettings(
@@ -1271,6 +1272,35 @@ class VoiceTutorController:
             self._end_pause(reason, say_question=True)
         else:
             self._pause(reason)
+
+    def on_repeat_pressed(self, by_key: bool):
+        """Repeat or R: say the question again, slower, without the model.
+
+        Works with the proactive tutor off too. The repeat is help step 1
+        done by hand, so the ladder moves to it. During a pause it ends the
+        pause first (like P, but at the repeat speed). Nothing happens while
+        a take runs or the model answers (the button is closed then, the key
+        is checked here), or when the last reply had no question.
+        """
+        if not self.app_ready or not self._question_text:
+            return
+        if self.recorder.is_active() or self._exchange_lock.locked():
+            return
+        source = (transcript.REPEAT_BY_KEY if by_key
+                  else transcript.SOURCE_BUTTON)
+        if self._paused.is_set():
+            self._end_pause(transcript.PAUSE_BY_KEY if by_key
+                            else transcript.PAUSE_BY_BUTTON,
+                            say_question=False)
+        logging.info(f"The learner asked to repeat the question ({source}).")
+        self._cancel_wait()
+        self._ladder.on_repeat()
+        # Stops a reply that is still being spoken: the learner wants the
+        # question now. Its last sentence is the question anyway.
+        self.playback.stop()
+        self._record(transcript.TYPE_REPEAT_REQUEST, self._question_text,
+                     source=source)
+        self._say_question(config.REPEAT_SPEED / config.SPEECH_SPEED)
 
     def on_focus_lost(self):
         """The window lost the focus: the learner went away.

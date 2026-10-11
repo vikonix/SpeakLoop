@@ -40,6 +40,11 @@ TYPE_BROKEN = "broken"
 # "action" ("start" or "end") and a "reason".
 TYPE_ESCALATION = "escalation"
 TYPE_PAUSE = "pause"
+# The learner asked to hear the question again (the Repeat button or the R
+# key). Its text is the question and its "source" "button" or "key". The model
+# is not asked, so no learner record goes with it.
+TYPE_REPEAT_REQUEST = "repeat_request"
+REPEAT_BY_KEY = "key"
 
 # The values of the "action" and "reason" fields of a pause record.
 PAUSE_START = "start"
@@ -86,7 +91,7 @@ _MD_SUMMARY = "Summary"
 # The service lines ("system") and a reply outside the contract ("broken") stay
 # in the jsonl alone: the view is the lesson, not the run of the application.
 _MD_TYPES = (TYPE_LEARNER, TYPE_NOTE, TYPE_SAY, TYPE_SUMMARY,
-             TYPE_ESCALATION)
+             TYPE_ESCALATION, TYPE_REPEAT_REQUEST)
 
 # The readable line of a command the program sent (SOURCE_AUTO), per command.
 # An unknown command still gets a line, with its own word.
@@ -100,6 +105,7 @@ _MD_AUTO_OTHER = "*(no answer: {command})*"
 # again.
 _MD_REPEAT = "*(no answer: question repeated slower)*"
 _REPEAT_STEP = 1
+_MD_REPEAT_REQUEST = "*(you asked to repeat the question)*"
 
 
 def file_stem(started_at: datetime) -> str:
@@ -228,6 +234,8 @@ def _markdown_block(record: dict) -> Optional[str]:
     text = record.get("text", "")
     if record_type == TYPE_ESCALATION:
         return _MD_REPEAT if record.get("step") == _REPEAT_STEP else None
+    if record_type == TYPE_REPEAT_REQUEST:
+        return _MD_REPEAT_REQUEST
     if record_type == TYPE_LEARNER:
         if record.get("source") == SOURCE_AUTO:
             return _MD_AUTO_COMMANDS.get(

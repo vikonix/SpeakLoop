@@ -161,6 +161,12 @@ the key differ.
   because the learner already answers (the owner's decision).
   A `_Repeat` goes through the speech queue like a reply, with a stop event of
   its own, so it never plays over a reply and Space interrupts it.
+  `on_repeat_pressed` (the Repeat button or R, with the proactive tutor on or
+  off) uses the same path: it stops a reply being spoken, records a
+  `repeat_request`, moves the ladder to step 1 (`Ladder.on_repeat`, so the
+  next help step is "simpler") and says the question at `REPEAT_SPEED /
+  SPEECH_SPEED`; during a pause it ends the pause first. It does nothing while
+  a take runs or the model answers, and when the last reply had no SAY.
   `_exchange_lock` keeps one exchange at a time, so a
   take made during the previous exchange waits instead of being dropped.
   `load_components` reads the topic list (`config.TOPICS_FILE`), takes the
@@ -249,6 +255,10 @@ the key differ.
   speaks, where Enter interrupts it), so the controller never enables the entry
   by hand. The status bar shows the state alone: the STT and LLM durations are
   in `logs/main.log` and `update_stats` is gone.
+  The Repeat button stands after the commands, in their uniform column
+  group, and is opened and closed with them by `_set_input_enabled`; the
+  English R key (`_on_repeat_key`, obeys `_typing()`) does the same. Both call
+  `on_repeat_pressed` and never send a phrase to the model.
   With `ViewSettings.proactive` the window also has the proactive tutor:
   the stages are `PROACTIVE_STAGES` (Waiting, Listening, Thinking, Speaking,
   Paused; no stage is marked in an idle state that is not a wait, such as an
@@ -399,6 +409,8 @@ the key differ.
   such a command as an italic "no answer" line and never as the learner's
   phrase, shows the step 1 escalation the same way, and leaves the other
   escalations (their command line already shows them) and `pause` to the jsonl.
+  `repeat_request` (text: the question, `source` "button" or "key") is the
+  learner's own Repeat; the view shows it as an italic line.
   A pause has the reason `button`, `key`, `focus` or `ladder_end` when it
   starts, and `button`, `key` or `phrase` when it ends.
   `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its

@@ -101,6 +101,9 @@ PROACTIVE_STAGES = (STAGE_WAITING, STAGE_LISTENING, STAGE_THINKING,
 
 # The pause button of the proactive tutor: its label is the action it does.
 PAUSE_LABEL = "Pause"
+# Says the tutor's question again. Not a command of the prompt: the model is
+# not asked.
+REPEAT_LABEL = "Repeat"
 RESUME_LABEL = "Resume"
 
 # The status line of a wait for the answer, and its countdown before a help
@@ -240,6 +243,8 @@ class ViewCallbacks:
     # on_focus_lost: the window lost the focus to another window. on_typing:
     # a key was pressed in the text entry, so the learner is answering.
     on_pause_pressed: Callable[[bool], None] = lambda by_key: None
+    # The Repeat button (False) or the R key (True).
+    on_repeat_pressed: Callable[[bool], None] = lambda by_key: None
     on_focus_lost: Callable[[], None] = lambda: None
     on_typing: Callable[[], None] = lambda: None
 
@@ -519,9 +524,22 @@ class TutorView:
             button.configure(state=tk.DISABLED)
             self.command_buttons.append(button)
 
+        # Repeat stands with the commands because it is used at the same
+        # moments and is closed with them (_set_input_enabled), but it sends
+        # nothing to the model: the controller says the question again.
+        repeat_column = len(self.command_buttons)
+        self.repeat_button = self._panel_button(
+            command_row, REPEAT_LABEL,
+            lambda: self._cb.on_repeat_pressed(False))
+        self.repeat_button.grid(row=0, column=repeat_column, sticky="ew",
+                                padx=(0, 6))
+        command_row.columnconfigure(repeat_column, weight=1,
+                                    uniform="command")
+        self.repeat_button.configure(state=tk.DISABLED)
+
         # The separator and the switch keep their own width; only the command
         # columns left of them grow with the window.
-        notes_column = len(self.command_buttons)
+        notes_column = repeat_column + 1
         tk.Frame(command_row, bg=THEME["border"], width=1).grid(
             row=0, column=notes_column, sticky="ns", padx=6, pady=2)
         self.notes_button = self._panel_button(
@@ -693,6 +711,9 @@ class TutorView:
         # Both ways out of the application end in the same controller handler.
         self.root.bind("<Escape>", lambda _e: self._cb.on_quit())
         self.root.protocol("WM_DELETE_WINDOW", self._cb.on_quit)
+        # The English R only, like P; "R" is the key with Caps Lock on.
+        self.root.bind("<KeyPress-r>", self._on_repeat_key)
+        self.root.bind("<KeyPress-R>", self._on_repeat_key)
         if self._settings.proactive:
             # The English P only (the owner's decision): in a Russian layout
             # the key gives Cyrillic_ze and does nothing; the button and the
@@ -728,6 +749,12 @@ class TutorView:
         if self._typing():
             return
         self._cb.on_space_released()
+
+    def _on_repeat_key(self, _event):
+        # An "r" typed into a phrase is a letter (the rule of Space and P).
+        if self._typing():
+            return
+        self._cb.on_repeat_pressed(True)
 
     def _on_pause_key(self, _event):
         # A "p" typed into a phrase is a letter, not a pause (the same rule as
@@ -777,7 +804,7 @@ class TutorView:
         """
         state = tk.NORMAL if enabled else tk.DISABLED
         self.text_entry.configure(state=state)
-        for button in self.command_buttons:
+        for button in (*self.command_buttons, self.repeat_button):
             button.configure(state=state)
             # A clicked button is disabled with the mouse still over it, and
             # its hover color would make it look active while the model

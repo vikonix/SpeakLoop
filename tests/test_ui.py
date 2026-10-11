@@ -154,6 +154,27 @@ class PauseKeyTests(unittest.TestCase):
         self.assertEqual(presses, [])
 
 
+class RepeatKeyTests(unittest.TestCase):
+    """The R key repeats the question, but an "r" typed into a phrase is a letter."""
+
+    @staticmethod
+    def _view(typing: bool):
+        presses = []
+        callbacks = SimpleNamespace(on_repeat_pressed=presses.append)
+        view = SimpleNamespace(_typing=lambda: typing, _cb=callbacks)
+        return view, presses
+
+    def test_the_key_repeats_outside_the_entry(self):
+        view, presses = self._view(typing=False)
+        ui.TutorView._on_repeat_key(view, None)
+        self.assertEqual(presses, [True])
+
+    def test_the_key_in_the_entry_is_a_letter(self):
+        view, presses = self._view(typing=True)
+        ui.TutorView._on_repeat_key(view, None)
+        self.assertEqual(presses, [])
+
+
 class FocusLostTests(unittest.TestCase):
     """Only a focus that left the window is a focus loss."""
 

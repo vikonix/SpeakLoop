@@ -144,6 +144,24 @@ class LadderPhraseTests(unittest.TestCase):
         self.assertEqual(ladder.step, proactive.STEP_WAIT)
 
 
+class LadderRepeatTests(unittest.TestCase):
+    """Repeat by hand is help step 1 (the rule of the manual commands)."""
+
+    def test_a_repeat_moves_the_wait_to_step_one(self):
+        ladder = proactive.Ladder()
+        ladder.on_repeat()
+        self.assertEqual(ladder.step, proactive.STEP_REPEAT)
+        # The next step after the timeout is the simpler question.
+        self.assertEqual(ladder.advance(), proactive.STEP_SIMPLER)
+
+    def test_a_repeat_never_moves_the_ladder_back(self):
+        ladder = proactive.Ladder()
+        ladder.advance()
+        ladder.advance()
+        ladder.on_repeat()
+        self.assertEqual(ladder.step, proactive.STEP_SIMPLER)
+
+
 class LadderTakeTests(unittest.TestCase):
     def test_a_take_starts_the_wait_again(self):
         ladder = proactive.Ladder()

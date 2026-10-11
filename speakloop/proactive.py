@@ -128,6 +128,16 @@ class Ladder:
             self.step = self._step_before_take
             self._step_before_take = None
 
+    def on_repeat(self) -> None:
+        """The learner asked to hear the question again (Repeat, the R key).
+
+        That is help step 1 done by hand, so the next step after the timeout
+        is the simpler question and not a second repeat (the rule of the
+        manual commands).
+        """
+        self._step_before_take = None
+        self.step = max(self.step, STEP_REPEAT)
+
     def on_learner_phrase(self, text: str) -> None:
         """Move the ladder for a phrase of the learner (spoken, typed or a button).
 

@@ -214,6 +214,7 @@ A row of stages at the top of the window marks what the application is doing: Re
 - **Space** or the microphone button during a reply: stop the reply and start recording at once.
 - **Text entry and Enter**: send a written phrase instead of speaking. Enter during a reply stops the reply and sends the phrase. The entry is closed while a recording runs and while the model answers.
 - **simpler / hint / new topic / finish**: the lesson commands. A button sends the same word you would say, and it appears in the chat as your own line. They are closed together with the text entry.
+- **Repeat** or the **R** key (English layout, outside the text entry): the tutor says its question again, slower (`repeat_speed`). The model is not asked, and the request does not appear in the chat as your phrase. It works with or without the proactive tutor; during a pause it also ends the pause.
 - **Notes**: hide or show the tutor's corrections. It works at any time and covers the whole lesson, including the corrections already on the screen; the summary stays visible. The choice is saved in `settings.json` (`show_notes`).
 - **ESC**: quit
 

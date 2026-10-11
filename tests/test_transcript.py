@@ -246,6 +246,13 @@ class ProactiveMarkdownTests(unittest.TestCase):
         view = self._view(self._escalation(2), self._auto("simpler"))
         self.assertEqual(view.count("no answer"), 1)
 
+    def test_a_repeat_request_is_shown(self):
+        record = transcript.event_record(
+            _LATER, 1, transcript.TYPE_REPEAT_REQUEST, "Where did you go?",
+            source=transcript.REPEAT_BY_KEY)
+        self.assertIn("*(you asked to repeat the question)*",
+                      self._view(record))
+
     def test_a_pause_stays_in_the_jsonl(self):
         record = transcript.event_record(
             _LATER, 1, transcript.TYPE_PAUSE, "",
