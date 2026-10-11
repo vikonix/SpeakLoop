@@ -44,6 +44,12 @@ TYPE_PAUSE = "pause"
 # key). Its text is the question and its "source" "button" or "key". The model
 # is not asked, so no learner record goes with it.
 TYPE_REPEAT_REQUEST = "repeat_request"
+# The model answer (the MODEL line of the reply to "example"), and the check
+# of the learner's repeat of it: "text" is what the learner said, "sample" the
+# model answer, "ratio" the share of its words said, "passed" whether that
+# reached the threshold.
+TYPE_MODEL_ANSWER = "model_answer"
+TYPE_REPEAT_CHECK = "repeat_check"
 REPEAT_BY_KEY = "key"
 
 # The values of the "action" and "reason" fields of a pause record.
@@ -91,13 +97,15 @@ _MD_SUMMARY = "Summary"
 # The service lines ("system") and a reply outside the contract ("broken") stay
 # in the jsonl alone: the view is the lesson, not the run of the application.
 _MD_TYPES = (TYPE_LEARNER, TYPE_NOTE, TYPE_SAY, TYPE_SUMMARY,
-             TYPE_ESCALATION, TYPE_REPEAT_REQUEST)
+             TYPE_ESCALATION, TYPE_REPEAT_REQUEST, TYPE_MODEL_ANSWER,
+             TYPE_REPEAT_CHECK)
 
 # The readable line of a command the program sent (SOURCE_AUTO), per command.
 # An unknown command still gets a line, with its own word.
 _MD_AUTO_COMMANDS = {
     "simpler": "*(no answer: simpler question)*",
     "hint": "*(no answer: hint)*",
+    "example": "*(no answer: example answer)*",
 }
 _MD_AUTO_OTHER = "*(no answer: {command})*"
 # The readable line of the slower repeat (help step 1). The help steps 2 and 3
@@ -106,6 +114,8 @@ _MD_AUTO_OTHER = "*(no answer: {command})*"
 _MD_REPEAT = "*(no answer: question repeated slower)*"
 _REPEAT_STEP = 1
 _MD_REPEAT_REQUEST = "*(you asked to repeat the question)*"
+_MD_EXAMPLE = "Example"
+_MD_REPEAT_CHECK = "*(example repeated: {percent}% of its words)*"
 
 
 def file_stem(started_at: datetime) -> str:
@@ -236,6 +246,11 @@ def _markdown_block(record: dict) -> Optional[str]:
         return _MD_REPEAT if record.get("step") == _REPEAT_STEP else None
     if record_type == TYPE_REPEAT_REQUEST:
         return _MD_REPEAT_REQUEST
+    if record_type == TYPE_MODEL_ANSWER:
+        return f"**{_MD_PARTNER} ({_MD_EXAMPLE}):** {text}"
+    if record_type == TYPE_REPEAT_CHECK:
+        return _MD_REPEAT_CHECK.format(
+            percent=round(100 * record.get("ratio", 0.0)))
     if record_type == TYPE_LEARNER:
         if record.get("source") == SOURCE_AUTO:
             return _MD_AUTO_COMMANDS.get(

@@ -61,6 +61,8 @@ SYSTEM_LABEL = "System"
 # correction of the learner's last phrase, hence "Fix".
 NOTE_LABEL = "Fix"
 SUMMARY_LABEL = "Summary"
+# The model answer (help step 4): spoken by the tutor for the learner to say.
+EXAMPLE_LABEL = "Example"
 
 # Chat layout, in pixels. Every line starts with its label in one column and
 # the text starts at one tab stop after the widest label, so the eye reads the
@@ -645,7 +647,8 @@ class TutorView:
         system_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE_BODY)
         label_width = max(
             max(label_font.measure(label)
-                for label in (PARTNER_NAME, USER_LABEL, NOTE_LABEL)),
+                for label in (PARTNER_NAME, USER_LABEL, NOTE_LABEL,
+                              EXAMPLE_LABEL)),
             system_font.measure(SYSTEM_LABEL))
         text_column = _BAND_PADDING + label_width + _LABEL_GAP
         self.chat_display.configure(tabs=(text_column,))
@@ -940,6 +943,15 @@ class TutorView:
         self._append((f"{PARTNER_NAME}\t", "partner"),
                      (f"{text}\n", "text_partner"))
         self._set_question(text, asked=True)
+
+    def append_example(self, text: str):
+        """Add the model answer (the MODEL line of a reply).
+
+        In the tutor's colors, because the tutor says it. The question block
+        keeps the question: the example answers it.
+        """
+        self._append((f"{EXAMPLE_LABEL}\t", "partner"),
+                     (f"{text}\n", "text_partner"))
 
     def set_topic(self, topic: str):
         """Take *topic* for the next question of the tutor.

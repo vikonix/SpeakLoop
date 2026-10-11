@@ -5,7 +5,9 @@
 
 When the learner does not answer, the program helps step by step: it repeats
 the question slower (step 1), asks a simpler question (step 2), gives a hint
-(step 3), and then pauses the lesson. The timers and the window belong to
+(step 3), gives a model answer for the learner to say (step 4), and then
+pauses the lesson. compare_with_example() checks how the learner said the
+model answer. The timers and the window belong to
 speakloop/app.py; this module only decides which step comes next. It is pure,
 so every rule of the ladder is tested without a window
 (docs/proactive-tutor-spec.md, section 6).
@@ -14,17 +16,30 @@ Imports only the pure prompt and topics modules: a command of the learner is
 recognized here with the same rules the rest of the lesson uses.
 """
 
+import re
+from collections import Counter
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from speakloop import prompt, topics
 
-# The steps of the ladder. Step 0 is the wait after a question; 1-3 are the
-# help steps of P1. P2 adds the model answer as step 4.
+# The steps of the ladder. Step 0 is the wait after a question; 1-4 are the
+# help steps.
 STEP_WAIT = 0
 STEP_REPEAT = 1
 STEP_SIMPLER = 2
 STEP_HINT = 3
-LAST_HELP_STEP = STEP_HINT
+STEP_EXAMPLE = 4
+LAST_HELP_STEP = STEP_EXAMPLE
+
+# The share of the words of the model answer the learner must say for the
+# repeat to count as done (docs/proactive-tutor-spec.md, 5.2).
+EXAMPLE_MATCH_THRESHOLD = 0.8
+
+# A word of an answer, as the repeat check compares it: letters and digits,
+# with an apostrophe inside ("don't", "I'm"). Case and punctuation do not
+# count, because recognition adds both.
+_ANSWER_WORD = re.compile(r"\w+(?:'\w+)*")
 
 # The countdown before a step is shown for this many seconds only: a longer
 # one would press the learner while they think.
@@ -36,7 +51,8 @@ PROACTIVE_AUTO = "auto"
 # The lesson commands that are also help steps. A manual command moves the
 # ladder to its own step, so the program never asks for a simpler question
 # after the learner already asked for a hint.
-_COMMAND_STEPS = {"simpler": STEP_SIMPLER, "hint": STEP_HINT}
+_COMMAND_STEPS = {"simpler": STEP_SIMPLER, "hint": STEP_HINT,
+                  prompt.EXAMPLE_COMMAND: STEP_EXAMPLE}
 _FINISH_COMMAND = "finish"
 
 
@@ -61,10 +77,61 @@ def lesson_command(text: str) -> Optional[str]:
     if text.strip().lower().startswith(topics.topic_command("")):
         return topics.NEW_TOPIC_COMMAND
     words = topics.command_words(text)
-    for command in prompt.LESSON_COMMANDS:
+    for command in (*prompt.LESSON_COMMANDS, prompt.EXAMPLE_COMMAND):
         if words == command.split():
             return command
     return None
+
+
+@dataclass(frozen=True)
+class ExampleMatch:
+    """How the learner said the model answer.
+
+    matched - words of the model answer the learner said;
+    total   - words of the model answer;
+    missing - the words they left out, in the order of the model answer,
+              each once;
+    ratio   - matched / total (0.0 for an empty model answer);
+    passed  - ratio at or above EXAMPLE_MATCH_THRESHOLD.
+    """
+    matched: int
+    total: int
+    missing: Tuple[str, ...]
+    ratio: float
+    passed: bool
+
+
+def answer_words(text: str) -> List[str]:
+    """The words of *text* in lower case, without punctuation.
+
+    The typographic apostrophe counts as the plain one: recognition and the
+    model do not always write the same one.
+    """
+    return _ANSWER_WORD.findall(text.lower().replace("\u2019", "'"))
+
+
+def compare_with_example(example: str, answer: str) -> ExampleMatch:
+    """Compare what the learner said with the model answer.
+
+    Counts the words of the model answer found in the answer, each as many
+    times as it occurs, in any order: the learner may change the order a
+    little, and a recognition that drops a repeated word must not make the
+    whole repeat fail. Extra words of the learner do not count against them.
+    """
+    sample = answer_words(example)
+    said = Counter(answer_words(answer))
+    matched = 0
+    missing: List[str] = []
+    for word in sample:
+        if said[word] > 0:
+            said[word] -= 1
+            matched += 1
+        elif word not in missing:
+            missing.append(word)
+    total = len(sample)
+    ratio = matched / total if total else 0.0
+    return ExampleMatch(matched=matched, total=total, missing=tuple(missing),
+                        ratio=ratio, passed=ratio >= EXAMPLE_MATCH_THRESHOLD)
 
 
 def countdown_marks(wait_seconds: float) -> List[Tuple[float, int]]:

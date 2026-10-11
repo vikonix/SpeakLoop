@@ -19,6 +19,9 @@ from typing import List, Optional
 NOTE_PREFIX = "NOTE:"
 SAY_PREFIX = "SAY:"
 SUMMARY_PREFIX = "SUMMARY:"
+# The model answer: the reply to the "example" command (help step 4,
+# docs/proactive-tutor-spec.md). Shown and spoken; the learner then says it.
+MODEL_PREFIX = "MODEL:"
 
 # Sentence end: punctuation, whitespace, then a capital letter. A dot inside a
 # number ("1.5") has no whitespace after it, so it does not split.
@@ -48,20 +51,25 @@ class Reply:
     say     - the partner's line, or None.
     summary - the lesson summary (may have several lines), or None.
     raw     - the whole reply as the model wrote it, stripped.
+    model   - the model answer (the reply to "example"), or None. Last and
+              with a default, so a reply built without it stays valid.
     """
     note: Optional[str]
     say: Optional[str]
     summary: Optional[str]
     raw: str
+    model: Optional[str] = None
 
     @property
     def follows_contract(self) -> bool:
-        """True when the lesson can use the reply: it has SAY or is the SUMMARY.
+        """True when the lesson can use the reply: SAY, MODEL or the SUMMARY.
 
         A NOTE alone is not enough: the learner then gets no question, and the
-        lesson stops without a word.
+        lesson stops without a word. A MODEL alone is enough: the learner
+        says the example.
         """
-        return self.say is not None or self.summary is not None
+        return (self.say is not None or self.summary is not None
+                or self.model is not None)
 
 
 def _text_after(line: str, prefix: str) -> Optional[str]:
@@ -85,6 +93,21 @@ def _summary_text(line: str) -> Optional[str]:
             line = rest
             break
     return _text_after(line, SUMMARY_PREFIX)
+
+
+def _model_text(line: str) -> Optional[str]:
+    """The text after MODEL: when *line* is the model answer, else None.
+
+    A NOTE: or SAY: prefix just before MODEL: is allowed, for the reason
+    given in _summary_text: the prompt says that every line begins with one
+    of them.
+    """
+    for prefix in (NOTE_PREFIX, SAY_PREFIX):
+        rest = _text_after(line, prefix)
+        if rest is not None and rest.startswith(MODEL_PREFIX):
+            line = rest
+            break
+    return _text_after(line, MODEL_PREFIX)
 
 
 def _without_repeated_label(summary: str) -> str:
@@ -115,7 +138,7 @@ def parse_reply(text: str) -> Reply:
     no text after it counts as absent.
     """
     raw = text.strip()
-    note = say = summary = None
+    note = say = summary = model = None
     lines = raw.splitlines()
     for index, line in enumerate(lines):
         line = line.strip()
@@ -126,6 +149,13 @@ def parse_reply(text: str) -> Reply:
             summary = _without_repeated_label("\n".join(rest).strip())
             summary = summary or None
             break
+        model_text = _model_text(line)
+        if model_text is not None:
+            # Checked before NOTE and SAY, which would take "SAY: MODEL: ..."
+            # for a SAY line and speak the label.
+            if model_text and model is None:
+                model = model_text
+            continue
         note_text = _text_after(line, NOTE_PREFIX)
         if note_text:
             if note is None:
@@ -134,7 +164,7 @@ def parse_reply(text: str) -> Reply:
         say_text = _text_after(line, SAY_PREFIX)
         if say_text and say is None:
             say = say_text
-    return Reply(note=note, say=say, summary=summary, raw=raw)
+    return Reply(note=note, say=say, summary=summary, raw=raw, model=model)
 
 
 def without_note(reply: Reply) -> Reply:
@@ -146,12 +176,14 @@ def without_note(reply: Reply) -> Reply:
     reply in the history of the model.
     """
     lines = []
+    if reply.model is not None:
+        lines.append(f"{MODEL_PREFIX} {reply.model}")
     if reply.say is not None:
         lines.append(f"{SAY_PREFIX} {reply.say}")
     if reply.summary is not None:
         lines.append(f"{SUMMARY_PREFIX} {reply.summary}")
     return Reply(note=None, say=reply.say, summary=reply.summary,
-                 raw="\n".join(lines))
+                 raw="\n".join(lines), model=reply.model)
 
 
 def strip_markdown(text: str) -> str:

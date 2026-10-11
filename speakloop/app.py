@@ -127,11 +127,15 @@ ESCALATION_MESSAGES = {
     proactive.STEP_REPEAT: "No answer. Again, slower:",
     proactive.STEP_SIMPLER: "No answer. A simpler question:",
     proactive.STEP_HINT: "No answer. A hint:",
+    proactive.STEP_EXAMPLE: "No answer. An example:",
 }
 AUTO_COMMANDS = {
     proactive.STEP_SIMPLER: "simpler",
     proactive.STEP_HINT: "hint",
+    proactive.STEP_EXAMPLE: prompt.EXAMPLE_COMMAND,
 }
+# The [System] line under a model answer: the learner says it next.
+SAY_EXAMPLE_MESSAGE = "Now say the example."
 
 
 class VoiceTutorController:
@@ -263,6 +267,9 @@ class VoiceTutorController:
         # reply, as it is spoken, and its audio once it was synthesized.
         self._question_text: Optional[str] = None
         self._question_audio: Optional[np.ndarray] = None
+        # The model answer the learner is asked to say (help step 4), until
+        # their next phrase is compared with it (_check_example).
+        self._pending_example: Optional[str] = None
 
         # The window. Built last of the members, because the loader thread
         # started below drives it at once.
@@ -624,6 +631,8 @@ class VoiceTutorController:
         turn = self._next_turn()
         self._record(transcript.TYPE_LEARNER, learner_text, turn,
                      source=source)
+        if not automatic:
+            self._check_example(learner_text, turn)
         # Installed on the Tk thread, like the stop event of a recorded take
         # (see PlaybackController.new_event).
         stop_event = self.playback.new_event()
@@ -801,6 +810,7 @@ class VoiceTutorController:
                          source=transcript.SOURCE_VOICE,
                          stt_ms=round(stt_ms),
                          recognized=user_text if phrase != user_text else None)
+            self.root.after(0, self._check_example, phrase, turn)
 
             if stop_event.is_set():
                 # A new take began while this one was being transcribed. The
@@ -887,11 +897,17 @@ class VoiceTutorController:
             # After the summary the lesson is over, and advice to finish it
             # would come too late.
             self._warn_if_context_fills(turn)
+        if reply.model:
+            # The learner's next phrase is compared with it.
+            self.root.after(0, self._expect_example, reply.model)
+            self._system(SAY_EXAMPLE_MESSAGE, turn)
 
         # The markers go before the split, and for speech only: the synthesis
         # reads them aloud, while the chat and the transcript keep the line as
-        # the model wrote it.
-        spoken = strip_markdown(reply.say) if reply.say else ""
+        # the model wrote it. The model answer is spoken first: the prompt
+        # asks for it alone, and a SAY next to it comes after it.
+        spoken = strip_markdown(" ".join(
+            part for part in (reply.model, reply.say) if part))
         sentences = split_sentences(spoken)
         # The question of the help steps: the last sentence, as it is spoken.
         # Taken from every reply, so a reply without SAY leaves no old
@@ -950,6 +966,8 @@ class VoiceTutorController:
             return
         if reply.note:
             self.view.append_note(reply.note)
+        if reply.model:
+            self.view.append_example(reply.model)
         if reply.say:
             self.view.append_partner_msg(reply.say)
         if reply.summary:
@@ -974,6 +992,7 @@ class VoiceTutorController:
             self._record(transcript.TYPE_BROKEN, reply.raw, turn, **stats)
             return
         for record_type, text in ((transcript.TYPE_NOTE, reply.note),
+                                  (transcript.TYPE_MODEL_ANSWER, reply.model),
                                   (transcript.TYPE_SAY, reply.say),
                                   (transcript.TYPE_SUMMARY, reply.summary)):
             if text:
@@ -1200,6 +1219,34 @@ class VoiceTutorController:
         self._cancel_wait()
         self._in_error = False
         self._ladder.on_learner_phrase(phrase)
+
+    def _expect_example(self, example: str):
+        """A model answer was given: the learner's next phrase is its repeat."""
+        self._pending_example = example
+
+    def _check_example(self, phrase: str, turn: int):
+        """Compare the learner's phrase with the model answer they were given.
+
+        (Tk thread, after the phrase is in the chat, so the result line stands
+        under it.) Once only: the next phrase after the model answer is the
+        repeat, whatever it is. A command is not a repeat; it ends the wait
+        for one. The phrase still goes to the model as usual: the model takes
+        it as the answer to its question.
+        """
+        example = self._pending_example
+        self._pending_example = None
+        if example is None or proactive.lesson_command(phrase) is not None:
+            return
+        match = proactive.compare_with_example(example, phrase)
+        line = f"Example matched: {match.matched} of {match.total} words."
+        if match.missing:
+            line += f" Missing: {', '.join(match.missing)}."
+        logging.info(f"Repeat of the example: {match.matched} of "
+                     f"{match.total} words (passed: {match.passed}).")
+        self._system(line, turn)
+        self._record(transcript.TYPE_REPEAT_CHECK, phrase, turn,
+                     sample=example, ratio=round(match.ratio, 2),
+                     passed=match.passed)
 
     def _enter_error(self, status: str):
         """A failed exchange: no question to wait for, so no wait and no pause."""

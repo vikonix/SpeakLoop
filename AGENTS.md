@@ -20,7 +20,9 @@ The lesson runs on the free-talk prompt
 ([`speakloop/prompts/free_talk.md`](speakloop/prompts/free_talk.md), the main
 copy of it). The model opens the lesson itself and answers in lines that begin
 with `NOTE:` (a correction, shown only), `SAY:` (the partner's line, shown and
-spoken) or `SUMMARY:` (the lesson summary on "finish", shown only). The prompt
+spoken), `MODEL:` (a model answer for the learner to say, the reply to the
+command "example"; shown and spoken) or `SUMMARY:` (the lesson summary on
+"finish", shown only). The prompt
 text belongs to the owner: change it only on request.
 
 Every lesson is also written to `transcript/` while it runs
@@ -161,6 +163,13 @@ the key differ.
   because the learner already answers (the owner's decision).
   A `_Repeat` goes through the speech queue like a reply, with a stop event of
   its own, so it never plays over a reply and Space interrupts it.
+  A reply with MODEL (help step 4, or "example" said or typed) is shown with
+  `view.append_example`, followed by the `SAY_EXAMPLE_MESSAGE` System line,
+  and spoken before any SAY; `_expect_example` keeps it, and the learner's
+  next phrase is compared with it once (`_check_example`, on the Tk thread
+  after the phrase is in the chat): a System line with the matched and the
+  missing words and a `repeat_check` record. A command instead of a repeat
+  ends the wait for it. The phrase goes to the model as usual.
   `on_repeat_pressed` (the Repeat button or R, with the proactive tutor on or
   off) uses the same path: it stops a reply being spoken, records a
   `repeat_request`, moves the ladder to step 1 (`Ladder.on_repeat`, so the
@@ -274,7 +283,8 @@ the key differ.
   The second row of the panel holds the lesson commands and the Notes switch.
   The command buttons are built from `ViewSettings.commands`, which app.py
   fills with `prompt.LESSON_COMMANDS`, so a button sends the word of the
-  prompt itself and is never spelled here.
+  prompt itself and is never spelled here. `EXAMPLE_COMMAND` ("example") is a
+  command without a button: the help ladder sends it, the learner may say it.
   `_apply_notes_visibility()` is the whole Notes feature: it sets `elide` on
   the two NOTE tags, which hides the corrections already in the chat and every
   one that comes later; the text stays in the widget. SUMMARY has tags of its own and is never hidden. The
@@ -352,12 +362,17 @@ the key differ.
   file, and there is none yet, so it is off), `lesson_command()` tells a
   command from a phrase (both forms of "new topic"), `countdown_marks()` gives
   the times of the last 3 seconds of a wait. `Ladder` holds the step: 0 is the
-  wait, 1 the slower repeat, 2 simpler, 3 hint, and `advance()` returns None
+  wait, 1 the slower repeat, 2 simpler, 3 hint, 4 the model answer
+  ("example"), and `advance()` returns None
   after the last help step (the lesson pauses then). An answer resets it, a
   manual "simpler" or "hint" moves it to that step (never back), "new topic"
   resets it and "finish" stops it until the next phrase. `begin_take()` resets
   it but keeps the old step, which `take_was_empty()` gives back: Space starts
   a take, but a take without speech is no answer. app.py owns the timers.
+  `compare_with_example()` checks the learner's repeat of a model answer: the
+  share of its words said (each word as often as it occurs, any order, case
+  and punctuation ignored, extra words free), the missing words in order, and
+  `passed` at `EXAMPLE_MATCH_THRESHOLD` (0.8).
 - [`speakloop/contract.py`](speakloop/contract.py) - pure code for the output
   contract: `parse_reply()` gives a `Reply` (`note`, `say`, `summary`, `raw`,
   `follows_contract`). SUMMARY takes everything from its line to the end,
@@ -369,7 +384,10 @@ the key differ.
   in the explanation language, and a label with markdown around it
   (`**SAY:**`) is therefore a reply outside the contract, not a line to speak.
   `without_note()` gives the reply without its NOTE and writes `raw` again
-  from SAY and SUMMARY, so that `parse_reply(raw)` gives the same reply.
+  from MODEL, SAY and SUMMARY, so that `parse_reply(raw)` gives the same reply.
+  `MODEL:` is read like SUMMARY with a NOTE: or SAY: prefix allowed before
+  it (read as SAY, its label would be spoken), and a reply with a MODEL alone
+  follows the contract.
   `split_sentences()` cuts SAY for speech, and `strip_markdown()` takes the
   inline markers out of it first: the synthesis reads a marker as a sound. A
   marker counts only as a pair with no space against the text, and an
@@ -409,6 +427,9 @@ the key differ.
   such a command as an italic "no answer" line and never as the learner's
   phrase, shows the step 1 escalation the same way, and leaves the other
   escalations (their command line already shows them) and `pause` to the jsonl.
+  `model_answer` (the MODEL line) and `repeat_check` (text: what the learner
+  said; `sample`, `ratio`, `passed`) belong to help step 4; the view shows the
+  model answer as the tutor's line and the check as a percentage.
   `repeat_request` (text: the question, `source` "button" or "key") is the
   learner's own Repeat; the view shows it as an italic line.
   A pause has the reason `button`, `key`, `focus` or `ladder_end` when it

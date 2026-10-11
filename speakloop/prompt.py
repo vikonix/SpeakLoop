@@ -41,6 +41,11 @@ SETTING_NAMES = (
 # checks that the shipped prompt still names every one of them.
 LESSON_COMMANDS = ("simpler", "hint", NEW_TOPIC_COMMAND, "finish")
 
+# The command of the model answer (help step 4 of the proactive tutor). Not a
+# button: the help ladder sends it, and the learner may say or type it. The
+# model answers it with one MODEL: line (speakloop/contract.py).
+EXAMPLE_COMMAND = "example"
+
 
 def is_lesson_command(text: str) -> bool:
     """True when *text* is a command of the learner and nothing else.
@@ -53,7 +58,8 @@ def is_lesson_command(text: str) -> bool:
     if text.strip().lower().startswith(topic_command("")):
         return True
     words = command_words(text)
-    return any(words == command.split() for command in LESSON_COMMANDS)
+    return any(words == command.split()
+               for command in (*LESSON_COMMANDS, EXAMPLE_COMMAND))
 
 
 def _setting_pattern(name: str) -> "re.Pattern":

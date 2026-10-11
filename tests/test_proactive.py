@@ -45,9 +45,54 @@ class LessonCommandTests(unittest.TestCase):
             proactive.lesson_command(topics.topic_command("my hobby")),
             topics.NEW_TOPIC_COMMAND)
 
+    def test_the_example_command_is_recognized(self):
+        self.assertEqual(proactive.lesson_command("Example."), "example")
+
     def test_a_phrase_that_only_contains_a_command_is_not_one(self):
         self.assertIsNone(proactive.lesson_command("Give me a hint please"))
         self.assertIsNone(proactive.lesson_command("I went to Madrid."))
+
+
+class CompareWithExampleTests(unittest.TestCase):
+    """The repeat of the model answer (docs/proactive-tutor-spec.md, step 5)."""
+
+    def test_the_same_words_pass(self):
+        match = proactive.compare_with_example("I went to Madrid by train.",
+                                               "I went to Madrid by train")
+        self.assertEqual((match.matched, match.total), (6, 6))
+        self.assertEqual(match.missing, ())
+        self.assertTrue(match.passed)
+
+    def test_case_and_punctuation_do_not_count(self):
+        match = proactive.compare_with_example("I don't know.",
+                                               "i DON\u2019T know!")
+        self.assertTrue(match.passed)
+
+    def test_the_missing_words_are_named_once_in_order(self):
+        match = proactive.compare_with_example(
+            "I took the train to the coast.", "I went to the coast.")
+        # "the" is twice in the sample and once in the answer, so one "the"
+        # is missing too; it is named once, where it is first missing.
+        self.assertEqual(match.missing, ("took", "train", "the"))
+        self.assertEqual((match.matched, match.total), (4, 7))
+
+    def test_extra_words_of_the_learner_do_not_count_against_them(self):
+        match = proactive.compare_with_example(
+            "I like tea.", "Well, I like tea very much.")
+        self.assertEqual(match.ratio, 1.0)
+
+    def test_the_threshold_decides(self):
+        # 4 of 5 words is 0.8: passed.
+        self.assertTrue(proactive.compare_with_example(
+            "one two three four five", "one two three four").passed)
+        # 3 of 5 is 0.6: not passed.
+        self.assertFalse(proactive.compare_with_example(
+            "one two three four five", "one two three").passed)
+
+    def test_an_empty_example_never_passes(self):
+        match = proactive.compare_with_example("", "anything")
+        self.assertEqual(match.total, 0)
+        self.assertFalse(match.passed)
 
 
 class CountdownTests(unittest.TestCase):
@@ -71,6 +116,7 @@ class LadderStepTests(unittest.TestCase):
         self.assertEqual(ladder.advance(), proactive.STEP_REPEAT)
         self.assertEqual(ladder.advance(), proactive.STEP_SIMPLER)
         self.assertEqual(ladder.advance(), proactive.STEP_HINT)
+        self.assertEqual(ladder.advance(), proactive.STEP_EXAMPLE)
         self.assertIsNone(ladder.advance())
 
     def test_the_end_does_not_move_the_step(self):
@@ -79,11 +125,10 @@ class LadderStepTests(unittest.TestCase):
             ladder.advance()
         self.assertEqual(ladder.step, proactive.LAST_HELP_STEP)
 
-    def test_a_longer_ladder_has_more_steps(self):
-        # P2 adds the model answer as step 4.
-        ladder = proactive.Ladder(last_help_step=4)
-        steps = [ladder.advance() for _ in range(5)]
-        self.assertEqual(steps, [1, 2, 3, 4, None])
+    def test_a_shorter_ladder_ends_earlier(self):
+        ladder = proactive.Ladder(last_help_step=proactive.STEP_HINT)
+        steps = [ladder.advance() for _ in range(4)]
+        self.assertEqual(steps, [1, 2, 3, None])
 
     def test_reset_returns_to_the_wait(self):
         ladder = proactive.Ladder()
@@ -113,11 +158,17 @@ class LadderPhraseTests(unittest.TestCase):
         # The next step after the timeout is the hint, not a second "simpler".
         self.assertEqual(ladder.advance(), proactive.STEP_HINT)
 
-    def test_a_manual_hint_ends_the_ladder_next(self):
-        # In P1 the hint is the last help step: the pause comes next.
+    def test_a_manual_hint_moves_to_the_example_next(self):
         ladder = self._ladder_at(1)
         ladder.on_learner_phrase("Hint.")
         self.assertEqual(ladder.step, proactive.STEP_HINT)
+        self.assertEqual(ladder.advance(), proactive.STEP_EXAMPLE)
+
+    def test_a_manual_example_ends_the_ladder_next(self):
+        # The model answer is the last help step: the pause comes next.
+        ladder = self._ladder_at(0)
+        ladder.on_learner_phrase("Example.")
+        self.assertEqual(ladder.step, proactive.STEP_EXAMPLE)
         self.assertIsNone(ladder.advance())
 
     def test_a_manual_command_never_moves_the_ladder_back(self):

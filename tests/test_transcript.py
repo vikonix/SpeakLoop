@@ -235,8 +235,8 @@ class ProactiveMarkdownTests(unittest.TestCase):
         self.assertIn("*(no answer: hint)*", view)
 
     def test_an_unknown_auto_command_still_gets_a_line(self):
-        self.assertIn("*(no answer: example)*",
-                      self._view(self._auto("example")))
+        self.assertIn("*(no answer: retry)*",
+                      self._view(self._auto("retry")))
 
     def test_the_repeat_is_shown_once(self):
         view = self._view(self._escalation(1))
@@ -252,6 +252,23 @@ class ProactiveMarkdownTests(unittest.TestCase):
             source=transcript.REPEAT_BY_KEY)
         self.assertIn("*(you asked to repeat the question)*",
                       self._view(record))
+
+    def test_the_model_answer_is_shown_as_the_tutor_s(self):
+        record = transcript.event_record(
+            _LATER, 3, transcript.TYPE_MODEL_ANSWER, "I went by train.")
+        self.assertIn("**Tutor (Example):** I went by train.",
+                      self._view(record))
+
+    def test_the_repeat_check_is_shown_as_a_share(self):
+        record = transcript.event_record(
+            _LATER, 4, transcript.TYPE_REPEAT_CHECK, "I went by train",
+            sample="I went by train.", ratio=0.75, passed=False)
+        self.assertIn("*(example repeated: 75% of its words)*",
+                      self._view(record))
+
+    def test_an_auto_example_command_is_named(self):
+        self.assertIn("*(no answer: example answer)*",
+                      self._view(self._auto("example")))
 
     def test_a_pause_stays_in_the_jsonl(self):
         record = transcript.event_record(

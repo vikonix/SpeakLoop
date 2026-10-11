@@ -179,6 +179,41 @@ class ContractBreakTests(unittest.TestCase):
                          (None, None, None, ""))
 
 
+class ModelAnswerTests(unittest.TestCase):
+    """The MODEL line: the reply to "example"."""
+
+    def test_a_model_line_is_read(self):
+        reply = parse_reply("MODEL: I went to Madrid by train.")
+        self.assertEqual(reply.model, "I went to Madrid by train.")
+        self.assertIsNone(reply.say)
+
+    def test_a_model_alone_follows_the_contract(self):
+        # The learner says the example; there is no question to wait for.
+        self.assertTrue(parse_reply("MODEL: I like tea.").follows_contract)
+
+    def test_a_say_prefix_before_model_is_allowed(self):
+        # Read as SAY, the label would be spoken.
+        reply = parse_reply("SAY: MODEL: I like tea.")
+        self.assertEqual(reply.model, "I like tea.")
+        self.assertIsNone(reply.say)
+
+    def test_model_and_say_are_both_kept(self):
+        reply = parse_reply("MODEL: I like tea.\nSAY: Now you say it.")
+        self.assertEqual(reply.model, "I like tea.")
+        self.assertEqual(reply.say, "Now you say it.")
+
+    def test_an_empty_model_counts_as_absent(self):
+        self.assertIsNone(parse_reply("MODEL:\nSAY: Why?").model)
+
+    def test_a_reply_without_model_has_none(self):
+        self.assertIsNone(parse_reply("SAY: Why?").model)
+
+    def test_without_note_keeps_the_model(self):
+        reply = without_note(parse_reply('NOTE: x\nMODEL: I like tea.'))
+        self.assertEqual(reply.raw, "MODEL: I like tea.")
+        self.assertEqual(parse_reply(reply.raw), reply)
+
+
 class WithoutNoteTests(unittest.TestCase):
     def test_the_note_is_gone_and_the_say_stays(self):
         reply = without_note(parse_reply('NOTE: "a" -> "b".\nSAY: Why?'))

@@ -166,9 +166,13 @@ class ShippedPromptTests(unittest.TestCase):
         # the Commands line has to tell the model to take that topic.
         self.assertIn('"new topic: ', self.system_prompt)
 
-    def test_the_prompt_defines_the_three_prefixes(self):
+    def test_the_prompt_names_the_example_command(self):
+        # The help ladder sends it (help step 4).
+        self.assertIn(f'"{prompt.EXAMPLE_COMMAND}"', self.system_prompt)
+
+    def test_the_prompt_defines_the_four_prefixes(self):
         # speakloop/contract.py parses exactly these.
-        for prefix in ("NOTE:", "SAY:", "SUMMARY:"):
+        for prefix in ("NOTE:", "SAY:", "SUMMARY:", "MODEL:"):
             self.assertIn(prefix, self.system_prompt)
 
 
@@ -183,6 +187,10 @@ class IsLessonCommandTests(unittest.TestCase):
         for text in ("Simpler.", "Hint!", "  FINISH  ", "New topic."):
             with self.subTest(text=text):
                 self.assertTrue(prompt.is_lesson_command(text))
+
+    def test_the_example_command_is_a_command(self):
+        # Its reply gets no NOTE, like the other commands.
+        self.assertTrue(prompt.is_lesson_command("Example."))
 
     def test_the_new_topic_phrase_of_the_program_is_a_command(self):
         self.assertTrue(prompt.is_lesson_command("new topic: travel"))
