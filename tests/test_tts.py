@@ -143,6 +143,57 @@ class PlaybackGuardTests(unittest.TestCase):
         stream.assert_not_called()
 
 
+class SpeechSpeedTests(unittest.TestCase):
+    """The tutor's speed reaches the synthesis of both backends."""
+
+    def test_kokoro_gets_the_configured_speed(self):
+        backend = tts.KokoroBackend()
+        backend.model = object()
+        calls = []
+
+        def pipeline(text, **kwargs):
+            calls.append(kwargs)
+            return iter([(None, None, np.ones(4, dtype=np.float32))])
+
+        backend.pipeline = pipeline
+        with mock.patch.object(config, "SPEECH_SPEED", 0.9):
+            backend.synthesize("Hello.", "af_heart")
+        self.assertEqual(calls[0]["speed"], 0.9)
+
+    def test_supertonic_gets_the_configured_speed(self):
+        # Never the package default of 1.05.
+        backend = tts.SupertonicBackend()
+        backend._tts = mock.Mock()
+        backend._tts.synthesize.return_value = (
+            np.zeros((1, 4), dtype=np.float32), 0.1)
+        with mock.patch.object(backend, "_style", return_value="style"), \
+                mock.patch.object(config, "SPEECH_SPEED", 0.9):
+            backend.synthesize("Hola.", "M1")
+        self.assertEqual(backend._tts.synthesize.call_args.kwargs["speed"], 0.9)
+
+
+class SlowedPlaybackTests(unittest.TestCase):
+    """The slower repeat of a question (docs/proactive-tutor-spec.md, 6.6)."""
+
+    def setUp(self):
+        self.waveform = np.ones(100, dtype=np.float32)
+
+    def test_a_factor_of_one_plays_as_it_is(self):
+        waveform, rate = tts.slowed_playback(self.waveform, 24_000, 1.0)
+        self.assertIs(waveform, self.waveform)
+        self.assertEqual(rate, 24_000)
+
+    def test_a_lower_factor_lowers_the_rate_and_keeps_the_waveform(self):
+        # 0.8 / 0.9: the owner's settings.
+        waveform, rate = tts.slowed_playback(self.waveform, 24_000, 0.8 / 0.9)
+        self.assertIs(waveform, self.waveform)
+        self.assertEqual(rate, int(24_000 * 0.8 / 0.9))
+
+    def test_the_repeat_is_never_faster_than_the_speech(self):
+        _waveform, rate = tts.slowed_playback(self.waveform, 44_100, 1.25)
+        self.assertEqual(rate, 44_100)
+
+
 class LeadInTests(unittest.TestCase):
     """The lead-in is reported only for the path that actually prepends it."""
 

@@ -227,6 +227,49 @@ class LessonSettingTests(unittest.TestCase):
         self.assertTrue(shipped.is_file())
 
 
+class ProactiveSettingTests(unittest.TestCase):
+    """The proactive tutor keys (docs/proactive-tutor-spec.md, 5.1).
+
+    Every rejected value prints a line to stderr; mock.patch keeps it out of
+    the test report.
+    """
+
+    def _parse(self, value):
+        with mock.patch("sys.stderr"):
+            return config._proactive_setting(value)
+
+    def test_the_keys_are_known(self):
+        for key in ("proactive", "proactive_wait_seconds", "speech_speed",
+                    "repeat_speed"):
+            with self.subTest(key=key):
+                self.assertIn(key, config._KNOWN_USER_KEYS)
+
+    def test_the_three_choices_are_kept(self):
+        for value in ("auto", True, False):
+            with self.subTest(value=value):
+                self.assertIs(self._parse(value), value)
+
+    def test_invalid_values_fall_back_to_auto(self):
+        # 1 and 0 are equal to True and False in Python, but nobody wrote a
+        # flag there.
+        for value in ("AUTO", "on", "", None, 1, 0, ["auto"]):
+            with self.subTest(value=value):
+                self.assertEqual(self._parse(value), "auto")
+
+    def test_the_resolved_value_is_a_valid_one(self):
+        self.assertIn(config.PROACTIVE, config.PROACTIVE_CHOICES)
+
+    def test_the_wait_leaves_room_for_the_countdown(self):
+        self.assertGreaterEqual(config.PROACTIVE_WAIT_SECONDS, 3)
+
+    def test_the_speeds_are_inside_their_range(self):
+        for speed in (config.SPEECH_SPEED, config.REPEAT_SPEED):
+            with self.subTest(speed=speed):
+                self.assertIsInstance(speed, float)
+                self.assertGreaterEqual(speed, config.SPEECH_SPEED_MIN)
+                self.assertLessEqual(speed, config.SPEECH_SPEED_MAX)
+
+
 class SaveUserSettingTests(unittest.TestCase):
     """The one value the application writes back to settings.json."""
 

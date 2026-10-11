@@ -77,6 +77,10 @@ _KNOWN_USER_KEYS = {
     "first_topic",
     "prompt_file",
     "show_notes",
+    "proactive",
+    "proactive_wait_seconds",
+    "speech_speed",
+    "repeat_speed",
 }
 for _key in _USER:
     if not _key.startswith("_") and _key not in _KNOWN_USER_KEYS:
@@ -298,6 +302,45 @@ MAX_RECORD_SECONDS = _num("max_record_seconds", 20, minimum=1)
 #                       to MAX_RECORD_SECONDS.
 SILENCE_TIMEOUT = _num("silence_timeout", 3.0, minimum=0.5)
 SILENCE_THRESHOLD = _num("silence_threshold", 0.01, minimum=0.001)
+
+# The proactive tutor (speakloop/proactive.py, docs/proactive-tutor-spec.md).
+# "proactive" is "auto", true or false: "auto" turns the help ladder on only for
+# a lesson that runs from a lesson file, and there is no lesson file yet, so
+# "auto" means off. app.py resolves the value with proactive.is_enabled.
+PROACTIVE_CHOICES = ("auto", True, False)
+
+
+def _proactive_setting(value):
+    """The "proactive" value, or "auto" when it is not one of the choices.
+
+    Checked by type and not with "in PROACTIVE_CHOICES": 1 == True in Python,
+    so a 1 or a 0 in the file would pass as a flag that nobody wrote.
+    """
+    if value == "auto" or isinstance(value, bool):
+        return value
+    print(f"[config] settings.json: proactive must be 'auto', true or false, "
+          f"got {value!r}; using 'auto'", file=sys.stderr)
+    return "auto"
+
+
+PROACTIVE = _proactive_setting(_USER.get("proactive", "auto"))
+# Seconds the tutor waits for an answer before each help step. One value for
+# every step. The minimum leaves room for the 3-second countdown.
+PROACTIVE_WAIT_SECONDS = float(_num("proactive_wait_seconds", 10, minimum=3))
+
+# Speed of the tutor's speech, as a factor of normal speech (1.0). The default
+# 1.0 keeps the speech as it was before these keys.
+#   speech_speed - every reply; passed to the synthesis, so the voice stays
+#                  the same.
+#   repeat_speed - the slower repeat of the question (help step 1). The
+#                  repeat plays the saved audio at a lower rate, which also
+#                  lowers the voice a little (tts.slowed_playback).
+SPEECH_SPEED_MIN = 0.5
+SPEECH_SPEED_MAX = 1.5
+SPEECH_SPEED = float(_num("speech_speed", 1.0, minimum=SPEECH_SPEED_MIN,
+                          maximum=SPEECH_SPEED_MAX))
+REPEAT_SPEED = float(_num("repeat_speed", 1.0, minimum=SPEECH_SPEED_MIN,
+                          maximum=SPEECH_SPEED_MAX))
 
 # =====================================================================
 # Compute devices

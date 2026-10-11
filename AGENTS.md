@@ -293,6 +293,20 @@ the key differ.
   `is_new_topic_command()` matches the bare command whatever the case and
   punctuation of recognition, and `topic_command()` is the phrase
   `new topic: <topic>` that the Commands line of the prompt explains.
+- [`speakloop/proactive.py`](speakloop/proactive.py) - the help ladder of the
+  proactive tutor, pure and without config
+  ([`docs/proactive-tutor-spec.md`](docs/proactive-tutor-spec.md)):
+  `is_enabled()` resolves the `proactive` setting ("auto" follows the lesson
+  file, and there is none yet, so it is off), `lesson_command()` tells a
+  command from a phrase (both forms of "new topic"), `countdown_marks()` gives
+  the times of the last 3 seconds of a wait. `Ladder` holds the step: 0 is the
+  wait, 1 the slower repeat, 2 simpler, 3 hint, and `advance()` returns None
+  after the last help step (the lesson pauses then). An answer resets it, a
+  manual "simpler" or "hint" moves it to that step (never back), "new topic"
+  resets it and "finish" stops it until the next phrase. `begin_take()` resets
+  it but keeps the old step, which `take_was_empty()` gives back: Space starts
+  a take, but a take without speech is no answer. Not used by app.py yet
+  except for `is_enabled` (P1b of the spec wires the timers and the window).
 - [`speakloop/contract.py`](speakloop/contract.py) - pure code for the output
   contract: `parse_reply()` gives a `Reply` (`note`, `say`, `summary`, `raw`,
   `follows_contract`). SUMMARY takes everything from its line to the end,
@@ -336,6 +350,14 @@ the key differ.
   line is appended as the event happens and the markdown view is built from
   the kept records at the end, which is why the machine form is the one that
   is written first: markdown can be built from jsonl, not the other way round.
+  Schema 2 adds the proactive tutor: the `meta` record carries `proactive`
+  (the resolved flag), `proactive_wait_seconds`, `speech_speed` and
+  `repeat_speed`; `escalation` (text: the question, `step`) and `pause`
+  (`action`, `reason`) are new record types, and `SOURCE_AUTO` marks a command
+  the program sent for a learner who did not answer. The markdown view shows
+  such a command as an italic "no answer" line and never as the learner's
+  phrase, shows the step 1 escalation the same way, and leaves the other
+  escalations (their command line already shows them) and `pause` to the jsonl.
   `SCHEMA_VERSION` is what a reader checks; raise it when a field changes its
   meaning, not when an optional one is added. No file is created before the
   first record, and app.py creates the writer only when the lesson opens (its
@@ -420,11 +442,16 @@ the key differ.
   offload; the value is logged because it is not on the command line.
 - [`speakloop/tts.py`](speakloop/tts.py) - two roles: a **synthesis backend**
   per engine (`KokoroBackend` on torch at 24 kHz, `SupertonicBackend` on ONNX at
-  44.1 kHz), selected from the `TTS_BACKENDS` registry by the active variant's
+  44.1 kHz; both synthesize at `config.SPEECH_SPEED`, so a slower tutor keeps
+  its voice), selected from the `TTS_BACKENDS` registry by the active variant's
   data and never by an `if language` branch; and the **playback** path
   (`play_array`), winsound on Windows and sounddevice elsewhere. `TTSManager`
   is the facade: `synthesize()` then `play_array()`, with `sample_rate` taken
-  from the active backend - callers must never assume a rate. The winsound path
+  from the active backend - callers must never assume a rate. `slowed_playback()`
+  is the slower repeat of a question: the same waveform at a lower playback
+  rate, as Mimora's slow replay does (no synthesis, the voice gets a little
+  lower), and never faster than 1.0. A method that keeps the pitch replaces
+  this one function. The winsound path
   deliberately takes **no** `audio_io.AUDIO_LOCK`: winsound does not touch
   PortAudio, and holding the lock there made a new recording wait for the speech
   to end, which cut the beginning off the take.
@@ -439,7 +466,8 @@ the key differ.
   `silence_threshold`, `stt_device`, `accent`, `voice`, `color_theme`, `llm_backend`,
   `lm_studio_host`, `llama_server_path`, `external_model_path`,
   `external_n_ctx`, `external_n_gpu_layers`, `first_topic`, `prompt_file`,
-  `show_notes`);
+  `show_notes`, `proactive`, `proactive_wait_seconds`, `speech_speed`,
+  `repeat_speed`);
   keep
   `config/settings.example.json` in step (a test checks it).
   `EXTERNAL_N_GPU_LAYERS` is a **string** (`"auto"`, `"all"` or digits, from
@@ -466,6 +494,11 @@ the key differ.
   `TRANSCRIPT_DIR` names the transcript directory; the files inside it are
   named per lesson by `transcript.py`, which is why only the directory is
   resolved here.
+  The proactive tutor reads four keys: `PROACTIVE` (`"auto"`, true or false,
+  checked by `_proactive_setting` by type, because `1 == True`; app.py resolves
+  it with `proactive.is_enabled`), `PROACTIVE_WAIT_SECONDS` (minimum 3, room
+  for the countdown), and `SPEECH_SPEED` and `REPEAT_SPEED` (0.5..1.5, default
+  1.0, so a file without them keeps the old speech).
   `SHOW_NOTES` (key `show_notes`) is the one value the application writes
   back: `save_user_setting()` is the only writer of `settings.json`
   (`SETTINGS_FILE`), through `loader.save_setting`, which re-reads the file and
@@ -636,7 +669,8 @@ capture thread against a stand-in `sd.InputStream`, so it is the one file with
 short waits in it; `tests/test_tts.py` replaces the synthesis backend and never
 loads a model; `tests/test_languages.py` imports the profile modules alone and
 needs neither config nor torch, and so do `tests/test_prompt.py` (which also
-reads the shipped prompt file), `tests/test_topics.py` (which also reads the
+reads the shipped prompt file), `tests/test_proactive.py`,
+`tests/test_topics.py` (which also reads the
 shipped topic list), `tests/test_contract.py` and
 `tests/test_conversation.py` (a stand-in for `LLMManager`).
 `tests/test_transcript.py` needs neither config nor torch either; its writer

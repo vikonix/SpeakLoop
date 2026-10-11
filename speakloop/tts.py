@@ -31,7 +31,7 @@ import os
 import time
 import wave
 from threading import Event, Thread
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import sounddevice as sd
@@ -153,7 +153,11 @@ class KokoroBackend:
         if self.model is None or self.pipeline is None:
             raise RuntimeError("TTS model not loaded. Call load_model() first.")
 
-        generator = self.pipeline(text, voice=voice, model=self.model)
+        # The tutor's speed (config.SPEECH_SPEED) is given to the synthesis
+        # and not applied at playback: Kokoro then speaks slower in the same
+        # voice, while a lower playback rate would also lower the voice.
+        generator = self.pipeline(text, voice=voice, model=self.model,
+                                  speed=config.SPEECH_SPEED)
 
         audio_chunks = []
         for _, _, audio in generator:
@@ -221,8 +225,9 @@ class SupertonicBackend:
         """Synthesize *text* with *voice*; mono float32 at 44.1 kHz.
 
         The caller (TTSManager) has normalized the text and resolved the voice,
-        so both arguments are non-empty here. Speed stays 1.0 (the package
-        default is 1.05): the partner must speak at a neutral speed.
+        so both arguments are non-empty here. The speed is the tutor's speed
+        from config (1.0 by default) and never the package default of 1.05:
+        the partner must speak at the speed the learner chose.
         """
         if self._tts is None:
             raise RuntimeError("TTS model not loaded. Call load_model() first.")
@@ -232,7 +237,7 @@ class SupertonicBackend:
             voice_style=self._style(voice),
             lang=config.TTS_LANG_CODE,
             total_steps=config.TTS_TOTAL_STEPS,
-            speed=1.0,
+            speed=config.SPEECH_SPEED,
             verbose=False,
         )
         # The package returns shape (1, samples); flatten to the mono float32
@@ -247,6 +252,24 @@ TTS_BACKENDS = {
     "kokoro": KokoroBackend,
     "supertonic": SupertonicBackend,
 }
+
+
+def slowed_playback(waveform: np.ndarray, sample_rate: int,
+                    factor: float) -> Tuple[np.ndarray, int]:
+    """The waveform and the rate to play it at *factor* of its speed.
+
+    The slower repeat of a question (docs/proactive-tutor-spec.md, 6.6). The
+    same method as Mimora's slow replay: the waveform stays as it is and is
+    played at a lower rate, so it costs no synthesis and no extra library. The
+    voice becomes lower too (at 0.89 by about 2 semitones). All of that is in
+    this one function, so a method that keeps the pitch (for example
+    librosa.effects.time_stretch) replaces only this function.
+
+    A factor above 1.0 is taken as 1.0: the repeat is never faster than the
+    normal speech.
+    """
+    factor = min(factor, 1.0)
+    return waveform, int(sample_rate * factor)
 
 
 class TTSManager:

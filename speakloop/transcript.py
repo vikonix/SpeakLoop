@@ -34,6 +34,20 @@ TYPE_SAY = "say"
 TYPE_SUMMARY = "summary"
 TYPE_SYSTEM = "system"
 TYPE_BROKEN = "broken"
+# The proactive tutor (docs/proactive-tutor-spec.md, section 9). An
+# "escalation" is one help step after a wait without an answer: its text is the
+# question and its "step" field the step. A "pause" has an empty text, an
+# "action" ("start" or "end") and a "reason".
+TYPE_ESCALATION = "escalation"
+TYPE_PAUSE = "pause"
+
+# The values of the "action" and "reason" fields of a pause record.
+PAUSE_START = "start"
+PAUSE_END = "end"
+PAUSE_BY_BUTTON = "button"
+PAUSE_BY_KEY = "key"
+PAUSE_BY_FOCUS = "focus"
+PAUSE_AT_LADDER_END = "ladder_end"
 
 # Where a phrase of the learner came from. Only a "voice" phrase can hold a
 # recognition error, which is what tells a mistake of the learner from a
@@ -41,10 +55,13 @@ TYPE_BROKEN = "broken"
 SOURCE_VOICE = "voice"
 SOURCE_TEXT = "text"
 SOURCE_BUTTON = "button"
+# A command the program sent for the learner, because they did not answer.
+# The learner did not say it, so the readable view does not show it as theirs.
+SOURCE_AUTO = "auto"
 
 # The schema of the records. Raise it when a field changes its meaning or goes
 # away; a new optional field does not need a new number.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # The name of the two files of a lesson, without the extension. Minutes and no
 # seconds: two lessons in one minute would need the same file. That does not
@@ -66,7 +83,21 @@ _MD_SUMMARY = "Summary"
 # The record types the markdown view shows, in the order they were written.
 # The service lines ("system") and a reply outside the contract ("broken") stay
 # in the jsonl alone: the view is the lesson, not the run of the application.
-_MD_TYPES = (TYPE_LEARNER, TYPE_NOTE, TYPE_SAY, TYPE_SUMMARY)
+_MD_TYPES = (TYPE_LEARNER, TYPE_NOTE, TYPE_SAY, TYPE_SUMMARY,
+             TYPE_ESCALATION)
+
+# The readable line of a command the program sent (SOURCE_AUTO), per command.
+# An unknown command still gets a line, with its own word.
+_MD_AUTO_COMMANDS = {
+    "simpler": "*(no answer: simpler question)*",
+    "hint": "*(no answer: hint)*",
+}
+_MD_AUTO_OTHER = "*(no answer: {command})*"
+# The readable line of the slower repeat (help step 1). The help steps 2 and 3
+# are shown by the line of their command, so their escalation is not shown
+# again.
+_MD_REPEAT = "*(no answer: question repeated slower)*"
+_REPEAT_STEP = 1
 
 
 def file_stem(started_at: datetime) -> str:
@@ -86,11 +117,16 @@ def timestamp(moment: datetime) -> str:
 
 def meta_record(started_at: datetime, target_language: str,
                 explanation_language: str, first_topic: str, llm_model: str,
-                stt_model: str, tts_voice: str) -> dict:
+                stt_model: str, tts_voice: str, proactive: bool,
+                proactive_wait_seconds: float, speech_speed: float,
+                repeat_speed: float) -> dict:
     """The first line of the file: what this lesson was.
 
     Everything here is fixed for the whole lesson, so it is written once and
-    not repeated on every event.
+    not repeated on every event. The proactive settings are here because a
+    reader of the lesson must know whether the program helped the learner,
+    and how fast: a long pause means more without help than with it.
+    *proactive* is the resolved value (on or off), not the "auto" setting.
     """
     return {
         "type": TYPE_META,
@@ -102,6 +138,10 @@ def meta_record(started_at: datetime, target_language: str,
         "llm_model": llm_model,
         "stt_model": stt_model,
         "tts_voice": tts_voice,
+        "proactive": proactive,
+        "proactive_wait_seconds": proactive_wait_seconds,
+        "speech_speed": speech_speed,
+        "repeat_speed": repeat_speed,
     }
 
 
@@ -184,7 +224,12 @@ def _markdown_block(record: dict) -> Optional[str]:
     if record_type not in _MD_TYPES:
         return None
     text = record.get("text", "")
+    if record_type == TYPE_ESCALATION:
+        return _MD_REPEAT if record.get("step") == _REPEAT_STEP else None
     if record_type == TYPE_LEARNER:
+        if record.get("source") == SOURCE_AUTO:
+            return _MD_AUTO_COMMANDS.get(
+                text, _MD_AUTO_OTHER.format(command=text))
         return f"**{_MD_LEARNER}:** {text}"
     if record_type == TYPE_NOTE:
         return f"*{_MD_NOTE}: {text}*"

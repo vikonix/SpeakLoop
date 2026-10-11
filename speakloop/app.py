@@ -40,8 +40,8 @@ import numpy as np
 # config first: it sets HF_HOME, the Supertonic cache and the offline switch,
 # which huggingface_hub reads when stt and tts import their engines below.
 from speakloop import config
-from speakloop import (bootstrap, detect_hardware, lifecycle, prompt,
-                       topics, transcript)
+from speakloop import (bootstrap, detect_hardware, lifecycle, proactive,
+                       prompt, topics, transcript)
 from speakloop.contract import Reply, split_sentences, strip_markdown
 from speakloop.conversation import Lesson, context_level_reached
 from speakloop.llm import (EmptyCutReplyError, LLMManager, error_message,
@@ -265,7 +265,13 @@ class VoiceTutorController:
                 first_topic=self._topics_used[0],
                 llm_model=self._chat_model_name(),
                 stt_model=config.WHISPER_MODEL,
-                tts_voice=config.TTS_VOICE))
+                tts_voice=config.TTS_VOICE,
+                # No lesson file exists yet, so "auto" resolves to off.
+                proactive=proactive.is_enabled(config.PROACTIVE,
+                                               has_lesson_file=False),
+                proactive_wait_seconds=config.PROACTIVE_WAIT_SECONDS,
+                speech_speed=config.SPEECH_SPEED,
+                repeat_speed=config.REPEAT_SPEED))
 
     def _next_turn(self) -> int:
         """Give a new phrase of the learner its number. (Any thread.)

@@ -46,7 +46,11 @@ def _meta():
         first_topic="shopping",
         llm_model="gemma-4-12B-it-QAT-Q4_0.gguf",
         stt_model="Systran/faster-whisper-large-v3",
-        tts_voice="af_heart")
+        tts_voice="af_heart",
+        proactive=True,
+        proactive_wait_seconds=10.0,
+        speech_speed=0.9,
+        repeat_speed=0.8)
 
 
 class FileNameTests(unittest.TestCase):
@@ -92,6 +96,18 @@ class MetaRecordTests(unittest.TestCase):
         self.assertEqual(record["first_topic"], "shopping")
         self.assertEqual(record["llm_model"], "gemma-4-12B-it-QAT-Q4_0.gguf")
         self.assertEqual(record["tts_voice"], "af_heart")
+
+    def test_it_holds_the_proactive_settings(self):
+        # The reader of the lesson must know whether the program helped.
+        record = _meta()
+        self.assertIs(record["proactive"], True)
+        self.assertEqual(record["proactive_wait_seconds"], 10.0)
+        self.assertEqual(record["speech_speed"], 0.9)
+        self.assertEqual(record["repeat_speed"], 0.8)
+
+    def test_the_schema_is_two(self):
+        # Version 2 adds the proactive records and the "auto" source.
+        self.assertEqual(transcript.SCHEMA_VERSION, 2)
 
 
 class EventRecordTests(unittest.TestCase):
@@ -194,6 +210,48 @@ class MarkdownTests(unittest.TestCase):
     def test_the_file_ends_with_one_line_break(self):
         self.assertTrue(self._view().endswith("\n"))
         self.assertFalse(self._view().endswith("\n\n"))
+
+
+class ProactiveMarkdownTests(unittest.TestCase):
+    """The help steps in the readable view (docs/proactive-tutor-spec.md, 9.3)."""
+
+    def _view(self, *records):
+        return transcript.to_markdown(_meta(), list(records))
+
+    def _auto(self, command):
+        return transcript.event_record(_LATER, 2, transcript.TYPE_LEARNER,
+                                       command,
+                                       source=transcript.SOURCE_AUTO)
+
+    def _escalation(self, step):
+        return transcript.event_record(_LATER, 1, transcript.TYPE_ESCALATION,
+                                       "Where did you go?", step=step)
+
+    def test_an_auto_command_is_not_shown_as_the_learner(self):
+        # The learner did not say it.
+        view = self._view(self._auto("simpler"), self._auto("hint"))
+        self.assertNotIn("**You:**", view)
+        self.assertIn("*(no answer: simpler question)*", view)
+        self.assertIn("*(no answer: hint)*", view)
+
+    def test_an_unknown_auto_command_still_gets_a_line(self):
+        self.assertIn("*(no answer: example)*",
+                      self._view(self._auto("example")))
+
+    def test_the_repeat_is_shown_once(self):
+        view = self._view(self._escalation(1))
+        self.assertIn("*(no answer: question repeated slower)*", view)
+
+    def test_the_other_help_steps_are_shown_by_their_command_only(self):
+        view = self._view(self._escalation(2), self._auto("simpler"))
+        self.assertEqual(view.count("no answer"), 1)
+
+    def test_a_pause_stays_in_the_jsonl(self):
+        record = transcript.event_record(
+            _LATER, 1, transcript.TYPE_PAUSE, "",
+            action=transcript.PAUSE_START,
+            reason=transcript.PAUSE_AT_LADDER_END)
+        self.assertNotIn("ladder_end", self._view(record))
 
 
 class WriterTests(unittest.TestCase):
